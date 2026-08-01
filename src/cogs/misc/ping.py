@@ -9,7 +9,6 @@ class Ping(commands.Cog):
 
     @app_commands.command(name="ping", description="Check the bot's latency.")
     async def ping(self, interaction: discord.Interaction):
-        """Check the bot's latency."""
         latency = round(self.bot.latency * 1000)  # Convert to milliseconds
 
         await interaction.response.send_message(f'Pong! Latency: {latency}ms')

@@ -3,6 +3,8 @@ import logging
 import os
 import sys
 
+from notebooklm import NotebookLMClient
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
 
 from dotenv import load_dotenv
@@ -19,10 +21,10 @@ async def main():
         logging.error("Please set DISCORD_TOKEN")
         exit(1)
 
-    bot = VSummaryBot()
-
-    logging.info("Bot is connecting...")
-    await bot.start(TOKEN)
+    async with NotebookLMClient.from_storage() as client:
+        bot = VSummaryBot(notebook_client=client)
+        logging.info("Bot is connecting...")
+        await bot.start(TOKEN)
 
 
 if __name__ == "__main__":
