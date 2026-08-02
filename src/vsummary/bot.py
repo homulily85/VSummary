@@ -3,7 +3,7 @@ from discord.ext import commands
 from notebooklm import NotebookLMClient
 
 
-class VSummaryBot(commands.Bot):
+class Bot(commands.Bot):
     def __init__(self, notebook_client: NotebookLMClient):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -12,8 +12,8 @@ class VSummaryBot(commands.Bot):
 
     async def setup_hook(self):
         cogs = [
-            "cogs.misc.ping",
-            "cogs.summarizer.summarizer"
+            "vsummary.cogs.misc.ping",
+            "vsummary.cogs.summarizer.summarizer"
         ]
 
         for cog in cogs:

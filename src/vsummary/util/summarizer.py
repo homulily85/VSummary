@@ -1,8 +1,9 @@
 import logging
 
 from notebooklm import NotebookLMClient
-from rich import json
-from src.model.video import Video, Topic
+import json
+
+from vsummary.model.video import Video, Topic
 
 
 async def _get_or_create_topic_list(client: NotebookLMClient, video_link: str) -> Video:
@@ -77,6 +78,7 @@ async def get_topic_details(client: NotebookLMClient, video_link: str, topic_ind
     await video.save()
     logging.info(f"Topic detail saved to database.")
     return {"topic_name": topics[topic_index].name, "detail": topics[topic_index].detail}
+
 
 async def get_topic_details_all(client: NotebookLMClient, video_link: str):
     video = await _get_or_create_topic_list(client, video_link)

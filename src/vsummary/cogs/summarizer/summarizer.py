@@ -4,7 +4,8 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
-from src.util.summarizer import get_topic_list, get_topic_details, get_topic_details_all
+
+from vsummary.util.summarizer import get_topic_list, get_topic_details, get_topic_details_all
 
 
 class Summarizer(commands.Cog):
