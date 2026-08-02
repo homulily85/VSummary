@@ -1,7 +1,10 @@
+import traceback
+from typing import Optional
+
 import discord
 from discord import app_commands
 from discord.ext import commands
-from src.util.summarizer import get_topic_list, get_topic_details
+from src.util.summarizer import get_topic_list, get_topic_details, get_topic_details_all
 
 
 class Summarizer(commands.Cog):
@@ -22,16 +25,24 @@ class Summarizer(commands.Cog):
 
     @app_commands.command(name="detail",
                           description="Get details about a specific topic in the video.")
-    async def detail(self, interaction: discord.Interaction, video_link: str, topic_index: int):
+    async def detail(self, interaction: discord.Interaction, video_link: str,
+                     topic_index: Optional[int] = None):
         await interaction.response.defer(thinking=True)
 
         try:
+            if topic_index is None:
+                details = await get_topic_details_all(self.bot.notebook_client, video_link)
+                for i, detail in enumerate(details):
+                    await interaction.followup.send(
+                        "\n\n".join([f"**{i + 1}. {detail['topic_name']}**\n{detail['detail']}"]))
+                return
             detail = await get_topic_details(self.bot.notebook_client, video_link, topic_index - 1)
-            await interaction.followup.send(detail)
+            await interaction.followup.send(f"**{detail['topic_name']}**\n{detail['detail']}")
         except IndexError:
             await interaction.followup.send(f"Invalid topic index: {topic_index}")
-        except Exception as e:
-            await interaction.followup.send(f"Unexpected error occurred: {e}")
+        except Exception:
+            traceback.print_exc()
+            await interaction.followup.send("Unexpected error occurred. Please try again later.")
 
 
 async def setup(bot):

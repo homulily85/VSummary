@@ -5,7 +5,7 @@ from rich import json
 from src.model.video import Video, Topic
 
 
-async def _get_or_create_video(client: NotebookLMClient, video_link: str) -> Video:
+async def _get_or_create_topic_list(client: NotebookLMClient, video_link: str) -> Video:
     logging.info(f"Checking if video is already in database...")
     video = await Video.find_one(Video.link == video_link)
     if video and video.topics:
@@ -51,12 +51,12 @@ async def _get_or_create_video(client: NotebookLMClient, video_link: str) -> Vid
 
 async def get_topic_list(client: NotebookLMClient, video_link: str):
     logging.info(f"Getting topics from {video_link}")
-    video = await _get_or_create_video(client, video_link)
+    video = await _get_or_create_topic_list(client, video_link)
     return video.topics
 
 
 async def get_topic_details(client: NotebookLMClient, video_link: str, topic_index: int):
-    video = await _get_or_create_video(client, video_link)
+    video = await _get_or_create_topic_list(client, video_link)
     topics = video.topics
 
     if topic_index < 0 or topic_index >= len(topics):
@@ -64,7 +64,7 @@ async def get_topic_details(client: NotebookLMClient, video_link: str, topic_ind
 
     if topics[topic_index].detail:
         logging.info(f"Topic details already exist in database, returning...")
-        return topics[topic_index].detail
+        return {"topic_name": topics[topic_index].name, "detail": topics[topic_index].detail}
 
     notebook = await client.notebooks.get(video.notebook_id)
     prompt = (f"What did the speaker talk about '{topics[topic_index].name}'? Return topic details "
@@ -76,4 +76,8 @@ async def get_topic_details(client: NotebookLMClient, video_link: str, topic_ind
     topics[topic_index].detail = response.answer
     await video.save()
     logging.info(f"Topic detail saved to database.")
-    return topics[topic_index].detail
+    return {"topic_name": topics[topic_index].name, "detail": topics[topic_index].detail}
+
+async def get_topic_details_all(client: NotebookLMClient, video_link: str):
+    video = await _get_or_create_topic_list(client, video_link)
+    return [await get_topic_details(client, video_link, i) for i in range(len(video.topics))]
