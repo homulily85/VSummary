@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-from src.util.summarizer import get_topic_list
+from src.util.summarizer import get_topic_list, get_topic_details
 
 
 class Summarizer(commands.Cog):
@@ -13,12 +13,25 @@ class Summarizer(commands.Cog):
         await interaction.response.defer(thinking=True)
 
         topics = await get_topic_list(self.bot.notebook_client, video_link)
-        topics_list = [f"{topic.index + 1}: {topic.name}" for topic in topics]
+        topics_list = [f"{i + 1}: {topic.name}" for i, topic in enumerate(topics)]
 
         topics_str = "\n".join(topics_list)
 
         await interaction.followup.send(
             f"Here are the topics mentioned in the video:\n{topics_str}")
+
+    @app_commands.command(name="detail",
+                          description="Get details about a specific topic in the video.")
+    async def detail(self, interaction: discord.Interaction, video_link: str, topic_index: int):
+        await interaction.response.defer(thinking=True)
+
+        try:
+            detail = await get_topic_details(self.bot.notebook_client, video_link, topic_index - 1)
+            await interaction.followup.send(detail)
+        except IndexError:
+            await interaction.followup.send(f"Invalid topic index: {topic_index}")
+        except Exception as e:
+            await interaction.followup.send(f"Unexpected error occurred: {e}")
 
 
 async def setup(bot):

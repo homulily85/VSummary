@@ -6,8 +6,7 @@ from pydantic import BaseModel
 
 class Topic(BaseModel):
     name: str
-    index: int
-    description: Optional[str] = None
+    detail: Optional[str] = None
 
 
 class Video(Document):
