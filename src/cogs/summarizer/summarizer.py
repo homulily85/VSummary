@@ -1,7 +1,6 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-from rich import json
 from src.util.summarizer import get_topic_list
 
 
@@ -13,8 +12,9 @@ class Summarizer(commands.Cog):
     async def topics(self, interaction: discord.Interaction, video_link: str):
         await interaction.response.defer(thinking=True)
 
-        topics = json.loads(await get_topic_list(self.bot.notebook_client, video_link))
-        topics_list = [f"{topic['index']}: {topic['name']}" for topic in topics]
+        topics = await get_topic_list(self.bot.notebook_client, video_link)
+        topics_list = [f"{topic.index + 1}: {topic.name}" for topic in topics]
+
         topics_str = "\n".join(topics_list)
 
         await interaction.followup.send(

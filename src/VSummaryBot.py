@@ -20,4 +20,3 @@ class VSummaryBot(commands.Bot):
             await self.load_extension(cog)
 
         await self.tree.sync()
-
