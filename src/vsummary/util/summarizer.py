@@ -82,4 +82,32 @@ async def get_topic_details(client: NotebookLMClient, video_link: str, topic_ind
 
 async def get_topic_details_all(client: NotebookLMClient, video_link: str):
     video = await _get_or_create_topic_list(client, video_link)
-    return [await get_topic_details(client, video_link, i) for i in range(len(video.topics))]
+    topics = video.topics
+
+    results = []
+    needs_db_save = False
+    notebook = None
+
+    for topic in topics:
+        if topic.detail:
+            results.append({"topic_name": topic.name, "detail": topic.detail})
+        else:
+            if notebook is None:
+                notebook = await client.notebooks.get(video.notebook_id)
+
+            prompt = (f"What did the speaker talk about '{topic.name}'? Return topic details "
+                      f"only, do not include any other text in your response.")
+            logging.info(f"Asking notebook for details on topic: '{topic.name}'...")
+
+            response = await client.chat.ask(notebook.id, prompt)
+            topic.detail = response.answer
+            needs_db_save = True
+
+            results.append({"topic_name": topic.name, "detail": topic.detail})
+
+    if needs_db_save:
+        logging.info("Saving all newly fetched topic details to database in a single batch...")
+        await video.save()
+        logging.info("Batch save complete.")
+
+    return results

@@ -30,15 +30,37 @@ class Summarizer(commands.Cog):
                      topic_index: Optional[int] = None):
         await interaction.response.defer(thinking=True)
 
+        async def send_chunked_message(text: str):
+            """
+            Helper function to handle sending messages over Discord's 2000 char limit
+            """
+            while len(text) > 2000:
+                # Find a suitable split point to avoid breaking words/lines
+                split_index = text.rfind('\n', 0, 2000)
+                if split_index == -1:
+                    split_index = text.rfind('.', 0, 200000)
+                    if split_index == -1:
+                        split_index = 2000  # Fallback to hard limit if no suitable split point
+                        # is found
+
+                await interaction.followup.send(text[:split_index])
+                text = text[split_index:].lstrip()  # Remove leading newlines for the next chunk
+
+            if text:
+                await interaction.followup.send(text)
+
         try:
             if topic_index is None:
                 details = await get_topic_details_all(self.bot.notebook_client, video_link)
                 for i, detail in enumerate(details):
-                    await interaction.followup.send(
-                        "\n\n".join([f"**{i + 1}. {detail['topic_name']}**\n{detail['detail']}"]))
-                return
-            detail = await get_topic_details(self.bot.notebook_client, video_link, topic_index - 1)
-            await interaction.followup.send(f"**{detail['topic_name']}**\n{detail['detail']}")
+                    message = f"**{i + 1}. {detail['topic_name']}**\n{detail['detail']}"
+                    await send_chunked_message(message)
+            else:
+                detail = await get_topic_details(self.bot.notebook_client, video_link,
+                                                 topic_index - 1)
+                message = f"**{detail['topic_name']}**\n{detail['detail']}"
+                await send_chunked_message(message)
+
         except IndexError:
             await interaction.followup.send(f"Invalid topic index: {topic_index}")
         except Exception:
