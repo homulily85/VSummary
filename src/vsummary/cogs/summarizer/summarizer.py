@@ -85,6 +85,10 @@ class Summarizer(commands.Cog):
 
         except IndexError:
             await interaction.followup.send(f"Invalid topic index: {topic_index}")
+        except SourceAddError:
+            await interaction.followup.send(
+                "Please ensure the link is correct and try again."
+            )
 
 
 async def setup(bot):
