@@ -2,7 +2,10 @@ import json
 import logging
 
 from notebooklm import NotebookLMClient, SourceAddError
-from vsummary.model.video import Video, Topic
+
+from vsummary.model.video import Topic, Video
+
+logger = logging.getLogger(__name__)
 
 
 async def _get_or_create_topic_list(client: NotebookLMClient, video_link: str) -> Video:
@@ -12,13 +15,14 @@ async def _get_or_create_topic_list(client: NotebookLMClient, video_link: str) -
     :param video_link: The link to the video for which to get or create the topic list
     :return: The video object with its topic list
     """
-    logging.info(f"Checking if video {video_link} is already in database...")
+    logger.info(f"Checking if video {video_link} is already in database...")
     video = await Video.find_one(Video.link == video_link)
     if video and video.topics:
         return video
 
-    logging.info(
-        f"Video {video_link} not found in database, creating notebook and adding source...")
+    logger.info(
+        f"Video {video_link} not found in database, creating notebook and adding source..."
+    )
 
     notebook = await client.notebooks.create(video_link)
     try:
@@ -40,10 +44,10 @@ async def _get_or_create_topic_list(client: NotebookLMClient, video_link: str) -
        Return json only, do not include any other text in your response.
        """
 
-    logging.info(f"Asking notebook {notebook.id} for topics...")
+    logger.info(f"Asking notebook {notebook.id} for topics...")
     response = await client.chat.ask(notebook.id, prompt)
 
-    logging.info(f"Parsing response and saving topics to database...")
+    logger.info("Parsing response and saving topics to database...")
     topics = json.loads(response.answer)
 
     topics_objects = []
@@ -57,17 +61,19 @@ async def _get_or_create_topic_list(client: NotebookLMClient, video_link: str) -
         video = Video(link=video_link, notebook_id=notebook.id, topics=topics_objects)
 
     await video.save()
-    logging.info(f"Topics saved to database for video {video_link}.")
+    logger.info(f"Topics saved to database for video {video_link}.")
     return video
 
 
 async def get_topic_list(client: NotebookLMClient, video_link: str):
-    logging.info(f"Getting topics from {video_link}")
+    logger.info(f"Getting topics from {video_link}")
     video = await _get_or_create_topic_list(client, video_link)
     return video.topics
 
 
-async def get_topic_details(client: NotebookLMClient, video_link: str, topic_index: int):
+async def get_topic_details(
+    client: NotebookLMClient, video_link: str, topic_index: int
+):
     video = await _get_or_create_topic_list(client, video_link)
     topics = video.topics
 
@@ -75,20 +81,28 @@ async def get_topic_details(client: NotebookLMClient, video_link: str, topic_ind
         raise IndexError(f"Invalid topic index: {topic_index}")
 
     if topics[topic_index].detail:
-        logging.info(f"Topic details already exist in database, returning...")
-        return {"topic_name": topics[topic_index].name, "detail": topics[topic_index].detail}
+        logger.info("Topic details already exist in database, returning...")
+        return {
+            "topic_name": topics[topic_index].name,
+            "detail": topics[topic_index].detail,
+        }
 
     notebook = await client.notebooks.get(video.notebook_id)
-    prompt = (f"What did the speaker talk about '{topics[topic_index].name}'? Return topic details "
-              f"only, do not include any other text in your response.")
-    logging.info(f"Asking notebook for topic details...")
+    prompt = (
+        f"What did the speaker talk about '{topics[topic_index].name}'? Return topic details "
+        f"only, do not include any other text in your response."
+    )
+    logger.info("Asking notebook for topic details...")
     response = await client.chat.ask(notebook.id, prompt)
 
-    logging.info(f"Parsing response and saving details to database...")
+    logger.info("Parsing response and saving details to database...")
     topics[topic_index].detail = response.answer
     await video.save()
-    logging.info(f"Topic detail saved to database.")
-    return {"topic_name": topics[topic_index].name, "detail": topics[topic_index].detail}
+    logger.info("Topic detail saved to database.")
+    return {
+        "topic_name": topics[topic_index].name,
+        "detail": topics[topic_index].detail,
+    }
 
 
 async def get_topic_details_all(client: NotebookLMClient, video_link: str):
@@ -106,9 +120,11 @@ async def get_topic_details_all(client: NotebookLMClient, video_link: str):
             if notebook is None:
                 notebook = await client.notebooks.get(video.notebook_id)
 
-            prompt = (f"What did the speaker talk about '{topic.name}'? Return topic details "
-                      f"only, do not include any other text in your response.")
-            logging.info(f"Asking notebook for details on topic: '{topic.name}'...")
+            prompt = (
+                f"What did the speaker talk about '{topic.name}'? Return topic details "
+                f"only, do not include any other text in your response."
+            )
+            logger.info(f"Asking notebook for details on topic: '{topic.name}'...")
 
             response = await client.chat.ask(notebook.id, prompt)
             topic.detail = response.answer
@@ -117,10 +133,11 @@ async def get_topic_details_all(client: NotebookLMClient, video_link: str):
             results.append({"topic_name": topic.name, "detail": topic.detail})
 
     if needs_db_save:
-        logging.info(
+        logger.info(
             f"Saving all newly fetched topic details to database for video {video_link} in a "
-            f"single batch...")
+            f"single batch..."
+        )
         await video.save()
-        logging.info("Batch save complete.")
+        logger.info("Batch save complete.")
 
     return results

@@ -1,11 +1,13 @@
-import traceback
-from typing import Optional
-
 import discord
 from discord import app_commands
 from discord.ext import commands
 from notebooklm import SourceAddError
-from vsummary.util.summarizer import get_topic_list, get_topic_details, get_topic_details_all
+
+from vsummary.util.summarizer import (
+    get_topic_details,
+    get_topic_details_all,
+    get_topic_list,
+)
 
 
 class Summarizer(commands.Cog):
@@ -19,15 +21,19 @@ class Summarizer(commands.Cog):
         """
         while len(text) > 2000:
             # Find a suitable split point to avoid breaking words/lines
-            split_index = text.rfind('\n', 0, 2000)
+            split_index = text.rfind("\n", 0, 2000)
             if split_index == -1:
-                split_index = text.rfind('.', 0, 200000)
+                split_index = text.rfind(".", 0, 200000)
                 if split_index == -1:
-                    split_index = 2000  # Fallback to hard limit if no suitable split point
+                    split_index = (
+                        2000  # Fallback to hard limit if no suitable split point
+                    )
                     # is found
 
             await interaction.followup.send(text[:split_index])
-            text = text[split_index:].lstrip()  # Remove leading newlines for the next chunk
+            text = text[
+                split_index:
+            ].lstrip()  # Remove leading newlines for the next chunk
 
         if text:
             await interaction.followup.send(text)
@@ -42,39 +48,43 @@ class Summarizer(commands.Cog):
 
             topics_str = "\n".join(topics_list)
 
-            await self.send_chunked_message(interaction,
-                                            f"Here are the topics mentioned in the video:\n"
-                                            f"{topics_str}")
+            await self.send_chunked_message(
+                interaction,
+                f"Here are the topics mentioned in the video:\n{topics_str}",
+            )
         except SourceAddError:
             await interaction.followup.send(
-                "Please ensure the link is correct and try again.")
-        except Exception:
-            traceback.print_exc()
-            await interaction.followup.send("Unexpected error occurred. Please try again later.")
+                "Please ensure the link is correct and try again."
+            )
 
-    @app_commands.command(name="detail",
-                          description="Get details about a specific topic in the video.")
-    async def detail(self, interaction: discord.Interaction, video_link: str,
-                     topic_index: Optional[int] = None):
+    @app_commands.command(
+        name="detail", description="Get details about a specific topic in the video."
+    )
+    async def detail(
+        self,
+        interaction: discord.Interaction,
+        video_link: str,
+        topic_index: int | None = None,
+    ):
         await interaction.response.defer(thinking=True)
 
         try:
             if topic_index is None:
-                details = await get_topic_details_all(self.bot.notebook_client, video_link)
+                details = await get_topic_details_all(
+                    self.bot.notebook_client, video_link
+                )
                 for i, detail in enumerate(details):
                     message = f"**{i + 1}. {detail['topic_name']}**\n{detail['detail']}"
                     await self.send_chunked_message(interaction, message)
             else:
-                detail = await get_topic_details(self.bot.notebook_client, video_link,
-                                                 topic_index - 1)
+                detail = await get_topic_details(
+                    self.bot.notebook_client, video_link, topic_index - 1
+                )
                 message = f"**{detail['topic_name']}**\n{detail['detail']}"
                 await self.send_chunked_message(interaction, message)
 
         except IndexError:
             await interaction.followup.send(f"Invalid topic index: {topic_index}")
-        except Exception:
-            traceback.print_exc()
-            await interaction.followup.send("Unexpected error occurred. Please try again later.")
 
 
 async def setup(bot):

@@ -15,6 +15,12 @@ dependencies = [
     "notebooklm-py",
 ]
 
+[dependency-groups]
+dev = [
+    "ruff>=0.16",
+    "pre-commit>=4.6.1",
+]
+
 [project.scripts]
 vsummary = "vsummary.main:main"
 
