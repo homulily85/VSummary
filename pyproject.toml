@@ -20,6 +20,8 @@ dev = [
     "ruff>=0.16",
     "pre-commit>=4.6.1",
     "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-mock>=3.15.1",
 ]
 
 [project.scripts]
@@ -30,3 +32,7 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

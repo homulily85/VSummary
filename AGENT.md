@@ -7,12 +7,63 @@ bot that summarizes videos using NotebookLM.
 
 - **Name:** `vsummary`
 - **Purpose:** Discord bot that takes video links/content, feeds them into
-  NotebookLM, and posts back a summary in Discord.
+  NotebookLM, and posts back a summary (and possibly other NotebookLM
+  artifacts — podcasts, reports, quizzes, etc.) in Discord.
 - **Language / runtime:** Python >= 3.12
 - **Package manager / build backend:** `uv` (see `uv.lock`) with
   `setuptools` as the PEP 517 build backend.
 - **Entry point:** console script `vsummary` → `vsummary.main:main`
   (see `[project.scripts]` in `pyproject.toml`).
+
+## Testing policy (mandatory — read before writing any code)
+
+This project requires a **test-first** workflow. Follow this loop for
+every change, no exceptions:
+
+1. **Write the test(s) first.** Before implementing or modifying any
+   feature, add or update the relevant test file under `tests/`
+   (`test_cogs.py`, `test_summarizer.py`, `test_youtube.py`, or a new
+   `tests/test_<module>.py` for a new module). The test(s) should express
+   the desired behavior and are expected to **fail** at this point since
+   the implementation doesn't exist/isn't updated yet.
+2. **Confirm the new test fails** for the expected reason:
+   `uv run pytest tests/test_<module>.py -v`. If it passes immediately,
+   the test isn't actually exercising the new behavior — fix the test.
+3. **Implement (or modify) the feature** in `src/vsummary/...` to make the
+   test pass. Keep the implementation focused on satisfying the test(s)
+   plus the actual requirements — don't gold-plate.
+4. **Run the full suite, not just the new test:**
+   ```bash
+   uv run pytest
+   ```
+   Every test must pass — both the new/updated tests and every
+   pre-existing test in `tests/`. A change is not complete if it breaks
+   an unrelated test; either the change or the affected test needs to be
+   fixed (never silently delete/skip a test to make the suite green
+   without understanding why it broke).
+5. **Lint before wrapping up:** `uv run ruff check --fix .` and
+   `uv run ruff format .`.
+
+Rules of thumb:
+- **New feature or new module** (e.g. a new cog, a new `util/` helper) →
+  create a corresponding `tests/test_<module>.py` first, with tests for
+  the intended public behavior (happy path + at least one edge case /
+  error case), before writing the implementation.
+- **Modifying existing code** (`bot.py`, an existing cog, `util/summarizer.py`,
+  `util/youtube.py`, `model/video.py`, etc.) → first update or extend the
+  corresponding existing test file (`test_cogs.py`, `test_summarizer.py`,
+  `test_youtube.py`, ...) to cover the new/changed behavior, confirm it
+  fails against the old implementation, then change the implementation.
+- **Bug fixes** → write a regression test that reproduces the bug first
+  (it should fail), then fix the code so it passes.
+- Discord- and NotebookLM-facing code should be tested with mocks/fakes
+  for `discord.py` objects and the `notebooklm` client (do not hit real
+  Discord or NotebookLM/Google services in tests) — check `tests/`
+  for the existing mocking patterns and reuse them rather than
+  inventing a new style.
+- Never mark a task/feature as done, and never report success to the
+  user, unless `uv run pytest` has been run and every test passes and
+  `ruff check`/`ruff format` are clean.
 
 ## Tech stack
 
@@ -39,7 +90,13 @@ src/vsummary/
 ├── model/
 │   └── video.py          # Beanie Document model(s) describing a "video" record
 └── util/
-    └── summarizer.py      # NotebookLM integration logic (non-Discord-specific helpers)
+    ├── summarizer.py     # NotebookLM integration logic (non-Discord-specific helpers)
+    └── youtube.py        # YouTube URL/ID parsing & metadata helpers
+
+tests/
+├── test_cogs.py          # tests for the Discord-facing cog layer
+├── test_summarizer.py    # tests for util/summarizer.py (NotebookLM logic)
+└── test_youtube.py       # tests for util/youtube.py
 ```
 
 Notes for agents:
@@ -56,6 +113,15 @@ Notes for agents:
   `Document` subclasses, and must be registered with
   `beanie.init_beanie(...)` during bot startup (likely in `bot.py` or
   `main.py`).
+- `util/youtube.py` holds YouTube-specific helpers (e.g. URL parsing/
+  validation, video ID extraction, maybe metadata lookups) used by
+  `util/summarizer.py` and/or the summarizer cog. Keep it free of Discord
+  and NotebookLM-client dependencies so it stays easily unit-testable.
+- `tests/` mirrors the modules it covers on a roughly 1:1 basis
+  (`test_cogs.py` ↔ `cogs/`, `test_summarizer.py` ↔ `util/summarizer.py`,
+  `test_youtube.py` ↔ `util/youtube.py`). When you add a new module or
+  cog, add a matching `tests/test_<module>.py` following this convention
+  — see "Testing policy (mandatory)" below.
 
 ## Setup & common commands
 
@@ -90,11 +156,26 @@ uv run pre-commit install
 
 # Run pre-commit on all files
 uv run pre-commit run --all-files
+
+# Run the full test suite
+uv run pytest
+
+# Run a single test file
+uv run pytest tests/test_summarizer.py
+
+# Run a single test by name, with verbose output
+uv run pytest tests/test_youtube.py::test_extract_video_id -v
+
+# Run tests with coverage (if pytest-cov is installed)
+uv run pytest --cov=vsummary --cov-report=term-missing
 ```
 
-There is no test suite in the tree yet. If you add tests, prefer `pytest`
-and add it to the `dev` dependency group in `pyproject.toml`, plus a
-`[tool.pytest.ini_options]` section if custom config is needed.
+Tests live in `tests/` and use `pytest` (see `pyproject.toml` for the
+`pytest`/`pytest-asyncio`/etc. dev dependencies actually pinned — check
+before assuming plugin availability, e.g. whether async tests use
+`pytest-asyncio` markers or `anyio`). **Always run tests with `uv run
+pytest`, not a bare `pytest` or `python -m pytest`**, so the project's
+locked virtual environment is used.
 
 ## Environment / configuration
 
@@ -188,5 +269,14 @@ especially:
 - `bot.py` and `main.py` — real startup/config/env-var behavior.
 - `model/video.py` — the actual Beanie schema and how it relates to
   Discord messages/users and NotebookLM notebook/source IDs.
-- `cogs/summarizer/summarizer.py` vs `util/summarizer.py` — the exact
-  split of responsibilities currently implemented.
+- `cogs/summarizer/summarizer.py` vs `util/summarizer.py` vs
+  `util/youtube.py` — the exact split of responsibilities currently
+  implemented.
+- The `tests/` files — read the existing tests first to learn the actual
+  mocking/fixture conventions in use (e.g. how a `discord.py` context is
+  faked, how the `notebooklm` client is stubbed) before adding new tests,
+  so new tests stay consistent with the existing style.
+- The `dev` dependency group in `pyproject.toml` — confirm exactly which
+  test-related packages (`pytest`, `pytest-asyncio`, `pytest-cov`,
+  mocking libs, etc.) are actually pinned before assuming a plugin/marker
+  is available.
