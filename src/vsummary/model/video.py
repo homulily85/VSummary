@@ -8,6 +8,7 @@ class Topic(BaseModel):
 
 
 class Video(Document):
-    link: str
+    source: str
+    video_id: str
     notebook_id: str
     topics: list[Topic] | None = None

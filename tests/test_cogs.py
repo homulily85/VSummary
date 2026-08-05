@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from vsummary.cogs.misc.ping import Ping
 from vsummary.cogs.summarizer.summarizer import Summarizer
+from vsummary.util.video import UnsupportedVideoSource, VideoRef
 
 
 class TestSendChunkedMessage:
@@ -65,8 +66,9 @@ class TestTopicsCommand:
         topics[0].name = "alpha"
         topics[1].name = "beta"
 
+        ref = VideoRef(source="youtube", id="dQw4w9WgXcQ")
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.to_video_url", return_value="url"
+            "vsummary.cogs.summarizer.summarizer.parse_video_ref", return_value=ref
         )
         mocker.patch(
             "vsummary.cogs.summarizer.summarizer.get_topic_list",
@@ -87,11 +89,9 @@ class TestTopicsCommand:
         cog = self._make_cog()
         interaction = self._make_interaction()
 
-        from vsummary.util.youtube import InvalidYouTubeInputError
-
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.to_video_url",
-            side_effect=InvalidYouTubeInputError("bad"),
+            "vsummary.cogs.summarizer.summarizer.parse_video_ref",
+            side_effect=UnsupportedVideoSource("bad"),
         )
 
         await cog.topics.callback(cog, interaction, video="bad!")
@@ -131,8 +131,9 @@ class TestDetailCommand:
         cog = self._make_cog()
         interaction = self._make_interaction()
 
+        ref = VideoRef(source="youtube", id="dQw4w9WgXcQ")
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.to_video_url", return_value="url"
+            "vsummary.cogs.summarizer.summarizer.parse_video_ref", return_value=ref
         )
         get_details = mocker.patch(
             "vsummary.cogs.summarizer.summarizer.get_topic_details",
@@ -142,15 +143,16 @@ class TestDetailCommand:
         await cog.detail.callback(cog, interaction, video="dQw4w9WgXcQ", topic_index=2)
 
         # topic_index is converted to 0-based (2 -> 1).
-        get_details.assert_awaited_once_with(cog.bot.notebook_client, "url", 1)
+        get_details.assert_awaited_once_with(cog.bot.notebook_client, ref, 1)
         interaction.followup.send.assert_awaited_once_with("**alpha**\nsome detail")
 
     async def test_all_topics_when_index_is_none(self, mocker):
         cog = self._make_cog()
         interaction = self._make_interaction()
 
+        ref = VideoRef(source="youtube", id="dQw4w9WgXcQ")
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.to_video_url", return_value="url"
+            "vsummary.cogs.summarizer.summarizer.parse_video_ref", return_value=ref
         )
         mocker.patch(
             "vsummary.cogs.summarizer.summarizer.get_topic_details_all",
@@ -177,11 +179,9 @@ class TestDetailCommand:
         cog = self._make_cog()
         interaction = self._make_interaction()
 
-        from vsummary.util.youtube import InvalidYouTubeInputError
-
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.to_video_url",
-            side_effect=InvalidYouTubeInputError("bad"),
+            "vsummary.cogs.summarizer.summarizer.parse_video_ref",
+            side_effect=UnsupportedVideoSource("bad"),
         )
 
         await cog.detail.callback(cog, interaction, video="bad!", topic_index=None)
@@ -193,8 +193,9 @@ class TestDetailCommand:
         cog = self._make_cog()
         interaction = self._make_interaction()
 
+        ref = VideoRef(source="youtube", id="dQw4w9WgXcQ")
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.to_video_url", return_value="url"
+            "vsummary.cogs.summarizer.summarizer.parse_video_ref", return_value=ref
         )
         mocker.patch(
             "vsummary.cogs.summarizer.summarizer.get_topic_details",
@@ -211,8 +212,9 @@ class TestDetailCommand:
 
         from notebooklm import SourceAddError
 
+        ref = VideoRef(source="youtube", id="dQw4w9WgXcQ")
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.to_video_url", return_value="url"
+            "vsummary.cogs.summarizer.summarizer.parse_video_ref", return_value=ref
         )
         mocker.patch(
             "vsummary.cogs.summarizer.summarizer.get_topic_details_all",

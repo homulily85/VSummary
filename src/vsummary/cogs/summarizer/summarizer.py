@@ -8,7 +8,7 @@ from vsummary.util.summarizer import (
     get_topic_details_all,
     get_topic_list,
 )
-from vsummary.util.youtube import InvalidYouTubeInputError, to_video_url
+from vsummary.util.video import UnsupportedVideoSource, parse_video_source
 
 
 class Summarizer(commands.Cog):
@@ -45,15 +45,15 @@ class Summarizer(commands.Cog):
         interaction: discord.Interaction,
         video: str,
     ):
-        """Get the topic list from a YouTube video.
+        """Get the topic list from a video.
 
-        ``video`` may be a full YouTube link or a bare video ID.
+        ``video`` may be a full link or a bare video ID.
         """
         try:
             await interaction.response.defer(thinking=True)
 
-            video_link = to_video_url(video)
-            topics = await get_topic_list(self.bot.notebook_client, video_link)
+            ref = parse_video_source(video)
+            topics = await get_topic_list(self.bot.notebook_client, ref)
             topics_list = [f"{i + 1}: {topic.name}" for i, topic in enumerate(topics)]
 
             topics_str = "\n".join(topics_list)
@@ -62,11 +62,11 @@ class Summarizer(commands.Cog):
                 interaction,
                 f"Here are the topics mentioned in the video:\n{topics_str}",
             )
-        except InvalidYouTubeInputError as exc:
+        except UnsupportedVideoSource as exc:
             await interaction.followup.send(str(exc))
         except SourceAddError:
             await interaction.followup.send(
-                "Please ensure the link is correct and try again."
+                "Please ensure the link or id is correct and try again."
             )
 
     @app_commands.command(
@@ -78,35 +78,33 @@ class Summarizer(commands.Cog):
         video: str,
         topic_index: int | None = None,
     ):
-        """Get details about a topic in a YouTube video.
+        """Get details about a topic in a video.
 
-        ``video`` may be a full YouTube link or a bare video ID.
+        ``video`` may be a full link or a bare video ID.
         """
         await interaction.response.defer(thinking=True)
 
         try:
-            video_link = to_video_url(video)
+            ref = parse_video_source(video)
             if topic_index is None:
-                details = await get_topic_details_all(
-                    self.bot.notebook_client, video_link
-                )
+                details = await get_topic_details_all(self.bot.notebook_client, ref)
                 for i, detail in enumerate(details):
                     message = f"**{i + 1}. {detail['topic_name']}**\n{detail['detail']}"
                     await self.send_chunked_message(interaction, message)
             else:
                 detail = await get_topic_details(
-                    self.bot.notebook_client, video_link, topic_index - 1
+                    self.bot.notebook_client, ref, topic_index - 1
                 )
                 message = f"**{detail['topic_name']}**\n{detail['detail']}"
                 await self.send_chunked_message(interaction, message)
 
-        except InvalidYouTubeInputError as exc:
+        except UnsupportedVideoSource as exc:
             await interaction.followup.send(str(exc))
         except IndexError:
             await interaction.followup.send(f"Invalid topic index: {topic_index}")
         except SourceAddError:
             await interaction.followup.send(
-                "Please ensure the link is correct and try again."
+                "Please ensure the link or id is correct and try again."
             )
 
 

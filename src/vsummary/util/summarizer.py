@@ -4,19 +4,22 @@ import logging
 from notebooklm import NotebookLMClient, SourceAddError
 
 from vsummary.model.video import Topic, Video
+from vsummary.util.video import VideoRef, build_video_url
 
 logger = logging.getLogger(__name__)
 
 
-async def _get_or_create_topic_list(client: NotebookLMClient, video_link: str) -> Video:
+async def _get_or_create_topic_list(client: NotebookLMClient, ref: VideoRef) -> Video:
     """
     Get the topic list for a video, creating it if it doesn't exist.
     :param client: The NotebookLMClient instance to use for interacting with the notebook service
-    :param video_link: The link to the video for which to get or create the topic list
+    :param ref: The video reference (source + id) for which to get or create the topic list
     :return: The video object with its topic list
     """
+    video_link = build_video_url(ref)
+
     logger.info(f"Checking if video {video_link} is already in database...")
-    video = await Video.find_one(Video.link == video_link)
+    video = await Video.find_one(Video.source == ref.source, Video.video_id == ref.id)
     if video and video.topics:
         return video
 
@@ -58,23 +61,26 @@ async def _get_or_create_topic_list(client: NotebookLMClient, video_link: str) -
         video.notebook_id = notebook.id
         video.topics = topics_objects
     else:
-        video = Video(link=video_link, notebook_id=notebook.id, topics=topics_objects)
+        video = Video(
+            source=ref.source,
+            video_id=ref.id,
+            notebook_id=notebook.id,
+            topics=topics_objects,
+        )
 
     await video.save()
     logger.info(f"Topics saved to database for video {video_link}.")
     return video
 
 
-async def get_topic_list(client: NotebookLMClient, video_link: str):
-    logger.info(f"Getting topics from {video_link}")
-    video = await _get_or_create_topic_list(client, video_link)
+async def get_topic_list(client: NotebookLMClient, ref: VideoRef):
+    logger.info(f"Getting topics from {ref}")
+    video = await _get_or_create_topic_list(client, ref)
     return video.topics
 
 
-async def get_topic_details(
-    client: NotebookLMClient, video_link: str, topic_index: int
-):
-    video = await _get_or_create_topic_list(client, video_link)
+async def get_topic_details(client: NotebookLMClient, ref: VideoRef, topic_index: int):
+    video = await _get_or_create_topic_list(client, ref)
     topics = video.topics
 
     if topic_index < 0 or topic_index >= len(topics):
@@ -105,8 +111,8 @@ async def get_topic_details(
     }
 
 
-async def get_topic_details_all(client: NotebookLMClient, video_link: str):
-    video = await _get_or_create_topic_list(client, video_link)
+async def get_topic_details_all(client: NotebookLMClient, ref: VideoRef):
+    video = await _get_or_create_topic_list(client, ref)
     topics = video.topics
 
     results = []
@@ -134,7 +140,7 @@ async def get_topic_details_all(client: NotebookLMClient, video_link: str):
 
     if needs_db_save:
         logger.info(
-            f"Saving all newly fetched topic details to database for video {video_link} in a "
+            f"Saving all newly fetched topic details to database for video {ref} in a "
             f"single batch..."
         )
         await video.save()

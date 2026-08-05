@@ -6,13 +6,19 @@ from notebooklm import SourceAddError as NotebookLM_SourceAddError
 
 from vsummary.model.video import Topic
 from vsummary.util import summarizer as summarizer_module
+from vsummary.util.video import VideoRef
+
+REF = VideoRef(source="youtube", id="dQw4w9WgXcQ")
 
 
 class FakeVideo:
     """Stand-in for the beanie Video document (no DB initialization needed)."""
 
-    def __init__(self, link="link", notebook_id="nb-1", topics=None):
-        self.link = link
+    def __init__(
+        self, source="youtube", video_id="vid", notebook_id="nb-1", topics=None
+    ):
+        self.source = source
+        self.video_id = video_id
         self.notebook_id = notebook_id
         self.topics = topics or []
         self.save = AsyncMock()
@@ -21,7 +27,9 @@ class FakeVideo:
 class FakeVideoClass:
     """Fake Video model class patched in place of the real beanie model."""
 
-    link = MagicMock()
+    source = MagicMock()
+    video_id = MagicMock()
+    find_one = AsyncMock()
 
     def __init__(self, find_result):
         self.find_one = AsyncMock(return_value=find_result)
@@ -77,7 +85,7 @@ class TestGetTopicList:
         client = FakeClient()
         patch_video(mocker, video)
 
-        result = await summarizer_module.get_topic_list(client, "link")
+        result = await summarizer_module.get_topic_list(client, REF)
         assert result == topics
         # Cached path should not create a notebook nor save.
         assert not client.notebooks.create.await_count
@@ -88,7 +96,7 @@ class TestGetTopicList:
         client = FakeClient(answer=json.dumps([{"name": "alpha"}]))
         patch_video(mocker, None)
 
-        await summarizer_module.get_topic_list(client, "link")
+        await summarizer_module.get_topic_list(client, REF)
         assert client.notebooks.create.await_count == 1
         assert client.sources.add_url.await_count == 1
         assert not client.notebooks.delete.await_count
@@ -101,7 +109,7 @@ class TestGetTopicList:
         patch_video(mocker, None)
 
         with pytest.raises(NotebookLM_SourceAddError):
-            await summarizer_module.get_topic_list(client, "link")
+            await summarizer_module.get_topic_list(client, REF)
         assert client.notebooks.create.await_count == 1
         assert client.notebooks.delete.await_count == 1
 
@@ -110,7 +118,7 @@ class TestGetTopicList:
         client = FakeClient(answer=json.dumps([{"name": "alpha"}]))
         patch_video(mocker, video)
 
-        await summarizer_module.get_topic_list(client, "link")
+        await summarizer_module.get_topic_list(client, REF)
         assert video.save.await_count == 1
         assert video.notebook_id == "nb-1"
         assert [t.name for t in video.topics] == ["alpha"]
@@ -122,7 +130,7 @@ class TestGetTopicDetails:
         client = FakeClient()
         patch_video(mocker, video)
 
-        result = await summarizer_module.get_topic_details(client, "link", 0)
+        result = await summarizer_module.get_topic_details(client, REF, 0)
         assert result == {"topic_name": "alpha", "detail": "cached"}
         assert not client.chat.ask.await_count
         assert not video.save.await_count
@@ -132,7 +140,7 @@ class TestGetTopicDetails:
         client = FakeClient(answer="fresh detail")
         patch_video(mocker, video)
 
-        result = await summarizer_module.get_topic_details(client, "link", 0)
+        result = await summarizer_module.get_topic_details(client, REF, 0)
         assert result == {"topic_name": "alpha", "detail": "fresh detail"}
         assert client.notebooks.get.await_count == 1
         assert video.save.await_count == 1
@@ -145,7 +153,7 @@ class TestGetTopicDetails:
         patch_video(mocker, video)
 
         with pytest.raises(IndexError):
-            await summarizer_module.get_topic_details(client, "link", index)
+            await summarizer_module.get_topic_details(client, REF, index)
 
 
 class TestGetTopicDetailsAll:
@@ -156,7 +164,7 @@ class TestGetTopicDetailsAll:
         client = FakeClient(answer="fetched")
         patch_video(mocker, video)
 
-        results = await summarizer_module.get_topic_details_all(client, "link")
+        results = await summarizer_module.get_topic_details_all(client, REF)
         assert results == [
             {"topic_name": "a", "detail": "d1"},
             {"topic_name": "b", "detail": "fetched"},
@@ -170,7 +178,7 @@ class TestGetTopicDetailsAll:
         client = FakeClient()
         patch_video(mocker, video)
 
-        results = await summarizer_module.get_topic_details_all(client, "link")
+        results = await summarizer_module.get_topic_details_all(client, REF)
         assert results == [{"topic_name": "a", "detail": "d1"}]
         assert not client.notebooks.get.await_count
         assert not video.save.await_count
