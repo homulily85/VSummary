@@ -40,6 +40,7 @@ class Summarizer(commands.Cog):
             await interaction.followup.send(text)
 
     @app_commands.command(name="topics", description="Get topic list from a video.")
+    @app_commands.describe(video="The video URL or ID (for YouTube only) to summarize.")
     async def topics(
         self,
         interaction: discord.Interaction,
@@ -71,6 +72,10 @@ class Summarizer(commands.Cog):
 
     @app_commands.command(
         name="detail", description="Get details about a specific topic in the video."
+    )
+    @app_commands.describe(
+        video="The video URL or ID (for YouTube only) to summarize.",
+        topic_index="The index of the topic to get details for (1-based).",
     )
     async def detail(
         self,
