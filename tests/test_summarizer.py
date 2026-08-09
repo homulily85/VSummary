@@ -14,12 +14,9 @@ REF = VideoRef(source="youtube", id="dQw4w9WgXcQ")
 class FakeVideo:
     """Stand-in for the beanie Video document (no DB initialization needed)."""
 
-    def __init__(
-        self, source="youtube", video_id="vid", notebook_id="nb-1", topics=None
-    ):
+    def __init__(self, source="youtube", video_id="vid", topics=None):
         self.source = source
         self.video_id = video_id
-        self.notebook_id = notebook_id
         self.topics = topics or []
         self.save = AsyncMock()
 
@@ -46,7 +43,7 @@ def patch_video(mocker, find_result):
 
 
 class FakeNotebook:
-    def __init__(self, notebook_id="nb-1"):
+    def __init__(self, notebook_id="nb-42"):
         self.id = notebook_id
 
 
@@ -99,7 +96,7 @@ class TestGetTopicList:
         await summarizer_module.get_topic_list(client, REF)
         assert client.notebooks.create.await_count == 1
         assert client.sources.add_url.await_count == 1
-        assert not client.notebooks.delete.await_count
+        assert client.notebooks.delete.await_count == 1
 
     async def test_deletes_notebook_on_source_add_error(self, mocker):
         client = FakeClient()
@@ -120,7 +117,7 @@ class TestGetTopicList:
 
         await summarizer_module.get_topic_list(client, REF)
         assert video.save.await_count == 1
-        assert video.notebook_id == "nb-1"
+        assert not hasattr(video, "notebook_id")
         assert [t.name for t in video.topics] == ["alpha"]
 
 
@@ -142,7 +139,9 @@ class TestGetTopicDetails:
 
         result = await summarizer_module.get_topic_details(client, REF, 0)
         assert result == {"topic_name": "alpha", "detail": "fresh detail"}
-        assert client.notebooks.get.await_count == 1
+        assert not client.notebooks.get.await_count
+        assert client.notebooks.create.await_count == 1
+        assert client.notebooks.delete.await_count == 1
         assert video.save.await_count == 1
         assert video.topics[0].detail == "fresh detail"
 
@@ -169,8 +168,10 @@ class TestGetTopicDetailsAll:
             {"topic_name": "a", "detail": "d1"},
             {"topic_name": "b", "detail": "fetched"},
         ]
-        # Notebook fetched once; single batched save.
-        assert client.notebooks.get.await_count == 1
+        # Single notebook created and deleted; single batched save.
+        assert not client.notebooks.get.await_count
+        assert client.notebooks.create.await_count == 1
+        assert client.notebooks.delete.await_count == 1
         assert video.save.await_count == 1
 
     async def test_no_save_when_all_cached(self, mocker):
@@ -213,3 +214,100 @@ class TestTopicOverlapRegression:
         prompt_lower = prompt.lower()
         assert "first" in prompt_lower
         assert "second" in prompt_lower
+
+
+class TestNotebookLifecycle:
+    """Once cached, topic queries must not need a stored notebook_id.
+
+    Every call that actually queries NotebookLM must create a fresh notebook
+    and delete it when finished, so no notebook handle is ever persisted.
+    """
+
+    async def test_topic_list_cached_skips_notebook_creation(self, mocker):
+        topics = [Topic(name="alpha")]
+        video = FakeVideo(topics=topics)
+        client = FakeClient()
+        patch_video(mocker, video)
+
+        await summarizer_module.get_topic_list(client, REF)
+        assert not client.notebooks.create.await_count
+        assert not client.notebooks.delete.await_count
+
+    async def test_topic_list_miss_deletes_created_notebook(self, mocker):
+        client = FakeClient(answer=json.dumps([{"name": "alpha"}]))
+        patch_video(mocker, None)
+
+        result = await summarizer_module.get_topic_list(client, REF)
+        assert client.notebooks.create.await_count == 1
+        assert client.notebooks.delete.await_count == 1
+        assert [t.name for t in result] == ["alpha"]
+
+    async def test_topic_details_cached_skips_notebook_creation(self, mocker):
+        video = FakeVideo(topics=[Topic(name="alpha", detail="cached")])
+        client = FakeClient()
+        patch_video(mocker, video)
+
+        result = await summarizer_module.get_topic_details(client, REF, 0)
+        assert result == {"topic_name": "alpha", "detail": "cached"}
+        assert not client.notebooks.create.await_count
+        assert not client.notebooks.delete.await_count
+
+    async def test_topic_details_miss_deletes_created_notebook(self, mocker):
+        video = FakeVideo(topics=[Topic(name="alpha", detail=None)])
+        client = FakeClient(answer="fresh detail")
+        patch_video(mocker, video)
+
+        result = await summarizer_module.get_topic_details(client, REF, 0)
+        assert result == {"topic_name": "alpha", "detail": "fresh detail"}
+        assert client.notebooks.create.await_count == 1
+        assert client.notebooks.delete.await_count == 1
+        assert (
+            client.notebooks.create.return_value.id
+            == client.notebooks.delete.await_args.args[0]
+        )
+
+    async def test_topic_details_index_error_deletes_created_notebook(self, mocker):
+        # No cached topics means topic extraction created a temporary notebook;
+        # an invalid index afterward must still clean it up.
+        client = FakeClient(answer=json.dumps([{"name": "alpha"}]))
+        patch_video(mocker, None)
+
+        with pytest.raises(IndexError):
+            await summarizer_module.get_topic_details(client, REF, 5)
+        assert client.notebooks.create.await_count == 1
+        assert client.notebooks.delete.await_count == 1
+
+    async def test_topic_details_does_not_use_notebooks_get(self, mocker):
+        video = FakeVideo(topics=[Topic(name="alpha", detail=None)])
+        client = FakeClient(answer="fresh detail")
+        patch_video(mocker, video)
+
+        await summarizer_module.get_topic_details(client, REF, 0)
+        assert not client.notebooks.get.await_count
+
+    async def test_topic_details_all_reuses_created_notebook(self, mocker):
+        video = FakeVideo(
+            topics=[Topic(name="a", detail=None), Topic(name="b", detail=None)]
+        )
+        client = FakeClient(answer="fetched")
+        patch_video(mocker, video)
+
+        results = await summarizer_module.get_topic_details_all(client, REF)
+        assert results == [
+            {"topic_name": "a", "detail": "fetched"},
+            {"topic_name": "b", "detail": "fetched"},
+        ]
+        # One notebook supports the whole query, then is deleted.
+        assert client.notebooks.create.await_count == 1
+        assert client.notebooks.delete.await_count == 1
+        assert not client.notebooks.get.await_count
+
+    async def test_topic_details_all_cached_skips_notebook_creation(self, mocker):
+        video = FakeVideo(topics=[Topic(name="a", detail="d1")])
+        client = FakeClient()
+        patch_video(mocker, video)
+
+        results = await summarizer_module.get_topic_details_all(client, REF)
+        assert results == [{"topic_name": "a", "detail": "d1"}]
+        assert not client.notebooks.create.await_count
+        assert not client.notebooks.delete.await_count

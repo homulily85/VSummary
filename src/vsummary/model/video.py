@@ -10,5 +10,4 @@ class Topic(BaseModel):
 class Video(Document):
     source: str
     video_id: str
-    notebook_id: str
     topics: list[Topic] | None = None

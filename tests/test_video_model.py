@@ -6,5 +6,5 @@ class TestVideoModel:
         fields = Video.model_fields
         assert "source" in fields
         assert "video_id" in fields
-        assert "notebook_id" in fields
+        assert "notebook_id" not in fields
         assert "link" not in fields
