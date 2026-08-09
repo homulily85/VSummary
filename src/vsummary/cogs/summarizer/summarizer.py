@@ -67,7 +67,7 @@ class Summarizer(commands.Cog):
             await interaction.followup.send(str(exc))
         except SourceAddError:
             await interaction.followup.send(
-                "Please ensure the link or id is correct and try again."
+                "Provided link or id is invalid or no transcript available."
             )
 
     @app_commands.command(
@@ -109,7 +109,7 @@ class Summarizer(commands.Cog):
             await interaction.followup.send(f"Invalid topic index: {topic_index}")
         except SourceAddError:
             await interaction.followup.send(
-                "Please ensure the link or id is correct and try again."
+                "Provided link or id is invalid or no transcript available."
             )
 
 
