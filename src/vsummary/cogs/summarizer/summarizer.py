@@ -10,16 +10,101 @@ from vsummary.util.summarizer import (
 )
 from vsummary.util.video import UnsupportedVideoSource, parse_video_source
 
+ALL_TOPICS_LABEL = "All topics"
+
+
+class TopicsView(discord.ui.View):
+    """Message components attached to the /topics result for picking details."""
+
+    def __init__(self, bot, ref, topics, *, timeout: float | None = 180.0):
+        super().__init__(timeout=timeout)
+        self.bot = bot
+        self.ref = ref
+
+        options = [
+            discord.SelectOption(
+                label=topic.name[:100],
+                value=str(i + 1),
+            )
+            for i, topic in enumerate(topics[:25])
+        ]
+        self.topic_select = discord.ui.Select(
+            placeholder="Choose a topic for details...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.topic_select.callback = self.on_topic_selected
+        self.add_item(self.topic_select)
+
+        self.all_button = discord.ui.Button(
+            label=ALL_TOPICS_LABEL,
+            style=discord.ButtonStyle.secondary,
+        )
+        self.all_button.callback = self.on_all_topics
+        self.add_item(self.all_button)
+
+    def disable_all_components(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def on_topic_selected(self, interaction: discord.Interaction):
+        await self._handle_detail_request(
+            interaction,
+            send_details=self._send_selected_topic_detail,
+        )
+
+    async def on_all_topics(self, interaction: discord.Interaction):
+        await self._handle_detail_request(
+            interaction,
+            send_details=self._send_all_topic_details,
+        )
+
+    async def _handle_detail_request(self, interaction, send_details):
+        await interaction.response.defer()
+        self.disable_all_components()
+        try:
+            await send_details(interaction)
+        except IndexError:
+            await interaction.followup.send(
+                f"Invalid topic index: {int(self.topic_select.values[0])}"
+            )
+        except SourceAddError:
+            await interaction.followup.send(
+                "Provided link or id is invalid or no transcript available."
+            )
+        finally:
+            await interaction.edit_original_response(view=self)
+
+    async def _send_selected_topic_detail(self, interaction):
+        index = int(self.topic_select.values[0]) - 1
+        detail = await get_topic_details(self.bot.notebook_client, self.ref, index)
+        await Summarizer.send_chunked_message(
+            interaction,
+            f"**{detail['topic_name']}**\n{detail['detail']}",
+        )
+
+    async def _send_all_topic_details(self, interaction):
+        details = await get_topic_details_all(self.bot.notebook_client, self.ref)
+        for detail in details:
+            message = f"**{detail['topic_name']}**\n{detail['detail']}"
+            await Summarizer.send_chunked_message(interaction, message)
+
 
 class Summarizer(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
     @staticmethod
-    async def send_chunked_message(interaction: discord.Interaction, text: str):
+    async def send_chunked_message(
+        interaction: discord.Interaction,
+        text: str,
+        view: discord.ui.View | None = None,
+    ):
         """
         Helper function to handle sending messages over Discord's 2000 char limit
         """
+        first = True
         while len(text) > 2000:
             # Find a suitable split point to avoid breaking words/lines
             split_index = text.rfind("\n", 0, 2000)
@@ -31,13 +116,20 @@ class Summarizer(commands.Cog):
                     )
                     # is found
 
-            await interaction.followup.send(text[:split_index])
+            if first and view is not None:
+                await interaction.followup.send(text[:split_index], view=view)
+            else:
+                await interaction.followup.send(text[:split_index])
+            first = False
             text = text[
                 split_index:
             ].lstrip()  # Remove leading newlines for the next chunk
 
         if text:
-            await interaction.followup.send(text)
+            if first and view is not None:
+                await interaction.followup.send(text, view=view)
+            else:
+                await interaction.followup.send(text)
 
     @app_commands.command(name="topics", description="Get topic list from a video.")
     @app_commands.describe(video="The video URL or ID (for YouTube only) to summarize.")
@@ -59,9 +151,20 @@ class Summarizer(commands.Cog):
 
             topics_str = "\n".join(topics_list)
 
+            if len(topics) > 25:
+                topics_str += (
+                    "\n\nOnly the first 25 topics are selectable here. "
+                    "Use /detail for topics with an index larger than 25."
+                )
+
             await self.send_chunked_message(
                 interaction,
                 f"Here are the topics mentioned in the video:\n{topics_str}",
+                view=TopicsView(
+                    bot=self.bot,
+                    ref=ref,
+                    topics=topics,
+                ),
             )
         except UnsupportedVideoSource as exc:
             await interaction.followup.send(str(exc))

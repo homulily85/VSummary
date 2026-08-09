@@ -1,14 +1,11 @@
 import json
 import logging
-from typing import TYPE_CHECKING
 
 from notebooklm import NotebookLMClient, SourceAddError
+from notebooklm.types import Notebook
 
 from vsummary.model.video import Topic, Video
 from vsummary.util.video import VideoRef, build_video_url
-
-if TYPE_CHECKING:
-    from notebooklm.types import Notebook
 
 logger = logging.getLogger(__name__)
 
