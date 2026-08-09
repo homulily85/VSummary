@@ -68,7 +68,7 @@ class TestTopicsCommand:
 
         ref = VideoRef(source="youtube", id="dQw4w9WgXcQ")
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.parse_video_ref", return_value=ref
+            "vsummary.cogs.summarizer.summarizer.parse_video_source", return_value=ref
         )
         mocker.patch(
             "vsummary.cogs.summarizer.summarizer.get_topic_list",
@@ -90,7 +90,7 @@ class TestTopicsCommand:
         interaction = self._make_interaction()
 
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.parse_video_ref",
+            "vsummary.cogs.summarizer.summarizer.parse_video_source",
             side_effect=UnsupportedVideoSource("bad"),
         )
 
@@ -133,7 +133,7 @@ class TestDetailCommand:
 
         ref = VideoRef(source="youtube", id="dQw4w9WgXcQ")
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.parse_video_ref", return_value=ref
+            "vsummary.cogs.summarizer.summarizer.parse_video_source", return_value=ref
         )
         get_details = mocker.patch(
             "vsummary.cogs.summarizer.summarizer.get_topic_details",
@@ -152,7 +152,7 @@ class TestDetailCommand:
 
         ref = VideoRef(source="youtube", id="dQw4w9WgXcQ")
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.parse_video_ref", return_value=ref
+            "vsummary.cogs.summarizer.summarizer.parse_video_source", return_value=ref
         )
         mocker.patch(
             "vsummary.cogs.summarizer.summarizer.get_topic_details_all",
@@ -180,7 +180,7 @@ class TestDetailCommand:
         interaction = self._make_interaction()
 
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.parse_video_ref",
+            "vsummary.cogs.summarizer.summarizer.parse_video_source",
             side_effect=UnsupportedVideoSource("bad"),
         )
 
@@ -195,7 +195,7 @@ class TestDetailCommand:
 
         ref = VideoRef(source="youtube", id="dQw4w9WgXcQ")
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.parse_video_ref", return_value=ref
+            "vsummary.cogs.summarizer.summarizer.parse_video_source", return_value=ref
         )
         mocker.patch(
             "vsummary.cogs.summarizer.summarizer.get_topic_details",
@@ -214,7 +214,7 @@ class TestDetailCommand:
 
         ref = VideoRef(source="youtube", id="dQw4w9WgXcQ")
         mocker.patch(
-            "vsummary.cogs.summarizer.summarizer.parse_video_ref", return_value=ref
+            "vsummary.cogs.summarizer.summarizer.parse_video_source", return_value=ref
         )
         mocker.patch(
             "vsummary.cogs.summarizer.summarizer.get_topic_details_all",
@@ -226,5 +226,5 @@ class TestDetailCommand:
         )
 
         interaction.followup.send.assert_awaited_once_with(
-            "Please ensure the link is correct and try again."
+            "Provided link or id is invalid or no transcript available."
         )

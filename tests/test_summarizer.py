@@ -182,3 +182,34 @@ class TestGetTopicDetailsAll:
         assert results == [{"topic_name": "a", "detail": "d1"}]
         assert not client.notebooks.get.await_count
         assert not video.save.await_count
+
+
+class TestTopicOverlapRegression:
+    """The detail prompts must request non-overlapping topic boundaries."""
+
+    async def test_detail_prompt_names_prev_and_next_topics(self, mocker):
+        video = FakeVideo(
+            topics=[Topic(name="before"), Topic(name="target"), Topic(name="after")]
+        )
+        client = FakeClient(answer="fresh detail")
+        patch_video(mocker, video)
+
+        await summarizer_module.get_topic_details(client, REF, 1)
+
+        prompt = client.chat.ask.await_args.args[1]
+        prompt_lower = prompt.lower()
+        assert "before" in prompt_lower
+        assert "target" in prompt_lower
+        assert "after" in prompt_lower
+
+    async def test_detail_all_prompt_names_next_topic(self, mocker):
+        video = FakeVideo(topics=[Topic(name="first"), Topic(name="second")])
+        client = FakeClient(answer="fetched")
+        patch_video(mocker, video)
+
+        await summarizer_module.get_topic_details_all(client, REF)
+
+        prompt = client.chat.ask.await_args.args[1]
+        prompt_lower = prompt.lower()
+        assert "first" in prompt_lower
+        assert "second" in prompt_lower

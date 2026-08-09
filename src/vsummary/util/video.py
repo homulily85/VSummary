@@ -41,7 +41,7 @@ def parse_video_source(value: str) -> VideoRef:
 def build_video_url(ref: VideoRef) -> str:
     """Reconstruct the full URL for a ``VideoRef``.
 
-    This is the counterpart to :func:`parse_video_ref` and should grow a
+    This is the counterpart to :func:`parse_video_source` and should grow a
     branch per supported source.
     """
     if ref.source == "youtube":

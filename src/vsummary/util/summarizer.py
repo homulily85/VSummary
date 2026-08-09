@@ -9,6 +9,20 @@ from vsummary.util.video import VideoRef, build_video_url
 logger = logging.getLogger(__name__)
 
 
+def _topic_boundaries(topics: list[Topic], topic_index: int) -> dict[str, str]:
+    """Name the topics adjacent to ``topic_index`` for prompt context."""
+    return {
+        "prev": topics[topic_index - 1].name
+        if topic_index > 0
+        else "the start of the video",
+        "next": (
+            topics[topic_index + 1].name
+            if topic_index + 1 < len(topics)
+            else "the end of the video"
+        ),
+    }
+
+
 async def _get_or_create_topic_list(client: NotebookLMClient, ref: VideoRef) -> Video:
     """
     Get the topic list for a video, creating it if it doesn't exist.
@@ -54,7 +68,7 @@ async def _get_or_create_topic_list(client: NotebookLMClient, ref: VideoRef) -> 
     topics = json.loads(response.answer)
 
     topics_objects = []
-    for topic in topics:
+    for i, topic in enumerate(topics):
         topics_objects.append(Topic(name=topic["name"]))
 
     if video:
@@ -94,9 +108,17 @@ async def get_topic_details(client: NotebookLMClient, ref: VideoRef, topic_index
         }
 
     notebook = await client.notebooks.get(video.notebook_id)
+    boundaries = _topic_boundaries(topics, topic_index)
     prompt = (
-        f"What did the speaker talk about '{topics[topic_index].name}'? Return topic details "
-        f"only, do not include any other text in your response."
+        f"This video has a list of topics in order: "
+        f"{', '.join(t.name for t in topics)}. "
+        f"What did the speaker(s) talk about specifically for the topic "
+        f"'{topics[topic_index].name}', and only this topic? "
+        f"Start your answer at the point where the previous topic "
+        f"'{boundaries['prev']}' ends and stop before the next topic "
+        f"'{boundaries['next']}' begins, so your answer does not overlap with "
+        f"either the previous or the next topic. "
+        f"Return topic details only, do not include any other text in your response."
     )
     logger.info("Asking notebook for topic details...")
     response = await client.chat.ask(notebook.id, prompt)
@@ -119,16 +141,25 @@ async def get_topic_details_all(client: NotebookLMClient, ref: VideoRef):
     needs_db_save = False
     notebook = None
 
-    for topic in topics:
+    for i, topic in enumerate(topics):
         if topic.detail:
             results.append({"topic_name": topic.name, "detail": topic.detail})
         else:
             if notebook is None:
                 notebook = await client.notebooks.get(video.notebook_id)
 
+            boundaries = _topic_boundaries(topics, i)
             prompt = (
-                f"What did the speaker talk about '{topic.name}'? Return topic details "
-                f"only, do not include any other text in your response."
+                f"This video has a list of topics in order: "
+                f"{', '.join(t.name for t in topics)}. "
+                f"What did the speaker(s) talk about specifically for the topic "
+                f"'{topic.name}', and only this topic? "
+                f"Start your answer at the point where the previous topic "
+                f"'{boundaries['prev']}' ends and stop before the next topic "
+                f"'{boundaries['next']}' begins, so your answer does not overlap "
+                f"with either the previous or the next topic. "
+                f"Return topic details only, do not include any other text in "
+                f"your response."
             )
             logger.info(f"Asking notebook for details on topic: '{topic.name}'...")
 
