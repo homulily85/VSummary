@@ -1330,6 +1330,7 @@ source = { editable = "." }
 dependencies = [
     { name = "beanie" },
     { name = "discord-py" },
+    { name = "httpx" },
     { name = "python-dotenv" },
 ]
 
@@ -1350,6 +1351,7 @@ dev = [
 requires-dist = [
     { name = "beanie" },
     { name = "discord-py" },
+    { name = "httpx" },
     { name = "python-dotenv" },
 ]
 

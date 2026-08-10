@@ -10,6 +10,7 @@ from pymongo import AsyncMongoClient
 from rich.logging import RichHandler
 
 from vsummary.bot import Bot
+from vsummary.model.channel import Channel, PendingVideo
 from vsummary.model.video import Video
 
 logging.basicConfig(level=logging.INFO, handlers=[RichHandler()])
@@ -31,7 +32,10 @@ async def async_main():
 
     logger.info("Connecting to MongoDB...")
     client = AsyncMongoClient(MONGODB_URI)
-    await init_beanie(database=client.VSummary, document_models=[Video])
+    await init_beanie(
+        database=client.VSummary,
+        document_models=[Channel, PendingVideo, Video],
+    )
     logger.info("Connected to MongoDB!")
 
     async with NotebookLMClient.from_storage() as client:

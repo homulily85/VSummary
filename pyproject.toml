@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv",
     "discord.py",
     "beanie",
+    "httpx",
 ]
 
 [dependency-groups]

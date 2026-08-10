@@ -11,7 +11,11 @@ class Bot(commands.Bot):
         self.notebook_client = notebook_client
 
     async def setup_hook(self):
-        cogs = ["vsummary.cogs.misc.ping", "vsummary.cogs.summarizer.summarizer"]
+        cogs = [
+            "vsummary.cogs.misc.ping",
+            "vsummary.cogs.summarizer.summarizer",
+            "vsummary.cogs.autosummary.autosummary",
+        ]
 
         for cog in cogs:
             await self.load_extension(cog)

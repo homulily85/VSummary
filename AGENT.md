@@ -85,16 +85,23 @@ src/vsummary/
 ├── cogs/                # discord.py cogs (feature modules), auto/explicitly loaded by bot.py
 │   ├── misc/
 │   │   └── ping.py      # simple health-check / latency command
-│   └── summarizer/
-│       └── summarizer.py# Discord-facing commands that trigger video summarization
+│   ├── summarizer/
+│   │   └── summarizer.py# Discord-facing commands that trigger video summarization
+│   └── autosummary/
+│       └── autosummary.py # follow channels and auto-post summaries (Holodex polling)
 ├── model/
-│   └── video.py          # Beanie Document model(s) describing a "video" record
+│   ├── video.py          # Beanie Document model(s) describing a "video" record
+│   └── channel.py        # Channel + PendingVideo document models for auto-summaries
 └── util/
+    ├── holodex.py        # Holodex API client + transcript-ready/backoff helpers
     ├── summarizer.py     # NotebookLM integration logic (non-Discord-specific helpers)
     └── youtube.py        # YouTube URL/ID parsing & metadata helpers
 
 tests/
+├── test_autosummary.py   # tests for the autosummary cog (commands + polling + retries)
 ├── test_cogs.py          # tests for the Discord-facing cog layer
+├── test_holodex.py       # tests for util/holodex.py
+├── test_models.py        # tests for model/channel.py document models
 ├── test_summarizer.py    # tests for util/summarizer.py (NotebookLM logic)
 └── test_youtube.py       # tests for util/youtube.py
 ```
