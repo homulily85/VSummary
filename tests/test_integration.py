@@ -16,6 +16,7 @@ from vsummary.cogs.misc.ping import Ping
 from vsummary.cogs.summarizer.summarizer import Summarizer, TopicsView
 from vsummary.model.channel import PendingVideoStatus
 from vsummary.model.video import Topic
+from vsummary.settings import Settings
 from vsummary.util.holodex import (
     ChannelNotFoundError,
     HolodexChannel,
@@ -192,9 +193,10 @@ class FakeFollowedChannel:
     records: ClassVar[list] = []
     find_one_result: ClassVar[object | None] = None
 
-    def __init__(self, channel_id, name):
+    def __init__(self, channel_id, name, added_at=None):
         self.channel_id = channel_id
         self.name = name
+        self.added_at = added_at or datetime.min.replace(tzinfo=UTC)
         self.deleted = False
 
     @classmethod
@@ -606,6 +608,30 @@ async def test_autosummary_poll_and_process_loops_delegate_each_due_item():
 
 
 @pytest.mark.asyncio
+async def test_autosummary_poll_only_enqueues_videos_released_after_channel_was_added():
+    cog = make_autosummary()
+    added_at = datetime.now(UTC) - timedelta(hours=1)
+    channel = FakeFollowedChannel("UC1", "First", added_at=added_at)
+    FakeFollowedChannel.records = [channel]
+    videos = [
+        HolodexVideo(
+            "before",
+            "Before",
+            None,
+            added_at - timedelta(seconds=1),
+            "First",
+        ),
+        HolodexVideo("after", "After", None, added_at + timedelta(seconds=1), "First"),
+    ]
+    cog.holodex.get_channel_videos = AsyncMock(return_value=videos)
+    cog._enqueue_new_video = AsyncMock()
+
+    await cog.check_new_videos()
+
+    cog._enqueue_new_video.assert_awaited_once_with(videos[1], channel)
+
+
+@pytest.mark.asyncio
 async def test_autosummary_enqueue_skips_ignored_and_duplicate_videos(monkeypatch):
     cog = make_autosummary()
     channel = FakeFollowedChannel("UC1", "Test")
@@ -657,13 +683,16 @@ async def test_autosummary_enqueue_sets_ready_and_delayed_attempt_times(monkeypa
     assert ready_pending.next_attempt_at <= datetime.now(UTC)
 
     delayed_at = datetime.now(UTC) - timedelta(minutes=30)
-    delayed_video = HolodexVideo("delayed", "Delayed", None, delayed_at, "Test")
+    delayed_video = HolodexVideo(
+        "delayed", "Delayed", None, delayed_at, "Test", duration=1800
+    )
 
     await cog._enqueue_new_video(delayed_video, channel)
 
     delayed_pending = FakePendingRecord.records[-1]
     assert abs(
-        delayed_pending.next_attempt_at - (delayed_at + timedelta(hours=2))
+        delayed_pending.next_attempt_at
+        - (delayed_at + timedelta(seconds=1800, hours=2))
     ) < timedelta(seconds=1)
 
 
@@ -791,3 +820,40 @@ async def test_startup_requires_discord_token_and_mongodb_uri(monkeypatch):
         await main_module.async_main()
 
     assert missing_uri.value.code == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_configures_timezone_aware_mongodb_datetimes(monkeypatch):
+    class FakeMongoClient:
+        def __init__(self, uri, **kwargs):
+            self.uri = uri
+            self.kwargs = kwargs
+
+        def __getitem__(self, name):
+            return name
+
+        async def close(self):
+            pass
+
+    mongo_client = None
+
+    def make_client(uri, **kwargs):
+        nonlocal mongo_client
+        mongo_client = FakeMongoClient(uri, **kwargs)
+        return mongo_client
+
+    monkeypatch.setattr(main_module, "AsyncMongoClient", make_client)
+    monkeypatch.setattr(
+        main_module,
+        "init_beanie",
+        AsyncMock(side_effect=RuntimeError("stop after client setup")),
+    )
+
+    with pytest.raises(RuntimeError, match="stop after client setup"):
+        await main_module.async_main(
+            Settings(discord_token="token", mongodb_uri="mongodb://localhost")
+        )
+
+    assert mongo_client is not None
+    assert mongo_client.uri == "mongodb://localhost"
+    assert mongo_client.kwargs == {"tz_aware": True}

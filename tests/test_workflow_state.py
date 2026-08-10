@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from vsummary.cogs.autosummary.autosummary import Autosummary
-from vsummary.model.channel import JobStatus
+from vsummary.model.channel import JobStatus, SummaryJob
 from vsummary.model.video import Topic
 
 
@@ -54,3 +54,35 @@ async def test_delivery_failure_keeps_persisted_summary_and_does_not_regenerate(
 
     cog.summary_service.summarize.assert_awaited_once()
     assert job.status is JobStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_claim_due_jobs_uses_current_beanie_collection_api(monkeypatch):
+    record = {
+        "video_id": "video",
+        "channel_id": "channel",
+        "channel_name": "Channel",
+        "title": "Title",
+        "available_at": datetime.now(UTC),
+        "next_attempt_at": datetime.now(UTC),
+        "status": JobStatus.GENERATING.value,
+        "claimed_by": "worker",
+        "claimed_at": datetime.now(UTC),
+    }
+    collection = SimpleNamespace(
+        find_one_and_update=AsyncMock(side_effect=[record, None, None])
+    )
+    monkeypatch.setattr(
+        SummaryJob,
+        "get_pymongo_collection",
+        classmethod(lambda cls: collection),
+    )
+
+    cog = Autosummary.__new__(Autosummary)
+    cog.worker_id = "worker"
+
+    claimed = await cog._claim_due_jobs()
+
+    assert len(claimed) == 1
+    assert claimed[0].video_id == "video"
+    assert collection.find_one_and_update.await_count == 3

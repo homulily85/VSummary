@@ -21,6 +21,14 @@ class JobStatus(str, Enum):
 class FollowedChannel(Document):
     channel_id: str
     name: str
+    added_at: datetime
+
+    @field_validator("added_at")
+    @classmethod
+    def require_added_at_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("added_at must be timezone-aware")
+        return value.astimezone(UTC)
 
     class Settings:
         name = "Channel"

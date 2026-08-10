@@ -32,7 +32,6 @@ from vsummary.util.holodex import (
     TransientHolodexError,
     exponential_backoff_hours,
     is_ignored,
-    is_transcript_ready,
 )
 from vsummary.util.summarizer import (
     NotebookLMSummaryService,
@@ -104,9 +103,23 @@ class Autosummary(commands.Cog):
         for channel in channels:
             videos = await self.holodex.get_channel_videos(channel.channel_id)
             for video in videos:
+                if video.available_at <= channel.added_at:
+                    logger.info(
+                        "Skipping video %s released before channel %s was added.",
+                        video.video_id,
+                        channel.channel_id,
+                    )
+                    continue
                 await self._enqueue_new_video(video, channel)
 
     async def _enqueue_new_video(self, video: HolodexVideo, channel):
+        if video.available_at <= channel.added_at:
+            logger.info(
+                "Skipping video %s released before channel %s was added.",
+                video.video_id,
+                channel.channel_id,
+            )
+            return
         if is_ignored(video.topic_id):
             logger.info(
                 "Skipping ignored video %s (topic %s)", video.video_id, video.topic_id
@@ -125,9 +138,9 @@ class Autosummary(commands.Cog):
         if existing:
             return
 
-        ready = is_transcript_ready(video.available_at)
-        next_attempt = (
-            datetime.now(UTC) if ready else video.available_at + timedelta(hours=2)
+        next_attempt = max(
+            datetime.now(UTC),
+            video.available_at + timedelta(seconds=video.duration, hours=2),
         )
         pending = PendingVideo(
             video_id=video.video_id,
@@ -174,10 +187,12 @@ class Autosummary(commands.Cog):
                         "claimed_at": now,
                     }
                 }
-                record = await PendingVideo.get_motor_collection().find_one_and_update(
-                    query,
-                    update,
-                    return_document=ReturnDocument.AFTER,
+                record = (
+                    await PendingVideo.get_pymongo_collection().find_one_and_update(
+                        query,
+                        update,
+                        return_document=ReturnDocument.AFTER,
+                    )
                 )
                 if record is None:
                     break
@@ -383,7 +398,11 @@ class Autosummary(commands.Cog):
             )
             return
         try:
-            await Channel(channel_id=channel_id, name=channel.name).save()
+            await Channel(
+                channel_id=channel_id,
+                name=channel.name,
+                added_at=datetime.now(UTC),
+            ).save()
         except DuplicateKeyError:
             await interaction.followup.send(
                 f"Channel **{channel.name}** (`{channel_id}`) is already being followed."

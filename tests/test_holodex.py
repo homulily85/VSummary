@@ -104,6 +104,7 @@ async def test_get_channel_videos_parses_items_and_query_parameters():
                     "title": "Test Stream",
                     "topic_id": "stream",
                     "available_at": available_at,
+                    "duration": 5400,
                     "channel": {"name": "Test Channel"},
                 }
             ],
@@ -117,6 +118,7 @@ async def test_get_channel_videos_parses_items_and_query_parameters():
     assert videos[0].title == "Test Stream"
     assert videos[0].topic_id == "stream"
     assert videos[0].available_at == datetime.fromisoformat(available_at)
+    assert videos[0].duration == 5400
     assert videos[0].channel_name == "Test Channel"
     assert dict(seen["request"].url.params) == {
         "type": "stream",

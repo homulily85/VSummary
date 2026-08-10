@@ -10,7 +10,6 @@ from pymongo import AsyncMongoClient
 from rich.logging import RichHandler
 
 from vsummary.bot import Bot
-from vsummary.migrations import migrate_database
 from vsummary.model.channel import FollowedChannel, SummaryJob
 from vsummary.model.video import VideoSummary
 from vsummary.settings import Settings, SettingsError, load_settings
@@ -35,10 +34,9 @@ async def async_main(settings: Settings | None = None):
             raise SystemExit(1) from exc
 
     logger.info("Connecting to MongoDB...")
-    mongo_client = AsyncMongoClient(settings.mongodb_uri)
+    mongo_client = AsyncMongoClient(settings.mongodb_uri, tz_aware=True)
     try:
         database = mongo_client[settings.mongodb_database]
-        await migrate_database(database)
         await init_beanie(
             database=database,
             document_models=[FollowedChannel, SummaryJob, VideoSummary],

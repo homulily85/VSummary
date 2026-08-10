@@ -33,6 +33,7 @@ def test_channel_requires_channel_id_and_name():
 
     assert fields["channel_id"].is_required()
     assert fields["name"].is_required()
+    assert fields["added_at"].is_required()
 
 
 def test_pending_video_defaults_to_queued_with_zero_retries():

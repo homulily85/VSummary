@@ -68,6 +68,7 @@ class HolodexVideo:
     topic_id: str | None
     available_at: datetime
     channel_name: str
+    duration: int = 0
 
     @property
     def video_id(self) -> str:
@@ -207,9 +208,20 @@ def _parse_video(video: dict) -> HolodexVideo:
             topic_id=video.get("topic_id"),
             available_at=_parse_iso(str(video["available_at"])),
             channel_name=str(channel["name"]),
+            duration=_parse_duration(video["duration"]),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise MalformedHolodexResponse("Invalid video item") from exc
+
+
+def _parse_duration(value) -> int:
+    try:
+        duration = int(value)
+    except (TypeError, ValueError) as exc:
+        raise MalformedHolodexResponse("Invalid video duration") from exc
+    if duration < 0:
+        raise MalformedHolodexResponse("Video duration cannot be negative")
+    return duration
 
 
 def _parse_iso(value: str) -> datetime:
