@@ -21,11 +21,14 @@ This project requires a **test-first** workflow. Follow this loop for
 every change, no exceptions:
 
 1. **Write the test(s) first.** Before implementing or modifying any
-   feature, add or update the relevant test file under `tests/`
-   (`test_cogs.py`, `test_summarizer.py`, `test_youtube.py`, or a new
-   `tests/test_<module>.py` for a new module). The test(s) should express
-   the desired behavior and are expected to **fail** at this point since
-   the implementation doesn't exist/isn't updated yet.
+   feature, add or update the closest relevant file under `tests/`
+   (`test_settings.py`, `test_migrations.py`, `test_models.py`,
+   `test_refactored_models.py`, `test_holodex.py`, `test_video.py`,
+   `test_youtube.py`, `test_formatting.py`, or `test_workflow_state.py`).
+   Use `test_integration.py` only when coverage genuinely spans multiple
+   boundaries. The test(s) should express the desired behavior and are
+   expected to **fail** at this point since the implementation doesn't
+   exist/isn't updated yet.
 2. **Confirm the new test fails** for the expected reason:
    `uv run pytest tests/test_<module>.py -v`. If it passes immediately,
    the test isn't actually exercising the new behavior — fix the test.
@@ -51,9 +54,10 @@ Rules of thumb:
   error case), before writing the implementation.
 - **Modifying existing code** (`bot.py`, an existing cog, `util/summarizer.py`,
   `util/youtube.py`, `model/video.py`, etc.) → first update or extend the
-  corresponding existing test file (`test_cogs.py`, `test_summarizer.py`,
-  `test_youtube.py`, ...) to cover the new/changed behavior, confirm it
-  fails against the old implementation, then change the implementation.
+  closest focused test file (`test_workflow_state.py`, `test_holodex.py`,
+  `test_video.py`, `test_youtube.py`, or another file listed in the layout)
+  to cover the new/changed behavior, confirm it fails against the old
+  implementation, then change the implementation.
 - **Bug fixes** → write a regression test that reproduces the bug first
   (it should fail), then fix the code so it passes.
 - Discord- and NotebookLM-facing code should be tested with mocks/fakes
@@ -80,55 +84,86 @@ Rules of thumb:
 
 ```
 src/vsummary/
-├── main.py              # process entry point (main()) — bootstraps and runs the bot
-├── bot.py               # discord.py Bot/Client subclass, cog loading, lifecycle
-├── cogs/                # discord.py cogs (feature modules), auto/explicitly loaded by bot.py
+├── main.py              # process entry point; loads settings, runs migrations, owns resources
+├── settings.py          # validated runtime configuration and .env loading
+├── migrations.py        # versioned, idempotent MongoDB data migrations
+├── bot.py               # Bot subclass, dependency injection, cog loading, shutdown
+├── cogs/                # Discord adapters and slash-command handlers
 │   ├── misc/
 │   │   └── ping.py      # simple health-check / latency command
 │   ├── summarizer/
-│   │   └── summarizer.py# Discord-facing commands that trigger video summarization
+│   │   └── summarizer.py# /topics and /detail commands plus interactive topic UI
 │   └── autosummary/
-│       └── autosummary.py # follow channels and auto-post summaries (Holodex polling)
+│       └── autosummary.py # channel commands and durable Holodex polling workflow
 ├── model/
-│   ├── video.py          # Beanie Document model(s) describing a "video" record
-│   └── channel.py        # Channel + PendingVideo document models for auto-summaries
+│   ├── video.py          # Topic and VideoSummary documents; legacy Video compatibility model
+│   └── channel.py        # FollowedChannel, SummaryJob, and job-state models
 └── util/
-    ├── holodex.py        # Holodex API client + transcript-ready/backoff helpers
-    ├── summarizer.py     # NotebookLM integration logic (non-Discord-specific helpers)
-    └── youtube.py        # YouTube URL/ID parsing & metadata helpers
+    ├── discord.py         # Discord message chunking within the 2,000-character limit
+    ├── holodex.py         # typed Holodex client/gateway, retries, and response parsing
+    ├── summarizer.py      # NotebookLM summary service and topic-detail workflow
+    ├── video.py           # source-agnostic VideoRef parsing and URL construction
+    └── youtube.py         # YouTube URL/ID normalization and validation
 
 tests/
-├── test_autosummary.py   # tests for the autosummary cog (commands + polling + retries)
-├── test_cogs.py          # tests for the Discord-facing cog layer
-├── test_holodex.py       # tests for util/holodex.py
-├── test_models.py        # tests for model/channel.py document models
-├── test_summarizer.py    # tests for util/summarizer.py (NotebookLM logic)
-└── test_youtube.py       # tests for util/youtube.py
+├── test_formatting.py       # Discord message chunking
+├── test_holodex.py          # Holodex client contracts and retry behavior
+├── test_integration.py      # mixed Discord, NotebookLM, and autosummary coverage
+├── test_migrations.py       # database migration behavior
+├── test_models.py           # legacy model compatibility behavior
+├── test_refactored_models.py# current model names, states, and validation
+├── test_settings.py         # settings parsing and validation
+├── test_video.py            # source-agnostic VideoRef behavior
+├── test_workflow_state.py   # autosummary generation/delivery state transitions
+└── test_youtube.py          # YouTube parsing and validation
 ```
 
 Notes for agents:
 - There are **two files named `summarizer.py`** with different roles:
   `cogs/summarizer/summarizer.py` (Discord command/cog layer — parses user
-  input, replies in Discord) and `util/summarizer.py` (business logic layer —
-  talks to NotebookLM, has no Discord dependency). Keep this separation:
-  cogs should stay thin and delegate to `util/`.
+  input, replies in Discord) and `util/summarizer.py` (NotebookLM summary
+  service and topic workflow — has no Discord dependency). Keep this
+  separation: cogs should stay thin and delegate to `util/`.
 - `__pycache__` directories and `*.egg-info` are build artifacts — never
   edit or commit meaningful changes there; they're regenerated automatically.
 - New Discord features should be added as new cogs under `src/vsummary/cogs/`
   and registered/loaded in `bot.py`.
 - Data models backed by MongoDB go in `src/vsummary/model/` as Beanie
-  `Document` subclasses, and must be registered with
-  `beanie.init_beanie(...)` during bot startup (likely in `bot.py` or
-  `main.py`).
-- `util/youtube.py` holds YouTube-specific helpers (e.g. URL parsing/
-  validation, video ID extraction, maybe metadata lookups) used by
-  `util/summarizer.py` and/or the summarizer cog. Keep it free of Discord
-  and NotebookLM-client dependencies so it stays easily unit-testable.
-- `tests/` mirrors the modules it covers on a roughly 1:1 basis
-  (`test_cogs.py` ↔ `cogs/`, `test_summarizer.py` ↔ `util/summarizer.py`,
-  `test_youtube.py` ↔ `util/youtube.py`). When you add a new module or
-  cog, add a matching `tests/test_<module>.py` following this convention
-  — see "Testing policy (mandatory)" below.
+  `Document` subclasses. `main.py` registers `FollowedChannel`, `SummaryJob`,
+  and `VideoSummary` with `beanie.init_beanie(...)` during startup.
+- `FollowedChannel` and `SummaryJob` preserve the existing `Channel` and
+  `PendingVideo` collection names. `Channel`, `PendingVideo`, and `Video` are
+  compatibility models/aliases; prefer the current names in new code.
+- `VideoSummary` has a unique `(source, video_id)` index. `SummaryJob` has a
+  unique `(channel_id, video_id)` index plus status and `next_attempt_at`
+  indexes. Do not bypass these constraints with check-then-insert logic.
+- `SummaryJob` uses `JobStatus` values `queued`, `generating`,
+  `ready_to_deliver`, `delivering`, `completed`, and `failed`. Generation
+  output is persisted before Discord delivery so delivery retries do not
+  regenerate NotebookLM output.
+- `util/youtube.py` is YouTube-only. Use `util/video.py` for the
+  source-agnostic `VideoRef` boundary and `util/summarizer.py` for NotebookLM
+  work. Keep both free of Discord dependencies so they remain unit-testable.
+- `tests/` reflects the current focused coverage plus the existing mixed
+  `test_integration.py`; add focused tests beside the closest existing test
+  file rather than assuming the old `test_cogs.py`/`test_summarizer.py`
+  layout.
+
+### Migrations
+
+Migrations currently run automatically during `vsummary.main.async_main`,
+after connecting to MongoDB and before Beanie initialization. There is no
+separate migration executable. To run them independently, import
+`migrate_database` from `vsummary.migrations` and call it with an async
+PyMongo database handle.
+
+The migration path is additive and idempotent. It preserves the existing
+`Channel`, `PendingVideo`, and `Video` collections, maps legacy `done` jobs to
+`completed`, fills new job fields, renames legacy `Video.id` to `video_id`,
+and records the applied schema version in `vsummary_migrations`. It does not
+drop collections or deduplicate records automatically. Back up production
+data and inspect duplicates before starting a deployment that creates the new
+unique indexes.
 
 ## Setup & common commands
 
@@ -168,7 +203,7 @@ uv run pre-commit run --all-files
 uv run pytest
 
 # Run a single test file
-uv run pytest tests/test_summarizer.py
+uv run pytest tests/test_workflow_state.py
 
 # Run a single test by name, with verbose output
 uv run pytest tests/test_youtube.py::test_extract_video_id -v
@@ -186,11 +221,15 @@ locked virtual environment is used.
 
 ## Environment / configuration
 
-- Config/secrets are loaded via `python-dotenv`, so a local `.env` file
-  (untracked) is expected. Likely required variables include a Discord bot
-  token and MongoDB connection string; check `main.py`/`bot.py` for the
-  exact env var names before assuming any, and add new required variables
-  there plus in a `.env.example` if one exists or should be created.
+- Config/secrets are loaded once at startup via `python-dotenv`; a local
+  untracked `.env` file is expected. `settings.py` validates configuration
+  before the bot starts, so do not read environment variables directly from
+  cogs or utility modules.
+- Required variables are `DISCORD_TOKEN` and `MONGODB_URI`.
+- Optional variables are `MONGODB_DATABASE` (default `VSummary`),
+  `AUTO_SUMMARY_CHANNEL_ID`, `POLL_INTERVAL_MINUTES` (default `30`),
+  `SOURCE_RETRY_LIMIT` (default `5`), `DELIVERY_RETRY_LIMIT` (default `5`),
+  and `HTTP_TIMEOUT_SECONDS` (default `15.0`).
 - NotebookLM access via `notebooklm-py` requires **Google session
   cookies**, not an API key. In practice this means an authenticated
   session/profile must be set up out-of-band via the `notebooklm` CLI
@@ -204,7 +243,8 @@ Full reference: https://github.com/teng-lin/notebooklm-py/blob/main/docs/python-
 
 Key points an agent should know before touching `util/summarizer.py`:
 
-- The client is **async** and must be used as an async context manager:
+- The client is **async** and is created as an async context manager by
+  `main.py`:
   ```python
   from notebooklm import NotebookLMClient
 
@@ -216,19 +256,17 @@ Key points an agent should know before touching `util/summarizer.py`:
   discord.py bot this generally means creating/reusing one client per bot
   process/event loop (discord.py already runs on a single asyncio loop),
   or opening a short-lived client per operation.
+- `NotebookLMSummaryService` in `util/summarizer.py` is the workflow boundary
+  used by autosummary. It returns typed `Topic` values and classifies
+  transient versus permanent summary failures.
 - Typical flow for "summarize a video":
-  1. `client.notebooks.create(title)` (or reuse an existing notebook).
-  2. `client.sources.add_youtube(notebook_id, url)` (or `add_url` /
-     `add_file` depending on what the user supplies).
-  3. Either:
-     - `client.chat.ask(notebook_id, "Summarize this video")` for a quick
-       text answer (`AskResult.answer`), or
-     - `client.artifacts.generate_report(notebook_id, report_format=...)`
-       followed by `client.artifacts.wait_for_completion(...)` and
-       `client.artifacts.download_report(...)` for a fuller
-       Markdown report/artifact.
-  4. Post the result back to Discord (respect Discord's 2000-character
-     message limit — chunk long summaries or use embeds/files).
+  1. Create a temporary notebook with `client.notebooks.create(...)`.
+  2. Attach the normalized video URL with
+     `client.sources.add_url(notebook_id, url)`.
+  3. Ask `client.chat.ask(...)` for JSON topic names and then topic details;
+     parse and persist them as `Topic` values in `VideoSummary`.
+  4. Persist autosummary topic details in `SummaryJob` before posting them to
+     Discord. Respect Discord's 2,000-character message limit when posting.
 - `RPCError` is the library's exception type for API failures (auth
   expiry, rate limiting, bad params) — catch it in the cog layer and
   surface a user-friendly Discord error message rather than letting it
@@ -246,9 +284,19 @@ Key points an agent should know before touching `util/summarizer.py`:
   (`cogs/misc`, `cogs/summarizer`, ...). Each cog subclasses
   `commands.Cog` (or uses `app_commands` for slash commands) and is loaded
   via an extension `setup()` function.
-- `bot.py` owns the `Bot`/`Client` instance, intents configuration, and
-  cog/extension loading — new cogs should be registered there, not
-  instantiated ad hoc elsewhere.
+- `bot.py` owns the `Bot` instance, intents configuration, dependency
+  injection, cog/extension loading, and shutdown. `main.py` owns MongoDB,
+  migrations, and the NotebookLM context manager.
+- Keep the user-facing slash-command names stable: `/topics`, `/detail`,
+  `/addchannel`, `/removechannel`, and `/listchannels`. Python method and
+  model names may be made more descriptive without changing those command
+  names.
+- `Autosummary` claims due jobs atomically before processing them. Keep
+  generation and Discord delivery as separate retryable phases, and preserve
+  the persisted summary payload across delivery failures.
+- Use `util/discord.py`'s `split_message` for Discord output. Every emitted
+  chunk must be non-empty and at most 2,000 characters; keep boundary tests
+  for long lines, punctuation, and exact-limit content.
 - Long NotebookLM operations (source ingestion, artifact generation) can
   take a while — use `await interaction.response.defer()` /
   `ctx.typing()` (as appropriate for slash vs. prefix commands) so Discord
