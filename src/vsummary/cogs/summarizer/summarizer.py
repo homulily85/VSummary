@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 from notebooklm import SourceAddError
 
+from vsummary.util.discord import split_message
 from vsummary.util.summarizer import (
     get_topic_details,
     get_topic_details_all,
@@ -101,35 +102,11 @@ class Summarizer(commands.Cog):
         text: str,
         view: discord.ui.View | None = None,
     ):
-        """
-        Helper function to handle sending messages over Discord's 2000 char limit
-        """
-        first = True
-        while len(text) > 2000:
-            # Find a suitable split point to avoid breaking words/lines
-            split_index = text.rfind("\n", 0, 2000)
-            if split_index == -1:
-                split_index = text.rfind(".", 0, 200000)
-                if split_index == -1:
-                    split_index = (
-                        2000  # Fallback to hard limit if no suitable split point
-                    )
-                    # is found
-
-            if first and view is not None:
-                await interaction.followup.send(text[:split_index], view=view)
+        for index, chunk in enumerate(split_message(text)):
+            if index == 0 and view is not None:
+                await interaction.followup.send(chunk, view=view)
             else:
-                await interaction.followup.send(text[:split_index])
-            first = False
-            text = text[
-                split_index:
-            ].lstrip()  # Remove leading newlines for the next chunk
-
-        if text:
-            if first and view is not None:
-                await interaction.followup.send(text, view=view)
-            else:
-                await interaction.followup.send(text)
+                await interaction.followup.send(chunk)
 
     @app_commands.command(name="topics", description="Get topic list from a video.")
     @app_commands.describe(video="The video URL or ID (for YouTube only) to summarize.")

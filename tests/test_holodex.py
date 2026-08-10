@@ -10,6 +10,8 @@ from vsummary.util.holodex import (
     USER_AGENT,
     ChannelNotFoundError,
     HolodexClient,
+    MalformedHolodexResponse,
+    TransientHolodexError,
     exponential_backoff_hours,
     is_ignored,
     is_transcript_ready,
@@ -131,3 +133,37 @@ async def test_get_channel_videos_returns_empty_list_for_http_errors():
 
     async with HolodexClient(transport=httpx.MockTransport(handler)) as client:
         assert await client.get_channel_videos(CHANNEL_ID) == []
+
+
+@pytest.mark.asyncio
+async def test_strict_gateway_raises_typed_timeout_error():
+    async def handler(request):
+        raise httpx.ReadTimeout("timed out")
+
+    async with HolodexClient(
+        transport=httpx.MockTransport(handler), retries=0
+    ) as client:
+        with pytest.raises(TransientHolodexError):
+            await client.fetch_channel(CHANNEL_ID)
+
+
+@pytest.mark.asyncio
+async def test_strict_gateway_rejects_invalid_timestamps():
+    async def handler(request):
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": VIDEO_ID,
+                    "title": "Test",
+                    "available_at": "not-a-timestamp",
+                    "channel": {"name": "Channel"},
+                }
+            ],
+        )
+
+    async with HolodexClient(
+        transport=httpx.MockTransport(handler), retries=0
+    ) as client:
+        with pytest.raises(MalformedHolodexResponse):
+            await client.fetch_channel_videos(CHANNEL_ID)

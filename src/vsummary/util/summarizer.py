@@ -1,13 +1,52 @@
 import json
 import logging
 
+import httpx
 from notebooklm import NotebookLMClient, SourceAddError
 from notebooklm.types import Notebook
 
-from vsummary.model.video import Topic, Video
+from vsummary.model.video import Topic, VideoSummary
 from vsummary.util.video import VideoRef, build_video_url
 
 logger = logging.getLogger(__name__)
+Video = VideoSummary
+
+
+class SummaryServiceError(Exception):
+    """Base error raised by the NotebookLM summary service."""
+
+
+class TransientSummaryError(SummaryServiceError):
+    """Raised when a summary can be retried safely."""
+
+
+class PermanentSummaryError(SummaryServiceError):
+    """Raised when NotebookLM returned an unusable result."""
+
+
+class NotebookLMSummaryService:
+    """NotebookLM-backed summary generation with durable cache reuse."""
+
+    def __init__(self, client: NotebookLMClient):
+        self.client = client
+
+    async def close(self) -> None:
+        close = getattr(self.client, "aclose", None)
+        if close is not None:
+            await close()
+
+    async def summarize(self, ref: VideoRef) -> list[Topic]:
+        try:
+            details = await get_topic_details_all(self.client, ref)
+        except SourceAddError as exc:
+            raise TransientSummaryError(str(exc)) from exc
+        except (httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
+            raise TransientSummaryError(str(exc)) from exc
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise PermanentSummaryError(str(exc)) from exc
+        return [
+            Topic(name=item["topic_name"], detail=item["detail"]) for item in details
+        ]
 
 
 def _topic_boundaries(topics: list[Topic], topic_index: int) -> dict[str, str]:
@@ -37,8 +76,8 @@ async def _create_notebook_with_source(
     notebook = await client.notebooks.create(video_link)
     try:
         await client.sources.add_url(notebook.id, video_link)
-    except SourceAddError:
-        await client.notebooks.delete(notebook.id)
+    except Exception:
+        await _safe_delete_notebook(client, notebook.id)
         raise
     return notebook
 
@@ -72,7 +111,9 @@ async def _get_or_create_topic_list(
     video_link = build_video_url(ref)
 
     logger.info(f"Checking if video {video_link} is already in database...")
-    video = await Video.find_one(Video.source == ref.source, Video.video_id == ref.id)
+    video = await Video.find_one(
+        Video.source == ref.source, Video.video_id == ref.video_id
+    )
     if video and video.topics:
         return video, None
 
@@ -94,28 +135,30 @@ async def _get_or_create_topic_list(
        Return json only, do not include any other text in your response.
        """
 
-    logger.info(f"Asking notebook {notebook.id} for topics...")
-    response = await client.chat.ask(notebook.id, prompt)
+    try:
+        logger.info(f"Asking notebook {notebook.id} for topics...")
+        response = await client.chat.ask(notebook.id, prompt)
 
-    logger.info("Parsing response and saving topics to database...")
-    topics = json.loads(response.answer)
+        logger.info("Parsing response and saving topics to database...")
+        topics = json.loads(response.answer)
 
-    topics_objects = []
-    for topic in topics:
-        topics_objects.append(Topic(name=topic["name"]))
+        topics_objects = [Topic(name=topic["name"]) for topic in topics]
 
-    if video:
-        video.topics = topics_objects
-    else:
-        video = Video(
-            source=ref.source,
-            video_id=ref.id,
-            topics=topics_objects,
-        )
+        if video:
+            video.topics = topics_objects
+        else:
+            video = Video(
+                source=ref.source,
+                video_id=ref.video_id,
+                topics=topics_objects,
+            )
 
-    await video.save()
-    logger.info(f"Topics saved to database for video {video_link}.")
-    return video, notebook
+        await video.save()
+        logger.info(f"Topics saved to database for video {video_link}.")
+        return video, notebook
+    except Exception:
+        await _safe_delete_notebook(client, notebook.id)
+        raise
 
 
 async def get_topic_list(client: NotebookLMClient, ref: VideoRef):
@@ -126,7 +169,7 @@ async def get_topic_list(client: NotebookLMClient, ref: VideoRef):
     try:
         return video.topics
     finally:
-        await client.notebooks.delete(notebook.id)
+        await _safe_delete_notebook(client, notebook.id)
         logger.info("Deleted temporary notebook used for topic list.")
 
 
@@ -161,7 +204,7 @@ async def get_topic_details(client: NotebookLMClient, ref: VideoRef, topic_index
         }
     finally:
         if notebook is not None:
-            await client.notebooks.delete(notebook.id)
+            await _safe_delete_notebook(client, notebook.id)
             logger.info("Deleted temporary notebook used for topic details.")
 
 
@@ -199,5 +242,14 @@ async def get_topic_details_all(client: NotebookLMClient, ref: VideoRef):
         return results
     finally:
         if notebook is not None:
-            await client.notebooks.delete(notebook.id)
+            await _safe_delete_notebook(client, notebook.id)
             logger.info("Deleted temporary notebook used for topic details.")
+
+
+async def _safe_delete_notebook(client: NotebookLMClient, notebook_id: str) -> None:
+    try:
+        await client.notebooks.delete(notebook_id)
+    except Exception:
+        logger.exception(
+            "Failed to delete temporary NotebookLM resource %s", notebook_id
+        )

@@ -8,13 +8,30 @@ class UnsupportedVideoSource(ValueError):
     """Raised when a video reference comes from an unsupported source."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class VideoRef:
     """A normalized video reference split into a source and its ID within that
     source (e.g. source="youtube", id="dQw4w9WgXcQ")."""
 
     source: str
-    id: str
+    video_id: str
+
+    def __init__(
+        self,
+        source: str,
+        video_id: str | None = None,
+        *,
+        id: str | None = None,
+    ):
+        resolved_id = video_id or id
+        if not resolved_id:
+            raise ValueError("video_id is required")
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "video_id", resolved_id)
+
+    @property
+    def id(self) -> str:
+        return self.video_id
 
 
 def parse_video_source(value: str) -> VideoRef:
@@ -35,7 +52,7 @@ def parse_video_source(value: str) -> VideoRef:
         ) from exc
 
     video_id = parse_qs(urlparse(watch_url).query)["v"][0]
-    return VideoRef(source="youtube", id=video_id)
+    return VideoRef(source="youtube", video_id=video_id)
 
 
 def build_video_url(ref: VideoRef) -> str:
@@ -45,6 +62,6 @@ def build_video_url(ref: VideoRef) -> str:
     branch per supported source.
     """
     if ref.source == "youtube":
-        return f"https://www.youtube.com/watch?v={ref.id}"
+        return f"https://www.youtube.com/watch?v={ref.video_id}"
 
     raise UnsupportedVideoSource(f"Unsupported video source: '{ref.source}'")

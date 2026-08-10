@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -19,23 +22,17 @@ MAX_RETRIES = 5
 
 
 def exponential_backoff_hours(retry_count: int) -> int:
-    """Hours to wait before the next attempt.
-
-    Retry 1 waits 1 hour, retry 2 waits 2 hours, retry 3 waits 4 hours,
-    retry 4 waits 8 hours, and retry 5 waits 16 hours.
-    """
     return 2 ** (retry_count - 1)
 
 
 def is_ignored(topic_id: str | None) -> bool:
-    """True when a video's topic_id should be skipped for auto-summaries."""
     return topic_id in IGNORED_TOPICS
 
 
 def is_transcript_ready(available_at: datetime) -> bool:
-    """True when a transcript is expected to be available (>2h after available_at)."""
-    now = datetime.now(UTC)
-    return now - available_at > TRANSCRIPT_READY_DELAY
+    if available_at.tzinfo is None:
+        raise ValueError("available_at must be timezone-aware")
+    return datetime.now(UTC) - available_at > TRANSCRIPT_READY_DELAY
 
 
 class HolodexError(Exception):
@@ -44,6 +41,18 @@ class HolodexError(Exception):
 
 class ChannelNotFoundError(HolodexError):
     """Raised when the Holodex channel endpoint returns 404."""
+
+
+class TransientHolodexError(HolodexError):
+    """Raised for timeouts, connection failures, and server errors."""
+
+
+class PermanentHolodexError(HolodexError):
+    """Raised for non-retryable API responses."""
+
+
+class MalformedHolodexResponse(PermanentHolodexError):
+    """Raised when Holodex returns a response with an invalid shape."""
 
 
 @dataclass(frozen=True)
@@ -56,22 +65,31 @@ class HolodexChannel:
 class HolodexVideo:
     id: str
     title: str
-    topic_id: str
+    topic_id: str | None
     available_at: datetime
     channel_name: str
 
+    @property
+    def video_id(self) -> str:
+        return self.id
+
 
 class HolodexClient:
-    """Async client for the Holodex v2 API."""
+    """Async Holodex client with a single timeout and retry policy."""
 
-    def __init__(self, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(
+        self,
+        transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        timeout: float = 15.0,
+        retries: int = 2,
+    ):
+        self._retries = max(0, retries)
         self._client = httpx.AsyncClient(
             base_url=HOLODEX_API_URL,
-            headers={
-                "referer": REFERER,
-                "user-agent": USER_AGENT,
-            },
+            headers={"referer": REFERER, "user-agent": USER_AGENT},
             transport=transport,
+            timeout=httpx.Timeout(timeout),
         )
 
     async def __aenter__(self):
@@ -83,51 +101,122 @@ class HolodexClient:
     async def aclose(self):
         await self._client.aclose()
 
-    async def get_channel(self, channel_id: str) -> HolodexChannel | None:
-        response = await self._client.get(f"/channels/{channel_id}")
+    async def close(self):
+        await self.aclose()
+
+    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        for attempt in range(self._retries + 1):
+            try:
+                response = await self._client.request(method, path, **kwargs)
+            except (
+                httpx.TimeoutException,
+                httpx.NetworkError,
+                httpx.ConnectError,
+            ) as exc:
+                if attempt >= self._retries:
+                    raise TransientHolodexError(str(exc)) from exc
+                await asyncio.sleep(2**attempt)
+                continue
+            if response.status_code >= 500:
+                if attempt >= self._retries:
+                    raise TransientHolodexError(
+                        f"Holodex returned HTTP {response.status_code}"
+                    )
+                await asyncio.sleep(2**attempt)
+                continue
+            return response
+        raise AssertionError("unreachable")
+
+    async def fetch_channel(self, channel_id: str) -> HolodexChannel:
+        response = await self._request("GET", f"/channels/{channel_id}")
         if response.status_code == 404:
             raise ChannelNotFoundError(f"Channel '{channel_id}' not found on Holodex.")
-
         try:
             response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            logger.error(f"Error fetching videos for channel {channel_id}: {exc}")
-            return None
+            data = response.json()
+            return HolodexChannel(id=str(data["id"]), name=str(data["name"]))
+        except (httpx.HTTPStatusError, KeyError, TypeError, ValueError) as exc:
+            raise MalformedHolodexResponse(
+                f"Invalid channel response for '{channel_id}'"
+            ) from exc
 
-        data = response.json()
-        return HolodexChannel(id=data["id"], name=data["name"])
+    async def fetch_channel_videos(
+        self, channel_id: str, limit: int = 1
+    ) -> list[HolodexVideo]:
+        response = await self._request(
+            "GET",
+            f"/channels/{channel_id}/videos",
+            params={"type": "stream", "limit": limit, "offset": 0, "status": "past"},
+        )
+        try:
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise TypeError("expected a list")
+            return [_parse_video(video) for video in payload]
+        except (httpx.HTTPStatusError, KeyError, TypeError, ValueError) as exc:
+            raise MalformedHolodexResponse(
+                f"Invalid videos response for '{channel_id}'"
+            ) from exc
+
+    async def get_channel(self, channel_id: str) -> HolodexChannel | None:
+        """Legacy helper returning ``None`` for ordinary HTTP failures."""
+        try:
+            return await self.fetch_channel(channel_id)
+        except ChannelNotFoundError:
+            raise
+        except (PermanentHolodexError, TransientHolodexError) as exc:
+            logger.error("Error fetching channel %s: %s", channel_id, exc)
+            return None
 
     async def get_channel_videos(
         self, channel_id: str, limit: int = 1
     ) -> list[HolodexVideo]:
-        response = await self._client.get(
-            f"/channels/{channel_id}/videos",
-            params={
-                "type": "stream",
-                "limit": limit,
-                "offset": 0,
-                "status": "past",
-            },
-        )
+        """Legacy helper returning an empty list for ordinary HTTP failures."""
         try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            logger.error(f"Error fetching videos for channel {channel_id}: {exc}")
+            return await self.fetch_channel_videos(channel_id, limit)
+        except (PermanentHolodexError, TransientHolodexError) as exc:
+            logger.error("Error fetching videos for channel %s: %s", channel_id, exc)
             return []
-        return [
-            HolodexVideo(
-                id=video["id"],
-                title=video["title"],
-                topic_id=video.get("topic_id"),
-                available_at=_parse_iso(video["available_at"]),
-                channel_name=video["channel"]["name"],
-            )
-            for video in response.json()
-        ]
+
+
+class HolodexGateway:
+    """Strict typed gateway used by workflows."""
+
+    def __init__(self, client: HolodexClient | None = None, **client_kwargs):
+        self.client = client or HolodexClient(**client_kwargs)
+
+    async def close(self) -> None:
+        await self.client.aclose()
+
+    async def get_channel(self, channel_id: str) -> HolodexChannel:
+        return await self.client.fetch_channel(channel_id)
+
+    async def get_channel_videos(
+        self, channel_id: str, limit: int = 1
+    ) -> list[HolodexVideo]:
+        return await self.client.fetch_channel_videos(channel_id, limit)
+
+
+def _parse_video(video: dict) -> HolodexVideo:
+    try:
+        channel = video["channel"]
+        return HolodexVideo(
+            id=str(video["id"]),
+            title=str(video["title"]),
+            topic_id=video.get("topic_id"),
+            available_at=_parse_iso(str(video["available_at"])),
+            channel_name=str(channel["name"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MalformedHolodexResponse("Invalid video item") from exc
 
 
 def _parse_iso(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise MalformedHolodexResponse(f"Invalid timestamp: {value}") from exc
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed
+        raise MalformedHolodexResponse("Holodex timestamps must include a timezone")
+    return parsed.astimezone(UTC)

@@ -278,6 +278,15 @@ async def test_summarization_pipeline_deletes_notebook_when_source_cannot_be_add
 
     assert client.created[0].id == "notebook-1"
     assert client.deleted == ["notebook-1"]
+
+
+@pytest.mark.asyncio
+async def test_summarization_cleanup_failure_does_not_mask_source_error(monkeypatch):
+    client = FakeNotebookClient(source_error=True)
+    client.notebooks.delete = AsyncMock(side_effect=RuntimeError("delete failed"))
+
+    with pytest.raises(SourceAddError):
+        await summarizer_util._create_notebook_with_source(client, VIDEO_REF)
     assert FakeVideoRecord.records == []
 
 
