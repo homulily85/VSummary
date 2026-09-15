@@ -21,6 +21,9 @@ def test_refactored_models_use_non_optional_topics_and_explicit_states():
 
     assert summary.topics == []
     assert job.status is JobStatus.QUEUED
+    assert job.delivery_chunks == []
+    assert job.delivery_chunk_index == 0
+    assert job.lease_expires_at is None
     assert [status.value for status in JobStatus] == [
         "queued",
         "generating",

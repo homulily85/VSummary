@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -43,6 +45,9 @@ from vsummary.util.video import VideoRef
 
 logger = logging.getLogger(__name__)
 
+HOLODEX_PAGE_SIZE = 50
+JOB_LEASE_DURATION = timedelta(minutes=15)
+
 # These names remain module-level for existing integrations and test doubles.
 Channel = FollowedChannel
 PendingVideo = SummaryJob
@@ -72,6 +77,8 @@ class Autosummary(commands.Cog):
             else None
         )
         self.worker_id = uuid.uuid4().hex
+        poll_interval = getattr(self.settings, "poll_interval_minutes", 30)
+        self.poll_loop.change_interval(minutes=poll_interval)
         if start_polling:
             self.poll_loop.start()
 
@@ -98,19 +105,43 @@ class Autosummary(commands.Cog):
         await self.check_new_videos()
         await self.process_due_videos()
 
+    @poll_loop.before_loop
+    async def before_poll_loop(self):
+        await self.bot.wait_until_ready()
+
     async def check_new_videos(self):
         channels = await Channel.find().to_list()
         for channel in channels:
-            videos = await self.holodex.get_channel_videos(channel.channel_id)
-            for video in videos:
-                if video.available_at <= channel.added_at:
-                    logger.info(
-                        "Skipping video %s released before channel %s was added.",
-                        video.video_id,
-                        channel.channel_id,
-                    )
-                    continue
-                await self._enqueue_new_video(video, channel)
+            try:
+                videos = await self._get_new_channel_videos(channel)
+                for video in videos:
+                    if video.available_at <= channel.added_at:
+                        logger.info(
+                            "Skipping video %s released before channel %s was added.",
+                            video.video_id,
+                            channel.channel_id,
+                        )
+                        continue
+                    await self._enqueue_new_video(video, channel)
+            except Exception:
+                logger.exception("Failed to poll channel %s", channel.channel_id)
+
+    async def _get_new_channel_videos(self, channel) -> list[HolodexVideo]:
+        """Use pagination for the production client, retaining fake compatibility."""
+        client_type = type(self.holodex)
+        if hasattr(client_type, "fetch_channel_videos_since"):
+            return await self.holodex.fetch_channel_videos_since(
+                channel.channel_id,
+                channel.added_at,
+                page_size=HOLODEX_PAGE_SIZE,
+            )
+        if hasattr(client_type, "get_channel_videos_since"):
+            return await self.holodex.get_channel_videos_since(
+                channel.channel_id,
+                channel.added_at,
+                page_size=HOLODEX_PAGE_SIZE,
+            )
+        return await self.holodex.get_channel_videos(channel.channel_id)
 
     async def _enqueue_new_video(self, video: HolodexVideo, channel):
         if video.available_at <= channel.added_at:
@@ -160,7 +191,10 @@ class Autosummary(commands.Cog):
     async def process_due_videos(self):
         due = await self._claim_due_jobs()
         for item in due:
-            await self._process_pending_video(item)
+            try:
+                await self._process_pending_video(item)
+            except Exception:
+                logger.exception("Failed to process summary job %s", item.video_id)
 
     async def _claim_due_jobs(self) -> list:
         now = datetime.now(UTC)
@@ -171,20 +205,53 @@ class Autosummary(commands.Cog):
             ).to_list()
 
         claimed = []
-        for status, claimed_status in (
-            (JobStatus.QUEUED, JobStatus.GENERATING),
-            (JobStatus.READY_TO_DELIVER, JobStatus.DELIVERING),
-        ):
-            while True:
-                query = {
-                    "status": status.value,
+        lease_expires_at = now + self._lease_duration()
+        claims = (
+            (
+                {
+                    "status": JobStatus.QUEUED.value,
                     "next_attempt_at": {"$lte": now},
-                }
+                },
+                JobStatus.GENERATING,
+            ),
+            (
+                {
+                    "status": JobStatus.READY_TO_DELIVER.value,
+                    "next_attempt_at": {"$lte": now},
+                },
+                JobStatus.DELIVERING,
+            ),
+            (
+                {
+                    "status": JobStatus.GENERATING.value,
+                    "$or": [
+                        {"lease_expires_at": {"$lte": now}},
+                        {"lease_expires_at": None},
+                        {"lease_expires_at": {"$exists": False}},
+                    ],
+                },
+                JobStatus.GENERATING,
+            ),
+            (
+                {
+                    "status": JobStatus.DELIVERING.value,
+                    "$or": [
+                        {"lease_expires_at": {"$lte": now}},
+                        {"lease_expires_at": None},
+                        {"lease_expires_at": {"$exists": False}},
+                    ],
+                },
+                JobStatus.DELIVERING,
+            ),
+        )
+        for query, claimed_status in claims:
+            while True:
                 update = {
                     "$set": {
                         "status": claimed_status.value,
                         "claimed_by": self.worker_id,
                         "claimed_at": now,
+                        "lease_expires_at": lease_expires_at,
                     }
                 }
                 record = (
@@ -200,23 +267,36 @@ class Autosummary(commands.Cog):
         return claimed
 
     async def _process_pending_video(self, item):
-        status = getattr(item, "status", JobStatus.QUEUED)
-        status_value = getattr(status, "value", status)
-        if status_value in {JobStatus.QUEUED.value, JobStatus.GENERATING.value}:
-            await self._generate_for_job(item)
-            status = getattr(item, "status", JobStatus.READY_TO_DELIVER)
+        stop_renewal = asyncio.Event()
+        renewal_task = None
+        if self._uses_leases(item):
+            renewal_task = asyncio.create_task(
+                self._renew_lease_until_finished(item, stop_renewal)
+            )
+        try:
+            status = getattr(item, "status", JobStatus.QUEUED)
             status_value = getattr(status, "value", status)
-            if (
-                getattr(item, "summary_details", None)
-                and status_value == PendingVideoStatus.QUEUED.value
-            ):
-                status_value = JobStatus.READY_TO_DELIVER.value
+            if status_value in {JobStatus.QUEUED.value, JobStatus.GENERATING.value}:
+                if not await self._generate_for_job(item):
+                    return
+                status = getattr(item, "status", JobStatus.READY_TO_DELIVER)
+                status_value = getattr(status, "value", status)
+                if (
+                    getattr(item, "summary_details", None)
+                    and status_value == PendingVideoStatus.QUEUED.value
+                ):
+                    status_value = JobStatus.READY_TO_DELIVER.value
 
-        if status_value in {
-            JobStatus.READY_TO_DELIVER.value,
-            JobStatus.DELIVERING.value,
-        }:
-            await self._deliver_for_job(item)
+            if status_value in {
+                JobStatus.READY_TO_DELIVER.value,
+                JobStatus.DELIVERING.value,
+            }:
+                await self._deliver_for_job(item)
+        finally:
+            if renewal_task is not None:
+                stop_renewal.set()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await renewal_task
 
     async def _generate_for_job(self, item):
         if not getattr(item, "summary_details", None):
@@ -232,32 +312,52 @@ class Autosummary(commands.Cog):
                 item.summary_details = [self._as_topic(detail) for detail in details]
             except (PermanentSummaryError, PermanentHolodexError) as exc:
                 await self._handle_source_error(item, exc, permanent=True)
-                return
+                return False
             except (TransientSummaryError, TransientHolodexError) as exc:
                 await self._handle_source_error(item, exc)
-                return
+                return False
             except Exception as exc:
                 logger.exception("Unexpected summary error for %s", item.video_id)
                 await self._handle_source_error(item, exc)
-                return
+                return False
 
         item.generated_at = datetime.now(UTC)
         self._set_status(item, JobStatus.READY_TO_DELIVER)
         item.last_error = None
-        await item.save()
+        return await self._save_item(item)
 
     async def _deliver_for_job(self, item):
         self._set_status(item, JobStatus.DELIVERING)
-        await item.save()
+        chunks = list(getattr(item, "delivery_chunks", []))
+        if not chunks:
+            chunks = split_message(self._summary_message(item, item.summary_details))
+            if not chunks:
+                await self._handle_delivery_error(
+                    item, RuntimeError("summary has no deliverable content")
+                )
+                return False
+            item.delivery_chunks = chunks
+            item.delivery_chunk_index = 0
+        if not await self._save_item(item):
+            return False
         try:
-            await self._post_summary(item, getattr(item, "summary_details", []))
+            channel = await self._get_auto_summary_channel()
+            if channel is None:
+                raise RuntimeError("auto-summary Discord channel is unavailable")
+            start = getattr(item, "delivery_chunk_index", 0)
+            for chunk in chunks[start:]:
+                await channel.send(chunk)
+                item.delivery_chunk_index += 1
+                if not await self._save_item(item):
+                    return False
         except Exception as exc:  # noqa: BLE001 - Discord can fail transiently
             await self._handle_delivery_error(item, exc)
-            return
+            return False
         item.delivered_at = datetime.now(UTC)
         self._set_status(item, JobStatus.COMPLETED)
         item.last_error = None
-        await item.save()
+        self._release_lease(item)
+        return await self._save_item(item)
 
     async def _handle_source_error(
         self,
@@ -273,20 +373,23 @@ class Autosummary(commands.Cog):
         if permanent or item.retry_count >= max_retries:
             self._set_status(item, JobStatus.FAILED)
             item.last_error = str(exc)
-            await item.save()
-            if not permanent:
+            self._release_lease(item)
+            saved = await self._save_item(item)
+            if saved and not permanent:
                 await self._post_failure(item)
-            return
+            return saved
         backoff = exponential_backoff_hours(item.retry_count)
         item.next_attempt_at = datetime.now(UTC) + timedelta(hours=backoff)
         self._set_status(item, JobStatus.QUEUED)
         item.last_error = str(exc)
-        await item.save()
+        self._release_lease(item)
+        saved = await self._save_item(item)
         logger.info(
             "Summary generation failed for %s; retrying in %s hour(s)",
             item.video_id,
             backoff,
         )
+        return saved
 
     async def _handle_delivery_error(self, item, exc: Exception):
         item.delivery_retry_count = getattr(item, "delivery_retry_count", 0) + 1
@@ -300,17 +403,21 @@ class Autosummary(commands.Cog):
             backoff = exponential_backoff_hours(item.delivery_retry_count)
             item.next_attempt_at = datetime.now(UTC) + timedelta(hours=backoff)
             self._set_status(item, JobStatus.READY_TO_DELIVER)
-        await item.save()
+        self._release_lease(item)
+        return await self._save_item(item)
 
     async def _post_summary(self, item, details):
         channel = await self._get_auto_summary_channel()
         if channel is None:
             raise RuntimeError("auto-summary Discord channel is unavailable")
+        await self._send_to_channel(channel, self._summary_message(item, details))
+
+    def _summary_message(self, item, details) -> str:
         message = f"**Video:** {item.title}\n**Channel:** {item.channel_name}"
         for detail in details:
             topic = self._as_topic(detail)
             message += f"\n\n**{topic.name}**\n{topic.detail or ''}"
-        await self._send_to_channel(channel, message)
+        return message
 
     async def _post_failure(self, item):
         channel = await self._get_auto_summary_channel()
@@ -318,7 +425,7 @@ class Autosummary(commands.Cog):
             return
         message = (
             f"**Video:** {item.title}\n**Channel:** {item.channel_name}\n\n"
-            f"Failed to generate a summary after {MAX_RETRIES} attempts; "
+            f"Failed to generate a summary after {getattr(getattr(self, 'settings', None), 'source_retry_limit', MAX_RETRIES)} attempts; "
             "no transcript could be fetched for this video."
         )
         await self._send_to_channel(channel, message)
@@ -346,6 +453,61 @@ class Autosummary(commands.Cog):
     async def _send_to_channel(self, channel, text: str):
         for chunk in split_message(text):
             await channel.send(chunk)
+
+    def _lease_duration(self) -> timedelta:
+        seconds = getattr(getattr(self, "settings", None), "job_lease_seconds", None)
+        if seconds is None:
+            return JOB_LEASE_DURATION
+        return timedelta(seconds=max(1, seconds))
+
+    @staticmethod
+    def _uses_leases(item) -> bool:
+        return PendingVideo is SummaryJob and isinstance(item, SummaryJob)
+
+    def _release_lease(self, item) -> None:
+        if self._uses_leases(item):
+            item.claimed_by = None
+            item.claimed_at = None
+            item.lease_expires_at = None
+
+    async def _save_item(self, item) -> bool:
+        """Persist only if this worker still owns a claimed SummaryJob."""
+        if not self._uses_leases(item):
+            await item.save()
+            return True
+
+        values = item.model_dump(mode="python", by_alias=True, exclude={"id"})
+        values.pop("_id", None)
+        result = await PendingVideo.get_pymongo_collection().update_one(
+            {"_id": item.id, "claimed_by": self.worker_id}, {"$set": values}
+        )
+        if getattr(result, "matched_count", 0) != 1:
+            logger.warning("Lost lease for summary job %s", item.video_id)
+            return False
+        return True
+
+    async def _renew_lease_until_finished(self, item, stop: asyncio.Event) -> None:
+        interval = max(1.0, self._lease_duration().total_seconds() / 3)
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                pass
+            if not await self._renew_lease(item):
+                return
+
+    async def _renew_lease(self, item) -> bool:
+        expires_at = datetime.now(UTC) + self._lease_duration()
+        result = await PendingVideo.get_pymongo_collection().update_one(
+            {"_id": item.id, "claimed_by": self.worker_id},
+            {"$set": {"lease_expires_at": expires_at}},
+        )
+        if getattr(result, "matched_count", 0) != 1:
+            logger.warning("Could not renew lease for summary job %s", item.video_id)
+            return False
+        item.lease_expires_at = expires_at
+        return True
 
     @staticmethod
     def _as_topic(detail) -> Topic:
@@ -450,7 +612,8 @@ class Autosummary(commands.Cog):
             )
             return
         lines = [f"**{channel.name}** (`{channel.channel_id}`)" for channel in channels]
-        await interaction.followup.send("Followed channels:\n" + "\n".join(lines))
+        for chunk in split_message("Followed channels:\n" + "\n".join(lines)):
+            await interaction.followup.send(chunk)
 
 
 async def setup(bot):

@@ -13,6 +13,8 @@ dependencies = [
     "discord.py",
     "beanie",
     "httpx",
+    "notebooklm-py[headless]",
+    "rich",
 ]
 
 [dependency-groups]
@@ -25,12 +27,9 @@ dev = [
     "pytest-mock>=3.15.1",
 ]
 
-deploy = [
-    "notebooklm-py[headless]",
-]
-
 [project.scripts]
 vsummary = "vsummary.main:main"
+vsummary-migrate = "vsummary.migrations:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

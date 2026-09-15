@@ -84,9 +84,9 @@ Rules of thumb:
 
 ```
 src/vsummary/
-├── main.py              # process entry point; loads settings, runs migrations, owns resources
+├── main.py              # process entry point; loads settings and owns resources
+├── migrations.py        # explicit, idempotent MongoDB data migration command
 ├── settings.py          # validated runtime configuration and .env loading
-├── migrations.py        # versioned, idempotent MongoDB data migrations
 ├── bot.py               # Bot subclass, dependency injection, cog loading, shutdown
 ├── cogs/                # Discord adapters and slash-command handlers
 │   ├── misc/
@@ -109,7 +109,7 @@ tests/
 ├── test_formatting.py       # Discord message chunking
 ├── test_holodex.py          # Holodex client contracts and retry behavior
 ├── test_integration.py      # mixed Discord, NotebookLM, and autosummary coverage
-├── test_migrations.py       # database migration behavior
+├── test_migrations.py       # migration preflight and data-shape behavior
 ├── test_models.py           # legacy model compatibility behavior
 ├── test_refactored_models.py# current model names, states, and validation
 ├── test_settings.py         # settings parsing and validation
@@ -141,6 +141,8 @@ Notes for agents:
   `ready_to_deliver`, `delivering`, `completed`, and `failed`. Generation
   output is persisted before Discord delivery so delivery retries do not
   regenerate NotebookLM output.
+- `SummaryJob` claims have a lease. Keep `claimed_by` checks on every worker
+  write and checkpoint Discord chunk delivery before attempting later chunks.
 - `util/youtube.py` is YouTube-only. Use `util/video.py` for the
   source-agnostic `VideoRef` boundary and `util/summarizer.py` for NotebookLM
   work. Keep both free of Discord dependencies so they remain unit-testable.
@@ -151,19 +153,19 @@ Notes for agents:
 
 ### Migrations
 
-Migrations currently run automatically during `vsummary.main.async_main`,
-after connecting to MongoDB and before Beanie initialization. There is no
-separate migration executable. To run them independently, import
-`migrate_database` from `vsummary.migrations` and call it with an async
-PyMongo database handle.
+Migrations never run as part of bot startup. Before deploying this schema to
+an existing production database, back it up and run:
 
-The migration path is additive and idempotent. It preserves the existing
-`Channel`, `PendingVideo`, and `Video` collections, maps legacy `done` jobs to
-`completed`, fills new job fields, renames legacy `Video.id` to `video_id`,
-and records the applied schema version in `vsummary_migrations`. It does not
-drop collections or deduplicate records automatically. Back up production
-data and inspect duplicates before starting a deployment that creates the new
-unique indexes.
+```bash
+uv run vsummary-migrate --check
+uv run vsummary-migrate
+```
+
+The check reports duplicate natural keys that would block required unique
+indexes and makes no writes. Resolve those records manually before running the
+migration. The migration is additive and idempotent: it maps legacy pending
+job status `done` to `completed`, fills lease/delivery fields, adds missing
+channel timestamps, and preserves the original collections.
 
 ## Setup & common commands
 
@@ -285,8 +287,8 @@ Key points an agent should know before touching `util/summarizer.py`:
   `commands.Cog` (or uses `app_commands` for slash commands) and is loaded
   via an extension `setup()` function.
 - `bot.py` owns the `Bot` instance, intents configuration, dependency
-  injection, cog/extension loading, and shutdown. `main.py` owns MongoDB,
-  migrations, and the NotebookLM context manager.
+  injection, cog/extension loading, and shutdown. `main.py` owns MongoDB and
+  the NotebookLM context manager.
 - Keep the user-facing slash-command names stable: `/topics`, `/detail`,
   `/addchannel`, `/removechannel`, and `/listchannels`. Python method and
   model names may be made more descriptive without changing those command

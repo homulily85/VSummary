@@ -1,10 +1,12 @@
 import discord
+import httpx
 from discord import app_commands
 from discord.ext import commands
-from notebooklm import SourceAddError
+from notebooklm import NotebookLMError, SourceAddError
 
 from vsummary.util.discord import split_message
 from vsummary.util.summarizer import (
+    InvalidSummaryResponse,
     get_topic_details,
     get_topic_details_all,
     get_topic_list,
@@ -21,6 +23,14 @@ class TopicsView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.bot = bot
         self.ref = ref
+
+        if not topics:
+            raise ValueError("at least one topic is required for a topic selector")
+        for topic in topics:
+            if not topic.name.strip():
+                raise ValueError("Topic labels cannot be blank")
+            if len(topic.name) > 100:
+                raise ValueError("Topic labels cannot exceed 100 characters")
 
         options = [
             discord.SelectOption(
@@ -73,6 +83,14 @@ class TopicsView(discord.ui.View):
         except SourceAddError:
             await interaction.followup.send(
                 "Provided link or id is invalid or no transcript available."
+            )
+        except InvalidSummaryResponse:
+            await interaction.followup.send(
+                "NotebookLM returned an invalid topic list. Please try again later."
+            )
+        except (NotebookLMError, httpx.HTTPError, OSError):
+            await interaction.followup.send(
+                "NotebookLM is temporarily unavailable. Please try again later."
             )
         finally:
             await interaction.edit_original_response(view=self)
@@ -149,6 +167,14 @@ class Summarizer(commands.Cog):
             await interaction.followup.send(
                 "Provided link or id is invalid or no transcript available."
             )
+        except InvalidSummaryResponse:
+            await interaction.followup.send(
+                "NotebookLM returned an invalid topic list. Please try again later."
+            )
+        except (NotebookLMError, httpx.HTTPError, OSError):
+            await interaction.followup.send(
+                "NotebookLM is temporarily unavailable. Please try again later."
+            )
 
     @app_commands.command(
         name="detail", description="Get details about a specific topic in the video."
@@ -190,6 +216,14 @@ class Summarizer(commands.Cog):
         except SourceAddError:
             await interaction.followup.send(
                 "Provided link or id is invalid or no transcript available."
+            )
+        except InvalidSummaryResponse:
+            await interaction.followup.send(
+                "NotebookLM returned an invalid topic list. Please try again later."
+            )
+        except (NotebookLMError, httpx.HTTPError, OSError):
+            await interaction.followup.send(
+                "NotebookLM is temporarily unavailable. Please try again later."
             )
 
 

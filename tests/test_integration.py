@@ -22,6 +22,7 @@ from vsummary.util.holodex import (
     HolodexChannel,
     HolodexVideo,
 )
+from vsummary.util.summarizer import InvalidSummaryResponse
 from vsummary.util.video import VideoRef
 
 VIDEO_ID = "dQw4w9WgXcQ"
@@ -333,6 +334,36 @@ async def test_topics_command_reports_invalid_video_input(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_topics_command_reports_malformed_notebooklm_output_after_deferring(
+    monkeypatch,
+):
+    cog = Summarizer(SimpleNamespace(notebook_client=object()))
+    interaction = FakeInteraction()
+    monkeypatch.setattr(
+        summarizer_module,
+        "get_topic_list",
+        AsyncMock(side_effect=InvalidSummaryResponse("empty topic list")),
+    )
+
+    await Summarizer.topics.callback(cog, interaction, VIDEO_ID)
+
+    assert interaction.response.deferred == [{"thinking": True}]
+    assert interaction.followup.messages == [
+        ("NotebookLM returned an invalid topic list. Please try again later.", {})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_topic_pipeline_rejects_an_empty_notebooklm_topic_list():
+    client = FakeNotebookClient(answers=["[]"])
+
+    with pytest.raises(InvalidSummaryResponse, match="empty topic list"):
+        await summarizer_util.get_topic_list(client, VIDEO_REF)
+
+    assert client.deleted == ["notebook-1"]
+
+
+@pytest.mark.asyncio
 async def test_topics_view_selected_topic_flow_disables_components(monkeypatch):
     bot = SimpleNamespace(notebook_client=object())
     view = TopicsView(bot, VIDEO_REF, [Topic(name="Intro")])
@@ -577,6 +608,20 @@ async def test_autosummary_list_channels_handles_empty_and_populated_storage():
 
 
 @pytest.mark.asyncio
+async def test_autosummary_list_channels_splits_messages_at_discord_limit():
+    cog = make_autosummary()
+    FakeFollowedChannel.records = [
+        FakeFollowedChannel(f"UC{i}", "x" * 100) for i in range(30)
+    ]
+    interaction = FakeInteraction()
+
+    await Autosummary.listchannels.callback(cog, interaction)
+
+    assert len(interaction.followup.messages) > 1
+    assert all(len(content) <= 2_000 for content, _ in interaction.followup.messages)
+
+
+@pytest.mark.asyncio
 async def test_autosummary_poll_and_process_loops_delegate_each_due_item():
     cog = make_autosummary()
     FakeFollowedChannel.records = [FakeFollowedChannel("UC1", "First")]
@@ -605,6 +650,47 @@ async def test_autosummary_poll_and_process_loops_delegate_each_due_item():
     await cog.process_due_videos()
 
     cog._process_pending_video.assert_awaited_once_with(due_item)
+
+
+@pytest.mark.asyncio
+async def test_autosummary_poll_continues_after_one_channel_fails():
+    cog = make_autosummary()
+    first = FakeFollowedChannel("UC1", "First")
+    second = FakeFollowedChannel("UC2", "Second")
+    FakeFollowedChannel.records = [first, second]
+    video = HolodexVideo("video", "Title", None, datetime.now(UTC), "Second")
+    cog.holodex.get_channel_videos = AsyncMock(
+        side_effect=[RuntimeError("Holodex unavailable"), [video]]
+    )
+    cog._enqueue_new_video = AsyncMock()
+
+    await cog.check_new_videos()
+
+    assert cog.holodex.get_channel_videos.await_count == 2
+    cog._enqueue_new_video.assert_awaited_once_with(video, second)
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_waits_for_discord_ready_before_first_run():
+    bot = SimpleNamespace(wait_until_ready=AsyncMock())
+    cog = Autosummary.__new__(Autosummary)
+    cog.bot = bot
+
+    await cog.before_poll_loop()
+
+    bot.wait_until_ready.assert_awaited_once_with()
+
+
+def test_autosummary_poll_interval_comes_from_settings():
+    bot = SimpleNamespace(notebook_client=None)
+    settings = Settings(
+        discord_token="token",
+        mongodb_uri="mongodb://localhost",
+        poll_interval_minutes=7,
+    )
+    cog = Autosummary(bot, holodex=object(), settings=settings, start_polling=False)
+
+    assert cog.poll_loop.minutes == 7
 
 
 @pytest.mark.asyncio

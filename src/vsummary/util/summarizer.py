@@ -1,5 +1,6 @@
 import json
 import logging
+from collections.abc import Sequence
 
 import httpx
 from notebooklm import NotebookLMClient, SourceAddError
@@ -22,6 +23,10 @@ class TransientSummaryError(SummaryServiceError):
 
 class PermanentSummaryError(SummaryServiceError):
     """Raised when NotebookLM returned an unusable result."""
+
+
+class InvalidSummaryResponse(PermanentSummaryError):
+    """Raised when NotebookLM's topic JSON cannot be shown safely in Discord."""
 
 
 class NotebookLMSummaryService:
@@ -61,6 +66,44 @@ def _topic_boundaries(topics: list[Topic], topic_index: int) -> dict[str, str]:
             else "the end of the video"
         ),
     }
+
+
+def _validated_topics(topics: Sequence[Topic]) -> list[Topic]:
+    """Validate names used both in persisted data and Discord select labels."""
+    if not topics:
+        raise InvalidSummaryResponse("NotebookLM returned an empty topic list")
+
+    validated: list[Topic] = []
+    for topic in topics:
+        name = topic.name.strip() if isinstance(topic.name, str) else ""
+        if not name:
+            raise InvalidSummaryResponse("NotebookLM returned a blank topic name")
+        if len(name) > 100:
+            raise InvalidSummaryResponse(
+                "NotebookLM returned a topic name longer than Discord allows"
+            )
+        topic.name = name
+        validated.append(topic)
+    return validated
+
+
+def _parse_topics(answer: str) -> list[Topic]:
+    try:
+        payload = json.loads(answer)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise InvalidSummaryResponse(
+            "NotebookLM did not return JSON topic data"
+        ) from exc
+
+    if not isinstance(payload, list):
+        raise InvalidSummaryResponse("NotebookLM topic data must be a list")
+
+    topics: list[Topic] = []
+    for item in payload:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise InvalidSummaryResponse("NotebookLM topic data is missing a name")
+        topics.append(Topic(name=item["name"]))
+    return _validated_topics(topics)
 
 
 async def _create_notebook_with_source(
@@ -115,6 +158,7 @@ async def _get_or_create_topic_list(
         Video.source == ref.source, Video.video_id == ref.video_id
     )
     if video and video.topics:
+        video.topics = _validated_topics(video.topics)
         return video, None
 
     logger.info(
@@ -140,9 +184,7 @@ async def _get_or_create_topic_list(
         response = await client.chat.ask(notebook.id, prompt)
 
         logger.info("Parsing response and saving topics to database...")
-        topics = json.loads(response.answer)
-
-        topics_objects = [Topic(name=topic["name"]) for topic in topics]
+        topics_objects = _parse_topics(response.answer)
 
         if video:
             video.topics = topics_objects
@@ -175,7 +217,7 @@ async def get_topic_list(client: NotebookLMClient, ref: VideoRef):
 
 async def get_topic_details(client: NotebookLMClient, ref: VideoRef, topic_index: int):
     video, notebook = await _get_or_create_topic_list(client, ref)
-    topics = video.topics
+    topics = _validated_topics(video.topics or [])
 
     try:
         if topic_index < 0 or topic_index >= len(topics):
@@ -210,7 +252,7 @@ async def get_topic_details(client: NotebookLMClient, ref: VideoRef, topic_index
 
 async def get_topic_details_all(client: NotebookLMClient, ref: VideoRef):
     video, notebook = await _get_or_create_topic_list(client, ref)
-    topics = video.topics
+    topics = _validated_topics(video.topics or [])
 
     if notebook is None and any(t.detail is None for t in topics):
         notebook = await _create_notebook_with_source(client, ref)

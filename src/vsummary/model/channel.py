@@ -49,13 +49,17 @@ class SummaryJob(Document):
     last_error: str | None = None
     claimed_by: str | None = None
     claimed_at: datetime | None = None
+    lease_expires_at: datetime | None = None
     generated_at: datetime | None = None
     delivered_at: datetime | None = None
+    delivery_chunks: list[str] = Field(default_factory=list)
+    delivery_chunk_index: int = 0
 
     @field_validator(
         "available_at",
         "next_attempt_at",
         "claimed_at",
+        "lease_expires_at",
         "generated_at",
         "delivered_at",
     )
@@ -71,6 +75,7 @@ class SummaryJob(Document):
             IndexModel([("channel_id", 1), ("video_id", 1)], unique=True),
             [("status", 1)],
             [("next_attempt_at", 1)],
+            [("lease_expires_at", 1)],
         ]
 
 

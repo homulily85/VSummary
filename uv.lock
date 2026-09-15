@@ -1331,13 +1331,12 @@ dependencies = [
     { name = "beanie" },
     { name = "discord-py" },
     { name = "httpx" },
+    { name = "notebooklm-py", extra = ["headless"] },
     { name = "python-dotenv" },
+    { name = "rich" },
 ]
 
 [package.dev-dependencies]
-deploy = [
-    { name = "notebooklm-py", extra = ["headless"] },
-]
 dev = [
     { name = "notebooklm-py", extra = ["browser"] },
     { name = "pre-commit" },
@@ -1352,11 +1351,12 @@ requires-dist = [
     { name = "beanie" },
     { name = "discord-py" },
     { name = "httpx" },
+    { name = "notebooklm-py", extras = ["headless"] },
     { name = "python-dotenv" },
+    { name = "rich" },
 ]
 
 [package.metadata.requires-dev]
-deploy = [{ name = "notebooklm-py", extras = ["headless"] }]
 dev = [
     { name = "notebooklm-py", extras = ["browser"] },
     { name = "pre-commit", specifier = ">=4.6.1" },

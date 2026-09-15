@@ -4,6 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -118,12 +119,12 @@ class HolodexClient:
                     raise TransientHolodexError(str(exc)) from exc
                 await asyncio.sleep(2**attempt)
                 continue
-            if response.status_code >= 500:
+            if response.status_code in {408, 429} or response.status_code >= 500:
                 if attempt >= self._retries:
                     raise TransientHolodexError(
                         f"Holodex returned HTTP {response.status_code}"
                     )
-                await asyncio.sleep(2**attempt)
+                await asyncio.sleep(_retry_delay(response, attempt))
                 continue
             return response
         raise AssertionError("unreachable")
@@ -132,33 +133,74 @@ class HolodexClient:
         response = await self._request("GET", f"/channels/{channel_id}")
         if response.status_code == 404:
             raise ChannelNotFoundError(f"Channel '{channel_id}' not found on Holodex.")
+        if response.is_error:
+            raise PermanentHolodexError(
+                f"Holodex returned HTTP {response.status_code} for channel '{channel_id}'"
+            )
         try:
-            response.raise_for_status()
             data = response.json()
             return HolodexChannel(id=str(data["id"]), name=str(data["name"]))
-        except (httpx.HTTPStatusError, KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             raise MalformedHolodexResponse(
                 f"Invalid channel response for '{channel_id}'"
             ) from exc
 
     async def fetch_channel_videos(
-        self, channel_id: str, limit: int = 1
+        self, channel_id: str, limit: int = 1, offset: int = 0
     ) -> list[HolodexVideo]:
         response = await self._request(
             "GET",
             f"/channels/{channel_id}/videos",
-            params={"type": "stream", "limit": limit, "offset": 0, "status": "past"},
+            params={
+                "type": "stream",
+                "limit": limit,
+                "offset": offset,
+                "status": "past",
+            },
         )
+        if response.is_error:
+            raise PermanentHolodexError(
+                f"Holodex returned HTTP {response.status_code} for videos of "
+                f"channel '{channel_id}'"
+            )
         try:
-            response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, list):
                 raise TypeError("expected a list")
             return [_parse_video(video) for video in payload]
-        except (httpx.HTTPStatusError, KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             raise MalformedHolodexResponse(
                 f"Invalid videos response for '{channel_id}'"
             ) from exc
+
+    async def fetch_channel_videos_since(
+        self,
+        channel_id: str,
+        since: datetime,
+        *,
+        page_size: int = 50,
+    ) -> list[HolodexVideo]:
+        """Return every past stream published after ``since``.
+
+        Holodex returns newest videos first. Pagination stops as soon as the
+        first older item is encountered, avoiding a full channel history scan.
+        """
+        if since.tzinfo is None:
+            raise ValueError("since must be timezone-aware")
+        if page_size <= 0:
+            raise ValueError("page_size must be positive")
+
+        videos: list[HolodexVideo] = []
+        offset = 0
+        while True:
+            page = await self.fetch_channel_videos(
+                channel_id, limit=page_size, offset=offset
+            )
+            newer = [video for video in page if video.available_at > since]
+            videos.extend(newer)
+            if len(page) < page_size or len(newer) != len(page):
+                return videos
+            offset += len(page)
 
     async def get_channel(self, channel_id: str) -> HolodexChannel | None:
         """Legacy helper returning ``None`` for ordinary HTTP failures."""
@@ -171,11 +213,11 @@ class HolodexClient:
             return None
 
     async def get_channel_videos(
-        self, channel_id: str, limit: int = 1
+        self, channel_id: str, limit: int = 1, offset: int = 0
     ) -> list[HolodexVideo]:
         """Legacy helper returning an empty list for ordinary HTTP failures."""
         try:
-            return await self.fetch_channel_videos(channel_id, limit)
+            return await self.fetch_channel_videos(channel_id, limit, offset)
         except (PermanentHolodexError, TransientHolodexError) as exc:
             logger.error("Error fetching videos for channel %s: %s", channel_id, exc)
             return []
@@ -194,9 +236,33 @@ class HolodexGateway:
         return await self.client.fetch_channel(channel_id)
 
     async def get_channel_videos(
-        self, channel_id: str, limit: int = 1
+        self, channel_id: str, limit: int = 1, offset: int = 0
     ) -> list[HolodexVideo]:
-        return await self.client.fetch_channel_videos(channel_id, limit)
+        return await self.client.fetch_channel_videos(channel_id, limit, offset)
+
+    async def get_channel_videos_since(
+        self, channel_id: str, since: datetime, *, page_size: int = 50
+    ) -> list[HolodexVideo]:
+        return await self.client.fetch_channel_videos_since(
+            channel_id, since, page_size=page_size
+        )
+
+
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    """Honor a valid Retry-After response header before exponential backoff."""
+    value = response.headers.get("Retry-After")
+    if value:
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=UTC)
+                return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
+            except (TypeError, ValueError):
+                pass
+    return float(2**attempt)
 
 
 def _parse_video(video: dict) -> HolodexVideo:
