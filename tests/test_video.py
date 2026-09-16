@@ -44,3 +44,34 @@ def test_parse_and_build_round_trip():
     ref = parse_video_source(f"https://youtu.be/{VIDEO_ID}")
 
     assert parse_video_source(build_video_url(ref)) == ref
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://www.twitch.tv/videos/123456789",
+        "https://twitch.tv/videos/123456789?filter=archives",
+    ],
+)
+def test_parse_video_source_accepts_full_twitch_vod_urls(value):
+    assert parse_video_source(value) == VideoRef(source="twitch", video_id="123456789")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "123456789",
+        "https://clips.twitch.tv/ExampleClip",
+        "https://www.twitch.tv/example_channel",
+        "https://www.twitch.tv/videos/not-a-number",
+    ],
+)
+def test_parse_video_source_rejects_unsupported_twitch_inputs(value):
+    with pytest.raises(UnsupportedVideoSource):
+        parse_video_source(value)
+
+
+def test_build_video_url_supports_twitch_vods():
+    assert build_video_url(VideoRef(source="twitch", video_id="123456789")) == (
+        "https://www.twitch.tv/videos/123456789"
+    )

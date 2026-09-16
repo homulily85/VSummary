@@ -18,6 +18,12 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
+class ManualSummaryOperation(str, Enum):
+    TOPICS = "topics"
+    DETAIL_ONE = "detail_one"
+    DETAIL_ALL = "detail_all"
+
+
 class FollowedChannel(Document):
     channel_id: str
     name: str
@@ -75,6 +81,39 @@ class SummaryJob(Document):
             IndexModel([("channel_id", 1), ("video_id", 1)], unique=True),
             [("status", 1)],
             [("next_attempt_at", 1)],
+            [("lease_expires_at", 1)],
+        ]
+
+
+class ManualSummaryJob(Document):
+    source: str
+    video_id: str
+    operation: ManualSummaryOperation
+    topic_index: int | None = None
+    channel_id: int
+    requester_id: int
+    next_attempt_at: datetime
+    status: JobStatus = JobStatus.QUEUED
+    retry_count: int = 0
+    delivery_retry_count: int = 0
+    delivery_chunks: list[str] = Field(default_factory=list)
+    delivery_chunk_index: int = 0
+    last_error: str | None = None
+    claimed_by: str | None = None
+    claimed_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+
+    @field_validator("next_attempt_at", "claimed_at", "lease_expires_at")
+    @classmethod
+    def require_manual_job_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("datetime values must be timezone-aware")
+        return value.astimezone(UTC) if value is not None else None
+
+    class Settings:
+        name = "ManualSummaryJob"
+        indexes: ClassVar[list] = [
+            [("status", 1), ("next_attempt_at", 1)],
             [("lease_expires_at", 1)],
         ]
 

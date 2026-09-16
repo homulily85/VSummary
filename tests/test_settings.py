@@ -19,6 +19,7 @@ def test_settings_loads_and_validates_runtime_configuration():
             "LOG_FILE_PATH": "var/log/vsummary.log",
             "LOG_LEVEL": "debug",
             "DISCORD_LOG_CHANNEL_ID": "456",
+            "DISCORD_SEND_INTERVAL_SECONDS": "0.5",
         }
     )
 
@@ -30,6 +31,7 @@ def test_settings_loads_and_validates_runtime_configuration():
     assert settings.log_file_path == Path("var/log/vsummary.log")
     assert settings.log_level == "DEBUG"
     assert settings.discord_log_channel_id == 456
+    assert settings.discord_send_interval_seconds == 0.5
 
 
 def test_settings_uses_logging_defaults_and_rejects_invalid_logging_values():
@@ -40,11 +42,13 @@ def test_settings_uses_logging_defaults_and_rejects_invalid_logging_values():
     assert defaults.log_file_path == Path("logs/vsummary.log")
     assert defaults.log_level == "INFO"
     assert defaults.discord_log_channel_id is None
+    assert defaults.discord_send_interval_seconds == 1.0
 
     for name, value in (
         ("LOG_LEVEL", "verbose"),
         ("DISCORD_LOG_CHANNEL_ID", "not-an-integer"),
         ("DISCORD_LOG_CHANNEL_ID", "0"),
+        ("DISCORD_SEND_INTERVAL_SECONDS", "0"),
     ):
         values = {
             "DISCORD_TOKEN": "token",

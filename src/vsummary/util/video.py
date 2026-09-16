@@ -44,6 +44,18 @@ def parse_video_source(value: str) -> VideoRef:
     if not value.strip():
         raise UnsupportedVideoSource("Video reference cannot be empty.")
 
+    parsed = urlparse(value.strip())
+    hostname = (parsed.hostname or "").lower()
+    twitch_segments = [segment for segment in parsed.path.split("/") if segment]
+    if (
+        parsed.scheme in {"http", "https"}
+        and hostname in {"twitch.tv", "www.twitch.tv"}
+        and len(twitch_segments) == 2
+        and twitch_segments[0] == "videos"
+        and twitch_segments[1].isdigit()
+    ):
+        return VideoRef(source="twitch", video_id=twitch_segments[1])
+
     try:
         watch_url = to_video_url(value)
     except InvalidYouTubeInputError as exc:
@@ -63,5 +75,7 @@ def build_video_url(ref: VideoRef) -> str:
     """
     if ref.source == "youtube":
         return f"https://www.youtube.com/watch?v={ref.video_id}"
+    if ref.source == "twitch":
+        return f"https://www.twitch.tv/videos/{ref.video_id}"
 
     raise UnsupportedVideoSource(f"Unsupported video source: '{ref.source}'")

@@ -4,6 +4,7 @@ from notebooklm import NotebookLMClient
 
 from vsummary.logging import DiscordLogHandler
 from vsummary.settings import Settings
+from vsummary.util.discord import DiscordMessageRateLimiter
 from vsummary.util.video_work import VideoWorkCoordinator
 
 
@@ -23,6 +24,9 @@ class Bot(commands.Bot):
         self.holodex = holodex
         self.discord_log_handler = discord_log_handler
         self.video_work = VideoWorkCoordinator()
+        self.message_rate_limiter = DiscordMessageRateLimiter(
+            getattr(settings, "discord_send_interval_seconds", 1.0)
+        )
 
     async def close(self):
         if self.discord_log_handler is not None:
@@ -44,6 +48,7 @@ class Bot(commands.Bot):
     async def setup_hook(self):
         cogs = [
             "vsummary.cogs.misc.ping",
+            "vsummary.cogs.manualsummary.manualsummary",
             "vsummary.cogs.summarizer.summarizer",
             "vsummary.cogs.autosummary.autosummary",
         ]

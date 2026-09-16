@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import ClassVar
@@ -8,14 +9,21 @@ import pytest
 from notebooklm import SourceAddError
 
 import vsummary.cogs.autosummary.autosummary as autosummary_module
+import vsummary.cogs.manualsummary.manualsummary as manualsummary_module
 import vsummary.cogs.summarizer.summarizer as summarizer_module
 import vsummary.main as main_module
 import vsummary.util.summarizer as summarizer_util
 from vsummary.bot import Bot
 from vsummary.cogs.autosummary.autosummary import Autosummary
+from vsummary.cogs.manualsummary.manualsummary import ManualSummary
 from vsummary.cogs.misc.ping import Ping
 from vsummary.cogs.summarizer.summarizer import Summarizer, TopicsView
-from vsummary.model.channel import PendingVideoStatus
+from vsummary.model.channel import (
+    JobStatus,
+    ManualSummaryJob,
+    ManualSummaryOperation,
+    PendingVideoStatus,
+)
 from vsummary.model.video import Topic
 from vsummary.settings import Settings
 from vsummary.util.holodex import (
@@ -64,6 +72,8 @@ class FakeInteraction:
         self.response = FakeResponse()
         self.followup = FakeFollowup()
         self.edited_views = []
+        self.channel_id = 123
+        self.user = SimpleNamespace(id=456)
 
     async def edit_original_response(self, **kwargs):
         self.edited_views.append(kwargs)
@@ -229,6 +239,27 @@ def make_autosummary(bot=None):
     return cog
 
 
+def make_manual_summary(bot):
+    cog = ManualSummary.__new__(ManualSummary)
+    cog.bot = bot
+    cog.settings = SimpleNamespace(source_retry_limit=5)
+    cog.worker_id = "worker"
+    cog._save = AsyncMock(return_value=True)
+    return cog
+
+
+def make_manual_detail_job(topic_index=0):
+    return ManualSummaryJob.model_construct(
+        source="youtube",
+        video_id=VIDEO_ID,
+        operation=ManualSummaryOperation.DETAIL_ONE,
+        topic_index=topic_index,
+        channel_id=123,
+        requester_id=456,
+        next_attempt_at=datetime.now(UTC),
+    )
+
+
 @pytest.fixture(autouse=True)
 def reset_fake_storage(monkeypatch):
     FakeVideoRecord.records = []
@@ -283,6 +314,41 @@ async def test_summarization_pipeline_deletes_notebook_when_source_cannot_be_add
 
     assert client.created[0].id == "notebook-1"
     assert client.deleted == ["notebook-1"]
+
+
+@pytest.mark.asyncio
+async def test_twitch_source_uploads_temporary_audio_file(monkeypatch, tmp_path):
+    client = FakeNotebookClient()
+    uploaded = []
+    client.sources.add_file = AsyncMock(
+        side_effect=lambda *args, **kwargs: uploaded.append((args, kwargs))
+    )
+    audio = tmp_path / "vod.m4a"
+    audio.write_bytes(b"audio")
+
+    @asynccontextmanager
+    async def fake_download(ref, max_duration_seconds):
+        assert ref == VideoRef(source="twitch", video_id="123456789")
+        assert max_duration_seconds == 21_600
+        yield audio
+
+    monkeypatch.setattr(summarizer_util, "download_twitch_audio", fake_download)
+
+    notebook = await summarizer_util._create_notebook_with_source(
+        client, VideoRef(source="twitch", video_id="123456789")
+    )
+
+    assert uploaded == [
+        (
+            (notebook.id, audio),
+            {
+                "mime_type": "audio/mp4",
+                "wait": True,
+                "wait_timeout": 600,
+                "title": "Twitch VOD 123456789",
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -445,65 +511,89 @@ async def test_topics_view_all_topics_flow_sends_each_detail(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_detail_command_supports_all_topics_and_single_topic(monkeypatch):
-    cog = Summarizer(SimpleNamespace(notebook_client=object()))
-    all_interaction = FakeInteraction()
-    all_details = AsyncMock(
-        return_value=[
-            {"topic_name": "Intro", "detail": "A"},
-            {"topic_name": "Outro", "detail": "B"},
-        ]
+async def test_detail_command_queues_youtube_summary_for_durable_delivery(monkeypatch):
+    manual_summary = SimpleNamespace(enqueue=AsyncMock())
+    cog = Summarizer(
+        SimpleNamespace(
+            notebook_client=object(),
+            get_cog=lambda name: manual_summary if name == "ManualSummary" else None,
+        )
     )
+    all_interaction = FakeInteraction()
+    all_details = AsyncMock(side_effect=AssertionError("must be queued"))
     monkeypatch.setattr(summarizer_module, "get_topic_details_all", all_details)
 
     await Summarizer.detail.callback(cog, all_interaction, VIDEO_ID, None)
 
     assert all_interaction.followup.messages == [
-        ("**1. Intro**\nA", {}),
-        ("**2. Outro**\nB", {}),
+        ("YouTube video summary is queued and will be posted here.", {}),
     ]
-    all_details.assert_awaited_once()
+    manual_summary.enqueue.assert_awaited_once_with(
+        ref=VIDEO_REF,
+        operation=ManualSummaryOperation.DETAIL_ALL,
+        topic_index=None,
+        channel_id=123,
+        requester_id=456,
+    )
+    all_details.assert_not_awaited()
 
     one_interaction = FakeInteraction()
-    one_detail = AsyncMock(return_value={"topic_name": "Outro", "detail": "B"})
+    one_detail = AsyncMock(side_effect=AssertionError("must be queued"))
     monkeypatch.setattr(summarizer_module, "get_topic_details", one_detail)
 
     await Summarizer.detail.callback(cog, one_interaction, VIDEO_ID, 2)
 
-    assert one_interaction.followup.messages == [("**Outro**\nB", {})]
-    one_detail.assert_awaited_once_with(cog.bot.notebook_client, VIDEO_REF, 1)
+    assert one_interaction.followup.messages == [
+        ("YouTube video summary is queued and will be posted here.", {}),
+    ]
+    assert manual_summary.enqueue.await_args_list[-1].kwargs == {
+        "ref": VIDEO_REF,
+        "operation": ManualSummaryOperation.DETAIL_ONE,
+        "topic_index": 1,
+        "channel_id": 123,
+        "requester_id": 456,
+    }
+    one_detail.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_detail_command_reports_invalid_index_and_source_errors(monkeypatch):
-    cog = Summarizer(SimpleNamespace(notebook_client=object()))
-    invalid_interaction = FakeInteraction()
+async def test_detail_command_reports_unsupported_source_without_queueing():
+    manual_summary = SimpleNamespace(enqueue=AsyncMock())
+    cog = Summarizer(
+        SimpleNamespace(
+            notebook_client=object(),
+            get_cog=lambda name: manual_summary if name == "ManualSummary" else None,
+        )
+    )
+    interaction = FakeInteraction()
+
+    await Summarizer.detail.callback(cog, interaction, "https://example.com/video", 1)
+
+    assert interaction.followup.messages == [
+        ("'https://example.com/video' is not a supported video source.", {}),
+    ]
+    manual_summary.enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manual_detail_job_preserves_invalid_topic_index_response(monkeypatch):
+    bot = SimpleNamespace(notebook_client=object(), video_work=VideoWorkCoordinator())
+    manual_detail = make_manual_summary(bot)
+    job = make_manual_detail_job(topic_index=3)
     monkeypatch.setattr(
-        summarizer_module,
+        manualsummary_module,
         "get_topic_details",
         AsyncMock(side_effect=IndexError),
     )
 
-    await Summarizer.detail.callback(cog, invalid_interaction, VIDEO_ID, 4)
+    await manual_detail._generate(job)
 
-    assert invalid_interaction.followup.messages == [("Invalid topic index: 4", {})]
-
-    source_interaction = FakeInteraction()
-    monkeypatch.setattr(
-        summarizer_module,
-        "get_topic_details",
-        AsyncMock(side_effect=SourceAddError("no transcript")),
-    )
-
-    await Summarizer.detail.callback(cog, source_interaction, VIDEO_ID, 1)
-
-    assert source_interaction.followup.messages == [
-        ("Provided link or id is invalid or no transcript available.", {})
-    ]
+    assert job.status is JobStatus.DELIVERING
+    assert job.delivery_chunks == ["Invalid topic index: 4"]
 
 
 @pytest.mark.asyncio
-async def test_detail_waits_for_auto_summary_and_reuses_its_cached_details():
+async def test_manual_detail_waits_for_auto_summary_and_reuses_cached_details():
     class BlockingNotebookClient(FakeNotebookClient):
         def __init__(self):
             super().__init__(
@@ -536,36 +626,34 @@ async def test_detail_waits_for_auto_summary_and_reuses_its_cached_details():
         available_at=datetime.now(UTC),
         next_attempt_at=datetime.now(UTC),
     )
-    detail = Summarizer(bot)
-    interaction = FakeInteraction()
+    manual_detail = make_manual_summary(bot)
+    job = make_manual_detail_job()
 
     automatic_task = asyncio.create_task(auto_summary._generate_for_job(item))
     await client.ask_started.wait()
-    detail_task = asyncio.create_task(
-        Summarizer.detail.callback(detail, interaction, VIDEO_ID, 1)
-    )
+    detail_task = asyncio.create_task(manual_detail._generate(job))
     await asyncio.sleep(0)
 
-    assert interaction.response.deferred == [{"thinking": True}]
-    assert interaction.followup.messages == []
+    assert job.delivery_chunks == []
 
     client.release_ask.set()
     assert await automatic_task
     await detail_task
 
-    assert interaction.followup.messages == [
-        ("**Introduction**\nThe speaker introduces the subject.", {})
+    assert job.status is JobStatus.DELIVERING
+    assert job.delivery_chunks == [
+        "**Introduction**\nThe speaker introduces the subject."
     ]
     assert len(client.created) == 1
     assert len(client.prompts) == 3
 
 
 @pytest.mark.asyncio
-async def test_auto_summary_waits_for_an_earlier_detail_request(monkeypatch):
+async def test_auto_summary_waits_for_an_earlier_manual_detail_job(monkeypatch):
     detail_started = asyncio.Event()
     release_detail = asyncio.Event()
 
-    async def blocked_detail(client, ref, topic_index):
+    async def blocked_detail(client, ref, topic_index, **kwargs):
         detail_started.set()
         await release_detail.wait()
         return {"topic_name": "Introduction", "detail": "Details"}
@@ -574,8 +662,8 @@ async def test_auto_summary_waits_for_an_earlier_detail_request(monkeypatch):
         notebook_client=object(),
         video_work=VideoWorkCoordinator(),
     )
-    detail = Summarizer(bot)
-    interaction = FakeInteraction()
+    manual_detail = make_manual_summary(bot)
+    job = make_manual_detail_job()
     auto_summary = make_autosummary(bot)
     auto_summary.summary_service = SimpleNamespace(
         summarize=AsyncMock(return_value=[Topic(name="Introduction", detail="Details")])
@@ -588,11 +676,9 @@ async def test_auto_summary_waits_for_an_earlier_detail_request(monkeypatch):
         available_at=datetime.now(UTC),
         next_attempt_at=datetime.now(UTC),
     )
-    monkeypatch.setattr(summarizer_module, "get_topic_details", blocked_detail)
+    monkeypatch.setattr(manualsummary_module, "get_topic_details", blocked_detail)
 
-    detail_task = asyncio.create_task(
-        Summarizer.detail.callback(detail, interaction, VIDEO_ID, 1)
-    )
+    detail_task = asyncio.create_task(manual_detail._generate(job))
     await detail_started.wait()
     automatic_task = asyncio.create_task(auto_summary._generate_for_job(item))
     await asyncio.sleep(0)
@@ -606,11 +692,13 @@ async def test_auto_summary_waits_for_an_earlier_detail_request(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_notebooklm_error_in_detail_releases_work_for_auto_summary(monkeypatch):
+async def test_notebooklm_error_in_manual_detail_releases_work_for_auto_summary(
+    monkeypatch,
+):
     detail_started = asyncio.Event()
     release_detail = asyncio.Event()
 
-    async def failing_detail(client, ref, topic_index):
+    async def failing_detail(client, ref, topic_index, **kwargs):
         detail_started.set()
         await release_detail.wait()
         raise SourceAddError("no transcript")
@@ -619,8 +707,8 @@ async def test_notebooklm_error_in_detail_releases_work_for_auto_summary(monkeyp
         notebook_client=object(),
         video_work=VideoWorkCoordinator(),
     )
-    detail = Summarizer(bot)
-    interaction = FakeInteraction()
+    manual_detail = make_manual_summary(bot)
+    job = make_manual_detail_job()
     auto_summary = make_autosummary(bot)
     auto_summary.summary_service = SimpleNamespace(
         summarize=AsyncMock(return_value=[Topic(name="Introduction", detail="Details")])
@@ -633,11 +721,9 @@ async def test_notebooklm_error_in_detail_releases_work_for_auto_summary(monkeyp
         available_at=datetime.now(UTC),
         next_attempt_at=datetime.now(UTC),
     )
-    monkeypatch.setattr(summarizer_module, "get_topic_details", failing_detail)
+    monkeypatch.setattr(manualsummary_module, "get_topic_details", failing_detail)
 
-    detail_task = asyncio.create_task(
-        Summarizer.detail.callback(detail, interaction, VIDEO_ID, 1)
-    )
+    detail_task = asyncio.create_task(manual_detail._generate(job))
     await detail_started.wait()
     automatic_task = asyncio.create_task(auto_summary._generate_for_job(item))
     await asyncio.sleep(0)
@@ -646,9 +732,7 @@ async def test_notebooklm_error_in_detail_releases_work_for_auto_summary(monkeyp
 
     release_detail.set()
     await detail_task
-    assert interaction.followup.messages == [
-        ("Provided link or id is invalid or no transcript available.", {})
-    ]
+    assert job.status is JobStatus.QUEUED
     assert await automatic_task
     auto_summary.summary_service.summarize.assert_awaited_once()
 
@@ -666,6 +750,7 @@ async def test_bot_setup_loads_all_cogs_and_syncs_commands(monkeypatch):
 
     assert loaded == [
         "vsummary.cogs.misc.ping",
+        "vsummary.cogs.manualsummary.manualsummary",
         "vsummary.cogs.summarizer.summarizer",
         "vsummary.cogs.autosummary.autosummary",
     ]

@@ -25,7 +25,7 @@ from vsummary.settings import (
     SettingsError,
     configured_auto_summary_channel_id,
 )
-from vsummary.util.discord import split_message
+from vsummary.util.discord import send_limited, split_message
 from vsummary.util.holodex import (
     MAX_RETRIES,
     ChannelNotFoundError,
@@ -425,7 +425,7 @@ class Autosummary(commands.Cog):
                 raise RuntimeError("auto-summary Discord channel is unavailable")
             start = getattr(item, "delivery_chunk_index", 0)
             for chunk in chunks[start:]:
-                await channel.send(chunk)
+                await send_limited(self.bot, channel.send, chunk)
                 item.delivery_chunk_index += 1
                 if not await self._save_item(item):
                     return False
@@ -579,7 +579,7 @@ class Autosummary(commands.Cog):
 
     async def _send_to_channel(self, channel, text: str):
         for chunk in split_message(text):
-            await channel.send(chunk)
+            await send_limited(self.bot, channel.send, chunk)
 
     def _lease_duration(self) -> timedelta:
         seconds = getattr(getattr(self, "settings", None), "job_lease_seconds", None)
@@ -693,23 +693,29 @@ class Autosummary(commands.Cog):
         try:
             channel = await self.holodex.get_channel(channel_id)
         except ChannelNotFoundError:
-            await interaction.followup.send(
-                f"Channel '{channel_id}' was not found on Holodex."
+            await send_limited(
+                self.bot,
+                interaction.followup.send,
+                f"Channel '{channel_id}' was not found on Holodex.",
             )
             return
         except (TransientHolodexError, PermanentHolodexError):
             channel = None
 
         if channel is None:
-            await interaction.followup.send(
-                f"An error occurred while fetching channel '{channel_id}' from Holodex."
+            await send_limited(
+                self.bot,
+                interaction.followup.send,
+                f"An error occurred while fetching channel '{channel_id}' from Holodex.",
             )
             return
 
         existing = await Channel.find_one(Channel.channel_id == channel_id)
         if existing:
-            await interaction.followup.send(
-                f"Channel **{channel.name}** (`{channel_id}`) is already being followed."
+            await send_limited(
+                self.bot,
+                interaction.followup.send,
+                f"Channel **{channel.name}** (`{channel_id}`) is already being followed.",
             )
             return
         try:
@@ -719,12 +725,16 @@ class Autosummary(commands.Cog):
                 added_at=datetime.now(UTC),
             ).save()
         except DuplicateKeyError:
-            await interaction.followup.send(
-                f"Channel **{channel.name}** (`{channel_id}`) is already being followed."
+            await send_limited(
+                self.bot,
+                interaction.followup.send,
+                f"Channel **{channel.name}** (`{channel_id}`) is already being followed.",
             )
             return
-        await interaction.followup.send(
-            f"Added channel **{channel.name}** (`{channel_id}`) for automatic summaries."
+        await send_limited(
+            self.bot,
+            interaction.followup.send,
+            f"Added channel **{channel.name}** (`{channel_id}`) for automatic summaries.",
         )
 
     @app_commands.command(
@@ -738,8 +748,10 @@ class Autosummary(commands.Cog):
         await interaction.response.defer(thinking=True)
         result = await Channel.find_one(Channel.channel_id == channel_id)
         if result is None:
-            await interaction.followup.send(
-                f"Channel '{channel_id}' is not being followed."
+            await send_limited(
+                self.bot,
+                interaction.followup.send,
+                f"Channel '{channel_id}' is not being followed.",
             )
             return
         await result.delete()
@@ -748,8 +760,10 @@ class Autosummary(commands.Cog):
             await delete_many(PendingVideo.channel_id == channel_id)
         else:
             await PendingVideo.delete_one(PendingVideo.channel_id == channel_id)
-        await interaction.followup.send(
-            f"Removed channel '{channel_id}' and its pending videos."
+        await send_limited(
+            self.bot,
+            interaction.followup.send,
+            f"Removed channel '{channel_id}' and its pending videos.",
         )
 
     @app_commands.command(
@@ -760,13 +774,15 @@ class Autosummary(commands.Cog):
         await interaction.response.defer(thinking=True)
         channels = await Channel.find().to_list()
         if not channels:
-            await interaction.followup.send(
-                "No channels are currently followed for automatic summaries."
+            await send_limited(
+                self.bot,
+                interaction.followup.send,
+                "No channels are currently followed for automatic summaries.",
             )
             return
         lines = [f"**{channel.name}** (`{channel.channel_id}`)" for channel in channels]
         for chunk in split_message("Followed channels:\n" + "\n".join(lines)):
-            await interaction.followup.send(chunk)
+            await send_limited(self.bot, interaction.followup.send, chunk)
 
 
 async def setup(bot):

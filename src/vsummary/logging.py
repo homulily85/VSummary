@@ -16,6 +16,7 @@ from typing import Any
 from rich.logging import RichHandler
 
 from vsummary.settings import Settings
+from vsummary.util.discord import send_limited
 
 DISCORD_MESSAGE_LIMIT = 2_000
 DISCORD_QUEUE_SIZE = 1_000
@@ -60,6 +61,7 @@ class DiscordLogHandler(logging.Handler):
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_size)
         self.disabled = False
         self._channel: Any | None = None
+        self._bot: Any | None = None
         self._task: asyncio.Task[None] | None = None
         self._dropped_count = 0
 
@@ -94,6 +96,7 @@ class DiscordLogHandler(logging.Handler):
             self._disable(f"configured channel {self.channel_id} is unavailable")
             return
         self._channel = channel
+        self._bot = bot
         self._task = asyncio.create_task(
             self._deliver(), name="vsummary-discord-log-delivery"
         )
@@ -108,6 +111,7 @@ class DiscordLogHandler(logging.Handler):
             except asyncio.CancelledError:
                 pass
         self._channel = None
+        self._bot = None
 
     async def drain(self) -> None:
         """Wait until messages currently queued for a live sink have been sent."""
@@ -147,7 +151,7 @@ class DiscordLogHandler(logging.Handler):
         while True:
             message = await self.queue.get()
             try:
-                await self._channel.send(message)
+                await send_limited(self._bot, self._channel.send, message)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - Discord-specific errors vary

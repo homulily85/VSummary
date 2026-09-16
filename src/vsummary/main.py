@@ -10,7 +10,7 @@ from pymongo import AsyncMongoClient
 
 from vsummary.bot import Bot
 from vsummary.logging import LoggingConfigurationError, configure_logging
-from vsummary.model.channel import FollowedChannel, SummaryJob
+from vsummary.model.channel import FollowedChannel, ManualSummaryJob, SummaryJob
 from vsummary.model.video import VideoSummary
 from vsummary.settings import Settings, SettingsError, load_settings
 
@@ -37,7 +37,12 @@ async def async_main(settings: Settings | None = None):
         database = mongo_client[settings.mongodb_database]
         await init_beanie(
             database=database,
-            document_models=[FollowedChannel, SummaryJob, VideoSummary],
+            document_models=[
+                FollowedChannel,
+                SummaryJob,
+                ManualSummaryJob,
+                VideoSummary,
+            ],
         )
         logger.info("Connected to MongoDB!")
 
