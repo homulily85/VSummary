@@ -154,18 +154,24 @@ async def _create_notebook_with_source(
 
 
 def _topic_prompt(topics: list[Topic], topic_index: int) -> str:
-    """Build the prompt that asks for a single topic's details only."""
+    """Build the prompt that asks for a detailed single-topic explanation."""
     return (
         f"This video has a list of topics in order: "
         f"{', '.join(t.name for t in topics)}. "
-        f"What did the speaker(s) talk about specifically for the topic "
-        f"'{topics[topic_index].name}', and only this topic? "
-        f"Start your answer at the point where the previous topic "
+        f"Write a detailed, coherent explanation in English of only the topic "
+        f"'{topics[topic_index].name}'. "
+        f"Start after the previous topic "
         f"'{_topic_boundaries(topics, topic_index)['prev']}' ends and stop before "
-        f"the next topic '{_topic_boundaries(topics, topic_index)['next']}' begins, "
-        f"so your answer does not overlap with either the previous or the next "
-        f"topic. "
-        f"Return topic details only, do not include any other text in your response."
+        f"the next topic '{_topic_boundaries(topics, topic_index)['next']}' begins. "
+        f"Write 250-450 words in 2-4 connected prose paragraphs. Explain the flow "
+        f"of the discussion and preserve the important claims, reasoning, examples, "
+        f"events, distinctions, and conclusions that the speaker makes when they are "
+        f"present in the video. Integrate related subtopics into a readable narrative; "
+        f"do not merely list them. "
+        f"Do not use bullets, numbered lists, headings, labels such as 'Subtopic:', "
+        f"a title, or meta-commentary. Do not discuss adjacent topics. Use only "
+        f"information supported by the video and do not invent missing details. "
+        f"Return only the prose summary."
     )
 
 

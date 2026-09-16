@@ -365,6 +365,24 @@ async def test_topic_pipeline_rejects_an_empty_notebooklm_topic_list():
     assert client.deleted == ["notebook-1"]
 
 
+def test_topic_prompt_requests_detailed_english_prose_without_lists():
+    prompt = summarizer_util._topic_prompt(
+        [Topic(name="Introduction"), Topic(name="Deep Dive"), Topic(name="Conclusion")],
+        1,
+    )
+
+    assert "English" in prompt
+    assert "250-450 words" in prompt
+    assert "2-4 connected prose paragraphs" in prompt
+    assert (
+        "important claims, reasoning, examples, events, distinctions, and conclusions"
+        in prompt
+    )
+    assert "Do not use bullets, numbered lists, headings" in prompt
+    assert "'Introduction' ends" in prompt
+    assert "'Conclusion' begins" in prompt
+
+
 @pytest.mark.asyncio
 async def test_topics_view_selected_topic_flow_disables_components(monkeypatch):
     bot = SimpleNamespace(notebook_client=object())
