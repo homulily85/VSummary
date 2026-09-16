@@ -1,0 +1,11 @@
+2026-09-15 17:40:19,319 INFO     vsummary.main Connecting to MongoDB...
+2026-09-15 17:43:34,609 INFO     vsummary.main Connecting to MongoDB...
+2026-09-15 17:43:34,639 ERROR    vsummary.logging Discord log sink disabled: could not resolve channel 123: missing channel discord_log_channel_id=123
+2026-09-15 17:43:34,673 INFO     vsummary.cogs.autosummary.autosummary Generated summary for video. channel_id=channel job_status=ready_to_deliver video_id=video
+2026-09-15 17:43:34,673 WARNING  vsummary.cogs.autosummary.autosummary Discord delivery failed for summary job video: discord down attempt=1 channel_id=channel job_status=ready_to_deliver retry_limit=3 video_id=video
+2026-09-15 17:43:34,675 INFO     vsummary.cogs.autosummary.autosummary Delivered summary for video. channel_id=channel delivery_chunks=1 job_status=completed video_id=video
+2026-09-15 17:43:34,677 INFO     vsummary.cogs.autosummary.autosummary Claimed summary job video for generating. channel_id=channel claim_type=due claimed_status=generating job_status=generating video_id=video
+2026-09-15 17:43:34,679 INFO     vsummary.cogs.autosummary.autosummary Claimed summary job video for delivering. channel_id=channel claim_type=reclaim claimed_status=delivering job_status=delivering video_id=video
+2026-09-15 17:43:34,681 WARNING  vsummary.cogs.autosummary.autosummary Discord delivery failed for summary job video: discord down attempt=1 channel_id=channel job_status=ready_to_deliver retry_limit=3 video_id=video
+2026-09-15 17:43:34,682 INFO     vsummary.cogs.autosummary.autosummary Delivered summary for video. channel_id=channel delivery_chunks=3 job_status=completed video_id=video
+2026-09-15 17:43:34,684 WARNING  vsummary.cogs.autosummary.autosummary Summary generation failed permanently for video. attempt=2 channel_id=channel job_status=failed permanent=False retry_limit=2 video_id=video

@@ -4,6 +4,7 @@ from notebooklm import NotebookLMClient
 
 from vsummary.logging import DiscordLogHandler
 from vsummary.settings import Settings
+from vsummary.util.video_work import VideoWorkCoordinator
 
 
 class Bot(commands.Bot):
@@ -21,6 +22,7 @@ class Bot(commands.Bot):
         self.settings = settings
         self.holodex = holodex
         self.discord_log_handler = discord_log_handler
+        self.video_work = VideoWorkCoordinator()
 
     async def close(self):
         if self.discord_log_handler is not None:

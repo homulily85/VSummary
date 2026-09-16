@@ -43,6 +43,7 @@ from vsummary.util.summarizer import (
     get_topic_details_all,
 )
 from vsummary.util.video import VideoRef
+from vsummary.util.video_work import get_video_work_coordinator
 
 logger = logging.getLogger(__name__)
 
@@ -354,13 +355,14 @@ class Autosummary(commands.Cog):
         if not getattr(item, "summary_details", None):
             ref = VideoRef(source="youtube", video_id=item.video_id)
             try:
-                summary_service = getattr(self, "summary_service", None)
-                if summary_service is not None:
-                    details = await summary_service.summarize(ref)
-                else:
-                    details = await get_topic_details_all(
-                        getattr(self, "notebook", None), ref
-                    )
+                async with get_video_work_coordinator(self.bot).for_video(ref):
+                    summary_service = getattr(self, "summary_service", None)
+                    if summary_service is not None:
+                        details = await summary_service.summarize(ref)
+                    else:
+                        details = await get_topic_details_all(
+                            getattr(self, "notebook", None), ref
+                        )
                 item.summary_details = [self._as_topic(detail) for detail in details]
             except (PermanentSummaryError, PermanentHolodexError) as exc:
                 logger.warning(

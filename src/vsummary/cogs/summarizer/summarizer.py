@@ -12,6 +12,7 @@ from vsummary.util.summarizer import (
     get_topic_list,
 )
 from vsummary.util.video import UnsupportedVideoSource, parse_video_source
+from vsummary.util.video_work import get_video_work_coordinator
 
 ALL_TOPICS_LABEL = "All topics"
 
@@ -97,14 +98,16 @@ class TopicsView(discord.ui.View):
 
     async def _send_selected_topic_detail(self, interaction):
         index = int(self.topic_select.values[0]) - 1
-        detail = await get_topic_details(self.bot.notebook_client, self.ref, index)
+        async with get_video_work_coordinator(self.bot).for_video(self.ref):
+            detail = await get_topic_details(self.bot.notebook_client, self.ref, index)
         await Summarizer.send_chunked_message(
             interaction,
             f"**{detail['topic_name']}**\n{detail['detail']}",
         )
 
     async def _send_all_topic_details(self, interaction):
-        details = await get_topic_details_all(self.bot.notebook_client, self.ref)
+        async with get_video_work_coordinator(self.bot).for_video(self.ref):
+            details = await get_topic_details_all(self.bot.notebook_client, self.ref)
         for detail in details:
             message = f"**{detail['topic_name']}**\n{detail['detail']}"
             await Summarizer.send_chunked_message(interaction, message)
@@ -141,7 +144,8 @@ class Summarizer(commands.Cog):
             await interaction.response.defer(thinking=True)
 
             ref = parse_video_source(video)
-            topics = await get_topic_list(self.bot.notebook_client, ref)
+            async with get_video_work_coordinator(self.bot).for_video(ref):
+                topics = await get_topic_list(self.bot.notebook_client, ref)
             topics_list = [f"{i + 1}: {topic.name}" for i, topic in enumerate(topics)]
 
             topics_str = "\n".join(topics_list)
@@ -198,14 +202,16 @@ class Summarizer(commands.Cog):
         try:
             ref = parse_video_source(video)
             if topic_index is None:
-                details = await get_topic_details_all(self.bot.notebook_client, ref)
+                async with get_video_work_coordinator(self.bot).for_video(ref):
+                    details = await get_topic_details_all(self.bot.notebook_client, ref)
                 for i, detail in enumerate(details):
                     message = f"**{i + 1}. {detail['topic_name']}**\n{detail['detail']}"
                     await self.send_chunked_message(interaction, message)
             else:
-                detail = await get_topic_details(
-                    self.bot.notebook_client, ref, topic_index - 1
-                )
+                async with get_video_work_coordinator(self.bot).for_video(ref):
+                    detail = await get_topic_details(
+                        self.bot.notebook_client, ref, topic_index - 1
+                    )
                 message = f"**{detail['topic_name']}**\n{detail['detail']}"
                 await self.send_chunked_message(interaction, message)
 

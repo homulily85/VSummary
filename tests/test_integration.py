@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import ClassVar
@@ -22,8 +23,9 @@ from vsummary.util.holodex import (
     HolodexChannel,
     HolodexVideo,
 )
-from vsummary.util.summarizer import InvalidSummaryResponse
+from vsummary.util.summarizer import InvalidSummaryResponse, NotebookLMSummaryService
 from vsummary.util.video import VideoRef
+from vsummary.util.video_work import VideoWorkCoordinator
 
 VIDEO_ID = "dQw4w9WgXcQ"
 VIDEO_REF = VideoRef(source="youtube", id=VIDEO_ID)
@@ -480,6 +482,157 @@ async def test_detail_command_reports_invalid_index_and_source_errors(monkeypatc
     assert source_interaction.followup.messages == [
         ("Provided link or id is invalid or no transcript available.", {})
     ]
+
+
+@pytest.mark.asyncio
+async def test_detail_waits_for_auto_summary_and_reuses_its_cached_details():
+    class BlockingNotebookClient(FakeNotebookClient):
+        def __init__(self):
+            super().__init__(
+                answers=[
+                    '[{"name": "Introduction"}, {"name": "Conclusion"}]',
+                    "The speaker introduces the subject.",
+                    "The speaker closes the discussion.",
+                ]
+            )
+            self.ask_started = asyncio.Event()
+            self.release_ask = asyncio.Event()
+
+        async def ask(self, notebook_id, prompt):
+            self.ask_started.set()
+            await self.release_ask.wait()
+            return await super().ask(notebook_id, prompt)
+
+    client = BlockingNotebookClient()
+    bot = SimpleNamespace(
+        notebook_client=client,
+        video_work=VideoWorkCoordinator(),
+    )
+    auto_summary = make_autosummary(bot)
+    auto_summary.summary_service = NotebookLMSummaryService(client)
+    item = FakePendingRecord(
+        video_id=VIDEO_ID,
+        channel_id="UC1",
+        channel_name="Test",
+        title="A stream",
+        available_at=datetime.now(UTC),
+        next_attempt_at=datetime.now(UTC),
+    )
+    detail = Summarizer(bot)
+    interaction = FakeInteraction()
+
+    automatic_task = asyncio.create_task(auto_summary._generate_for_job(item))
+    await client.ask_started.wait()
+    detail_task = asyncio.create_task(
+        Summarizer.detail.callback(detail, interaction, VIDEO_ID, 1)
+    )
+    await asyncio.sleep(0)
+
+    assert interaction.response.deferred == [{"thinking": True}]
+    assert interaction.followup.messages == []
+
+    client.release_ask.set()
+    assert await automatic_task
+    await detail_task
+
+    assert interaction.followup.messages == [
+        ("**Introduction**\nThe speaker introduces the subject.", {})
+    ]
+    assert len(client.created) == 1
+    assert len(client.prompts) == 3
+
+
+@pytest.mark.asyncio
+async def test_auto_summary_waits_for_an_earlier_detail_request(monkeypatch):
+    detail_started = asyncio.Event()
+    release_detail = asyncio.Event()
+
+    async def blocked_detail(client, ref, topic_index):
+        detail_started.set()
+        await release_detail.wait()
+        return {"topic_name": "Introduction", "detail": "Details"}
+
+    bot = SimpleNamespace(
+        notebook_client=object(),
+        video_work=VideoWorkCoordinator(),
+    )
+    detail = Summarizer(bot)
+    interaction = FakeInteraction()
+    auto_summary = make_autosummary(bot)
+    auto_summary.summary_service = SimpleNamespace(
+        summarize=AsyncMock(return_value=[Topic(name="Introduction", detail="Details")])
+    )
+    item = FakePendingRecord(
+        video_id=VIDEO_ID,
+        channel_id="UC1",
+        channel_name="Test",
+        title="A stream",
+        available_at=datetime.now(UTC),
+        next_attempt_at=datetime.now(UTC),
+    )
+    monkeypatch.setattr(summarizer_module, "get_topic_details", blocked_detail)
+
+    detail_task = asyncio.create_task(
+        Summarizer.detail.callback(detail, interaction, VIDEO_ID, 1)
+    )
+    await detail_started.wait()
+    automatic_task = asyncio.create_task(auto_summary._generate_for_job(item))
+    await asyncio.sleep(0)
+
+    auto_summary.summary_service.summarize.assert_not_awaited()
+
+    release_detail.set()
+    await detail_task
+    assert await automatic_task
+    auto_summary.summary_service.summarize.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_notebooklm_error_in_detail_releases_work_for_auto_summary(monkeypatch):
+    detail_started = asyncio.Event()
+    release_detail = asyncio.Event()
+
+    async def failing_detail(client, ref, topic_index):
+        detail_started.set()
+        await release_detail.wait()
+        raise SourceAddError("no transcript")
+
+    bot = SimpleNamespace(
+        notebook_client=object(),
+        video_work=VideoWorkCoordinator(),
+    )
+    detail = Summarizer(bot)
+    interaction = FakeInteraction()
+    auto_summary = make_autosummary(bot)
+    auto_summary.summary_service = SimpleNamespace(
+        summarize=AsyncMock(return_value=[Topic(name="Introduction", detail="Details")])
+    )
+    item = FakePendingRecord(
+        video_id=VIDEO_ID,
+        channel_id="UC1",
+        channel_name="Test",
+        title="A stream",
+        available_at=datetime.now(UTC),
+        next_attempt_at=datetime.now(UTC),
+    )
+    monkeypatch.setattr(summarizer_module, "get_topic_details", failing_detail)
+
+    detail_task = asyncio.create_task(
+        Summarizer.detail.callback(detail, interaction, VIDEO_ID, 1)
+    )
+    await detail_started.wait()
+    automatic_task = asyncio.create_task(auto_summary._generate_for_job(item))
+    await asyncio.sleep(0)
+
+    auto_summary.summary_service.summarize.assert_not_awaited()
+
+    release_detail.set()
+    await detail_task
+    assert interaction.followup.messages == [
+        ("Provided link or id is invalid or no transcript available.", {})
+    ]
+    assert await automatic_task
+    auto_summary.summary_service.summarize.assert_awaited_once()
 
 
 @pytest.mark.asyncio
