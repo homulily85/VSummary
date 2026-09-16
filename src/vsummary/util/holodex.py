@@ -8,6 +8,8 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
+from vsummary.logging import log_event
+
 logger = logging.getLogger(__name__)
 
 HOLODEX_BASE_URL = "https://holodex.net"
@@ -117,14 +119,39 @@ class HolodexClient:
             ) as exc:
                 if attempt >= self._retries:
                     raise TransientHolodexError(str(exc)) from exc
-                await asyncio.sleep(2**attempt)
+                delay = 2**attempt
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "Holodex request failed; retrying %s %s.",
+                    method,
+                    path,
+                    attempt=attempt + 1,
+                    retry_limit=self._retries + 1,
+                    retry_delay_seconds=delay,
+                    error_type=type(exc).__name__,
+                )
+                await asyncio.sleep(delay)
                 continue
             if response.status_code in {408, 429} or response.status_code >= 500:
                 if attempt >= self._retries:
                     raise TransientHolodexError(
                         f"Holodex returned HTTP {response.status_code}"
                     )
-                await asyncio.sleep(_retry_delay(response, attempt))
+                delay = _retry_delay(response, attempt)
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "Holodex returned HTTP %s; retrying %s %s.",
+                    response.status_code,
+                    method,
+                    path,
+                    attempt=attempt + 1,
+                    retry_limit=self._retries + 1,
+                    retry_delay_seconds=delay,
+                    http_status=response.status_code,
+                )
+                await asyncio.sleep(delay)
                 continue
             return response
         raise AssertionError("unreachable")
@@ -209,7 +236,15 @@ class HolodexClient:
         except ChannelNotFoundError:
             raise
         except (PermanentHolodexError, TransientHolodexError) as exc:
-            logger.error("Error fetching channel %s: %s", channel_id, exc)
+            log_event(
+                logger,
+                logging.ERROR,
+                "Error fetching channel %s: %s",
+                channel_id,
+                exc,
+                channel_id=channel_id,
+                error_type=type(exc).__name__,
+            )
             return None
 
     async def get_channel_videos(
@@ -219,7 +254,15 @@ class HolodexClient:
         try:
             return await self.fetch_channel_videos(channel_id, limit, offset)
         except (PermanentHolodexError, TransientHolodexError) as exc:
-            logger.error("Error fetching videos for channel %s: %s", channel_id, exc)
+            log_event(
+                logger,
+                logging.ERROR,
+                "Error fetching videos for channel %s: %s",
+                channel_id,
+                exc,
+                channel_id=channel_id,
+                error_type=type(exc).__name__,
+            )
             return []
 
 

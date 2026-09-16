@@ -7,9 +7,9 @@ from beanie import init_beanie
 from dotenv import load_dotenv
 from notebooklm import NotebookLMClient
 from pymongo import AsyncMongoClient
-from rich.logging import RichHandler
 
 from vsummary.bot import Bot
+from vsummary.logging import LoggingConfigurationError, configure_logging
 from vsummary.model.channel import FollowedChannel, SummaryJob
 from vsummary.model.video import VideoSummary
 from vsummary.settings import Settings, SettingsError, load_settings
@@ -17,14 +17,7 @@ from vsummary.settings import Settings, SettingsError, load_settings
 logger = logging.getLogger(__name__)
 
 
-def configure_logging() -> None:
-    """Configure logging once, during application startup."""
-    if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO, handlers=[RichHandler()])
-
-
 async def async_main(settings: Settings | None = None):
-    configure_logging()
     load_dotenv()
     if settings is None:
         try:
@@ -32,6 +25,11 @@ async def async_main(settings: Settings | None = None):
         except SettingsError as exc:
             logger.error(str(exc))
             raise SystemExit(1) from exc
+    try:
+        discord_log_handler = configure_logging(settings)
+    except LoggingConfigurationError as exc:
+        logger.critical("Application startup aborted: %s", exc)
+        raise SystemExit(1) from exc
 
     logger.info("Connecting to MongoDB...")
     mongo_client = AsyncMongoClient(settings.mongodb_uri, tz_aware=True)
@@ -44,7 +42,11 @@ async def async_main(settings: Settings | None = None):
         logger.info("Connected to MongoDB!")
 
         async with NotebookLMClient.from_storage() as notebook_client:
-            bot = Bot(notebook_client=notebook_client, settings=settings)
+            bot = Bot(
+                notebook_client=notebook_client,
+                settings=settings,
+                discord_log_handler=discord_log_handler,
+            )
             logger.info("Bot is connecting...")
             try:
                 await bot.start(settings.discord_token)

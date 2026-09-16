@@ -6,6 +6,7 @@ import httpx
 from notebooklm import NotebookLMClient, SourceAddError
 from notebooklm.types import Notebook
 
+from vsummary.logging import log_event
 from vsummary.model.video import Topic, VideoSummary
 from vsummary.util.video import VideoRef, build_video_url
 
@@ -44,10 +45,37 @@ class NotebookLMSummaryService:
         try:
             details = await get_topic_details_all(self.client, ref)
         except SourceAddError as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "NotebookLM could not add source for %s.",
+                ref.video_id,
+                source=ref.source,
+                video_id=ref.video_id,
+                error_type=type(exc).__name__,
+            )
             raise TransientSummaryError(str(exc)) from exc
         except (httpx.TimeoutException, httpx.NetworkError, OSError) as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "NotebookLM request failed for %s.",
+                ref.video_id,
+                source=ref.source,
+                video_id=ref.video_id,
+                error_type=type(exc).__name__,
+            )
             raise TransientSummaryError(str(exc)) from exc
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "NotebookLM returned an invalid summary for %s.",
+                ref.video_id,
+                source=ref.source,
+                video_id=ref.video_id,
+                error_type=type(exc).__name__,
+            )
             raise PermanentSummaryError(str(exc)) from exc
         return [
             Topic(name=item["topic_name"], detail=item["detail"]) for item in details
@@ -293,5 +321,7 @@ async def _safe_delete_notebook(client: NotebookLMClient, notebook_id: str) -> N
         await client.notebooks.delete(notebook_id)
     except Exception:
         logger.exception(
-            "Failed to delete temporary NotebookLM resource %s", notebook_id
+            "Failed to delete temporary NotebookLM resource %s",
+            notebook_id,
+            extra={"context": {"notebook_id": notebook_id}},
         )

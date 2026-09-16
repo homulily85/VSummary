@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from vsummary.settings import Settings, SettingsError, load_settings
@@ -14,6 +16,9 @@ def test_settings_loads_and_validates_runtime_configuration():
             "SOURCE_RETRY_LIMIT": "4",
             "DELIVERY_RETRY_LIMIT": "3",
             "HTTP_TIMEOUT_SECONDS": "8.5",
+            "LOG_FILE_PATH": "var/log/vsummary.log",
+            "LOG_LEVEL": "debug",
+            "DISCORD_LOG_CHANNEL_ID": "456",
         }
     )
 
@@ -22,6 +27,32 @@ def test_settings_loads_and_validates_runtime_configuration():
     assert settings.auto_summary_channel_id == 123
     assert settings.poll_interval_minutes == 15
     assert settings.http_timeout_seconds == 8.5
+    assert settings.log_file_path == Path("var/log/vsummary.log")
+    assert settings.log_level == "DEBUG"
+    assert settings.discord_log_channel_id == 456
+
+
+def test_settings_uses_logging_defaults_and_rejects_invalid_logging_values():
+    defaults = Settings.from_mapping(
+        {"DISCORD_TOKEN": "token", "MONGODB_URI": "mongodb://localhost"}
+    )
+
+    assert defaults.log_file_path == Path("logs/vsummary.log")
+    assert defaults.log_level == "INFO"
+    assert defaults.discord_log_channel_id is None
+
+    for name, value in (
+        ("LOG_LEVEL", "verbose"),
+        ("DISCORD_LOG_CHANNEL_ID", "not-an-integer"),
+        ("DISCORD_LOG_CHANNEL_ID", "0"),
+    ):
+        values = {
+            "DISCORD_TOKEN": "token",
+            "MONGODB_URI": "mongodb://localhost",
+            name: value,
+        }
+        with pytest.raises(SettingsError):
+            Settings.from_mapping(values)
 
 
 def test_settings_rejects_missing_and_invalid_values():

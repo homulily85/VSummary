@@ -22,6 +22,9 @@ class Settings:
     source_retry_limit: int = 5
     delivery_retry_limit: int = 5
     http_timeout_seconds: float = 15.0
+    log_file_path: Path = Path("logs/vsummary.log")
+    log_level: str = "INFO"
+    discord_log_channel_id: int | None = None
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str | None]) -> Settings:
@@ -32,6 +35,11 @@ class Settings:
         source_retries = _positive_int(values.get("SOURCE_RETRY_LIMIT"), 5)
         delivery_retries = _positive_int(values.get("DELIVERY_RETRY_LIMIT"), 5)
         timeout = _positive_float(values.get("HTTP_TIMEOUT_SECONDS"), 15.0)
+        log_file_path = _log_file_path(values.get("LOG_FILE_PATH"))
+        log_level = _log_level(values.get("LOG_LEVEL"))
+        discord_log_channel = _optional_int(
+            values.get("DISCORD_LOG_CHANNEL_ID"), "DISCORD_LOG_CHANNEL_ID"
+        )
         return cls(
             discord_token=token,
             mongodb_uri=mongodb_uri,
@@ -41,6 +49,9 @@ class Settings:
             source_retry_limit=source_retries,
             delivery_retry_limit=delivery_retries,
             http_timeout_seconds=timeout,
+            log_file_path=log_file_path,
+            log_level=log_level,
+            discord_log_channel_id=discord_log_channel,
         )
 
 
@@ -70,15 +81,17 @@ def _required(values: Mapping[str, str | None], name: str) -> str:
     return value.strip()
 
 
-def _optional_int(value: str | None) -> int | None:
+def _optional_int(
+    value: str | None, name: str = "AUTO_SUMMARY_CHANNEL_ID"
+) -> int | None:
     if value is None or not value.strip():
         return None
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
-        raise SettingsError("AUTO_SUMMARY_CHANNEL_ID must be an integer") from exc
+        raise SettingsError(f"{name} must be an integer") from exc
     if parsed <= 0:
-        raise SettingsError("AUTO_SUMMARY_CHANNEL_ID must be positive")
+        raise SettingsError(f"{name} must be positive")
     return parsed
 
 
@@ -100,3 +113,22 @@ def _positive_float(value: str | None, default: float) -> float:
     if parsed <= 0:
         raise SettingsError("HTTP_TIMEOUT_SECONDS must be positive")
     return parsed
+
+
+def _log_file_path(value: str | None) -> Path:
+    if value is None or not value.strip():
+        return Path("logs/vsummary.log")
+    try:
+        return Path(value.strip())
+    except (TypeError, ValueError) as exc:
+        raise SettingsError("LOG_FILE_PATH must be a valid path") from exc
+
+
+def _log_level(value: str | None) -> str:
+    level = (value or "INFO").strip().upper()
+    valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    if level not in valid_levels:
+        raise SettingsError(
+            "LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, or CRITICAL"
+        )
+    return level

@@ -12,6 +12,7 @@ from discord.ext import commands, tasks
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from vsummary.logging import log_event
 from vsummary.model.channel import (
     FollowedChannel,
     JobStatus,
@@ -116,15 +117,23 @@ class Autosummary(commands.Cog):
                 videos = await self._get_new_channel_videos(channel)
                 for video in videos:
                     if video.available_at <= channel.added_at:
-                        logger.info(
+                        log_event(
+                            logger,
+                            logging.INFO,
                             "Skipping video %s released before channel %s was added.",
                             video.video_id,
                             channel.channel_id,
+                            video_id=video.video_id,
+                            channel_id=channel.channel_id,
                         )
                         continue
                     await self._enqueue_new_video(video, channel)
             except Exception:
-                logger.exception("Failed to poll channel %s", channel.channel_id)
+                logger.exception(
+                    "Failed to poll channel %s",
+                    channel.channel_id,
+                    extra={"context": {"channel_id": channel.channel_id}},
+                )
 
     async def _get_new_channel_videos(self, channel) -> list[HolodexVideo]:
         """Use pagination for the production client, retaining fake compatibility."""
@@ -145,15 +154,26 @@ class Autosummary(commands.Cog):
 
     async def _enqueue_new_video(self, video: HolodexVideo, channel):
         if video.available_at <= channel.added_at:
-            logger.info(
+            log_event(
+                logger,
+                logging.INFO,
                 "Skipping video %s released before channel %s was added.",
                 video.video_id,
                 channel.channel_id,
+                video_id=video.video_id,
+                channel_id=channel.channel_id,
             )
             return
         if is_ignored(video.topic_id):
-            logger.info(
-                "Skipping ignored video %s (topic %s)", video.video_id, video.topic_id
+            log_event(
+                logger,
+                logging.INFO,
+                "Skipping ignored video %s (topic %s)",
+                video.video_id,
+                video.topic_id,
+                video_id=video.video_id,
+                channel_id=channel.channel_id,
+                topic_id=video.topic_id,
             )
             return
 
@@ -184,9 +204,24 @@ class Autosummary(commands.Cog):
         try:
             await pending.save()
         except DuplicateKeyError:
-            logger.info("Video %s was already queued by another poller", video.video_id)
+            log_event(
+                logger,
+                logging.INFO,
+                "Video %s was already queued by another poller",
+                video.video_id,
+                video_id=video.video_id,
+                channel_id=channel.channel_id,
+            )
             return
-        logger.info("Queued video %s for auto-summary.", video.video_id)
+        log_event(
+            logger,
+            logging.INFO,
+            "Queued video %s for auto-summary.",
+            video.video_id,
+            video_id=video.video_id,
+            channel_id=channel.channel_id,
+            job_id=str(getattr(pending, "id", "")),
+        )
 
     async def process_due_videos(self):
         due = await self._claim_due_jobs()
@@ -194,7 +229,11 @@ class Autosummary(commands.Cog):
             try:
                 await self._process_pending_video(item)
             except Exception:
-                logger.exception("Failed to process summary job %s", item.video_id)
+                logger.exception(
+                    "Failed to process summary job %s",
+                    item.video_id,
+                    extra={"context": self._job_context(item)},
+                )
 
     async def _claim_due_jobs(self) -> list:
         now = datetime.now(UTC)
@@ -244,7 +283,7 @@ class Autosummary(commands.Cog):
                 JobStatus.DELIVERING,
             ),
         )
-        for query, claimed_status in claims:
+        for claim_index, (query, claimed_status) in enumerate(claims):
             while True:
                 update = {
                     "$set": {
@@ -263,7 +302,20 @@ class Autosummary(commands.Cog):
                 )
                 if record is None:
                     break
-                claimed.append(PendingVideo.model_validate(record))
+                item = PendingVideo.model_validate(record)
+                claimed.append(item)
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "Claimed summary job %s for %s.",
+                    item.video_id,
+                    claimed_status.value,
+                    **self._job_context(
+                        item,
+                        claim_type="reclaim" if claim_index >= 2 else "due",
+                        claimed_status=claimed_status.value,
+                    ),
+                )
         return claimed
 
     async def _process_pending_video(self, item):
@@ -311,20 +363,45 @@ class Autosummary(commands.Cog):
                     )
                 item.summary_details = [self._as_topic(detail) for detail in details]
             except (PermanentSummaryError, PermanentHolodexError) as exc:
+                logger.warning(
+                    "Permanent summary source failure for %s",
+                    item.video_id,
+                    exc_info=True,
+                    extra={"context": self._job_context(item)},
+                )
                 await self._handle_source_error(item, exc, permanent=True)
                 return False
             except (TransientSummaryError, TransientHolodexError) as exc:
+                logger.warning(
+                    "Transient summary source failure for %s",
+                    item.video_id,
+                    exc_info=True,
+                    extra={"context": self._job_context(item)},
+                )
                 await self._handle_source_error(item, exc)
                 return False
             except Exception as exc:
-                logger.exception("Unexpected summary error for %s", item.video_id)
+                logger.exception(
+                    "Unexpected summary error for %s",
+                    item.video_id,
+                    extra={"context": self._job_context(item)},
+                )
                 await self._handle_source_error(item, exc)
                 return False
 
         item.generated_at = datetime.now(UTC)
         self._set_status(item, JobStatus.READY_TO_DELIVER)
         item.last_error = None
-        return await self._save_item(item)
+        saved = await self._save_item(item)
+        if saved:
+            log_event(
+                logger,
+                logging.INFO,
+                "Generated summary for %s.",
+                item.video_id,
+                **self._job_context(item),
+            )
+        return saved
 
     async def _deliver_for_job(self, item):
         self._set_status(item, JobStatus.DELIVERING)
@@ -357,7 +434,16 @@ class Autosummary(commands.Cog):
         self._set_status(item, JobStatus.COMPLETED)
         item.last_error = None
         self._release_lease(item)
-        return await self._save_item(item)
+        saved = await self._save_item(item)
+        if saved:
+            log_event(
+                logger,
+                logging.INFO,
+                "Delivered summary for %s.",
+                item.video_id,
+                **self._job_context(item, delivery_chunks=len(chunks)),
+            )
+        return saved
 
     async def _handle_source_error(
         self,
@@ -377,6 +463,18 @@ class Autosummary(commands.Cog):
             saved = await self._save_item(item)
             if saved and not permanent:
                 await self._post_failure(item)
+            log_event(
+                logger,
+                logging.ERROR if permanent else logging.WARNING,
+                "Summary generation failed permanently for %s.",
+                item.video_id,
+                **self._job_context(
+                    item,
+                    attempt=item.retry_count,
+                    retry_limit=max_retries,
+                    permanent=permanent,
+                ),
+            )
             return saved
         backoff = exponential_backoff_hours(item.retry_count)
         item.next_attempt_at = datetime.now(UTC) + timedelta(hours=backoff)
@@ -384,10 +482,18 @@ class Autosummary(commands.Cog):
         item.last_error = str(exc)
         self._release_lease(item)
         saved = await self._save_item(item)
-        logger.info(
+        log_event(
+            logger,
+            logging.WARNING,
             "Summary generation failed for %s; retrying in %s hour(s)",
             item.video_id,
             backoff,
+            **self._job_context(
+                item,
+                attempt=item.retry_count,
+                retry_limit=max_retries,
+                retry_in_hours=backoff,
+            ),
         )
         return saved
 
@@ -404,7 +510,22 @@ class Autosummary(commands.Cog):
             item.next_attempt_at = datetime.now(UTC) + timedelta(hours=backoff)
             self._set_status(item, JobStatus.READY_TO_DELIVER)
         self._release_lease(item)
-        return await self._save_item(item)
+        saved = await self._save_item(item)
+        log_event(
+            logger,
+            logging.ERROR
+            if getattr(item, "status", None) == JobStatus.FAILED
+            else logging.WARNING,
+            "Discord delivery failed for summary job %s: %s",
+            item.video_id,
+            exc,
+            **self._job_context(
+                item,
+                attempt=item.delivery_retry_count,
+                retry_limit=max_retries,
+            ),
+        )
+        return saved
 
     async def _post_summary(self, item, details):
         channel = await self._get_auto_summary_channel()
@@ -445,8 +566,12 @@ class Autosummary(commands.Cog):
             return None
         channel = self.bot.get_channel(channel_id)
         if channel is None:
-            logger.error(
-                "Auto-summary channel %s not found; skipping post.", channel_id
+            log_event(
+                logger,
+                logging.ERROR,
+                "Auto-summary channel %s not found; skipping post.",
+                channel_id,
+                discord_channel_id=channel_id,
             )
         return channel
 
@@ -463,6 +588,20 @@ class Autosummary(commands.Cog):
     @staticmethod
     def _uses_leases(item) -> bool:
         return PendingVideo is SummaryJob and isinstance(item, SummaryJob)
+
+    @staticmethod
+    def _job_context(item, **additional) -> dict[str, object]:
+        """Return identifiers needed to correlate durable workflow log records."""
+        context: dict[str, object] = {}
+        for field in ("id", "video_id", "channel_id"):
+            value = getattr(item, field, None)
+            if value is not None:
+                context["job_id" if field == "id" else field] = str(value)
+        status = getattr(item, "status", None)
+        if status is not None:
+            context["job_status"] = getattr(status, "value", status)
+        context.update(additional)
+        return context
 
     def _release_lease(self, item) -> None:
         if self._uses_leases(item):
@@ -482,7 +621,13 @@ class Autosummary(commands.Cog):
             {"_id": item.id, "claimed_by": self.worker_id}, {"$set": values}
         )
         if getattr(result, "matched_count", 0) != 1:
-            logger.warning("Lost lease for summary job %s", item.video_id)
+            log_event(
+                logger,
+                logging.WARNING,
+                "Lost lease for summary job %s",
+                item.video_id,
+                **self._job_context(item, worker_id=self.worker_id),
+            )
             return False
         return True
 
@@ -504,7 +649,13 @@ class Autosummary(commands.Cog):
             {"$set": {"lease_expires_at": expires_at}},
         )
         if getattr(result, "matched_count", 0) != 1:
-            logger.warning("Could not renew lease for summary job %s", item.video_id)
+            log_event(
+                logger,
+                logging.WARNING,
+                "Could not renew lease for summary job %s",
+                item.video_id,
+                **self._job_context(item, worker_id=self.worker_id),
+            )
             return False
         item.lease_expires_at = expires_at
         return True
