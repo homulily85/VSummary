@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 from discord.ext import commands, tasks
 from pymongo import ReturnDocument
 
-from vsummary.cogs.summarizer.summarizer import TopicsView
 from vsummary.model.channel import JobStatus, ManualSummaryJob, ManualSummaryOperation
 from vsummary.settings import Settings
 from vsummary.util.discord import send_limited, split_message
@@ -199,26 +198,20 @@ class ManualSummary(commands.Cog):
             channel = self.bot.get_channel(
                 job.channel_id
             ) or await self.bot.fetch_channel(job.channel_id)
-            if job.operation == ManualSummaryOperation.TOPICS:
-                ref = VideoRef(source=job.source, video_id=job.video_id)
-                topics = await get_topic_list(self.bot.notebook_client, ref)
-                start = job.delivery_chunk_index
-                if start == 0:
-                    await send_limited(
-                        self.bot,
-                        channel.send,
-                        "Here are the topics mentioned in the video:\n"
-                        + job.delivery_chunks[0],
-                        view=TopicsView(self.bot, ref, topics),
-                    )
-                    job.delivery_chunk_index = 1
-                for chunk in job.delivery_chunks[job.delivery_chunk_index :]:
-                    await send_limited(self.bot, channel.send, chunk)
-                    job.delivery_chunk_index += 1
-            else:
-                for chunk in job.delivery_chunks[job.delivery_chunk_index :]:
-                    await send_limited(self.bot, channel.send, chunk)
-                    job.delivery_chunk_index += 1
+            if (
+                job.operation == ManualSummaryOperation.TOPICS
+                and job.delivery_chunk_index == 0
+            ):
+                await send_limited(
+                    self.bot,
+                    channel.send,
+                    "Here are the topics mentioned in the video:\n"
+                    + job.delivery_chunks[0],
+                )
+                job.delivery_chunk_index = 1
+            for chunk in job.delivery_chunks[job.delivery_chunk_index :]:
+                await send_limited(self.bot, channel.send, chunk)
+                job.delivery_chunk_index += 1
             job.status = JobStatus.COMPLETED
             self._release(job)
             await self._save(job)

@@ -5,6 +5,31 @@ import pytest
 from vsummary.settings import Settings, SettingsError, load_settings
 
 
+def test_env_example_lists_every_runtime_configuration_variable():
+    example = Path(".env.example").read_text(encoding="utf-8")
+    names = {
+        line.partition("=")[0]
+        for line in example.splitlines()
+        if line and not line.startswith("#") and "=" in line
+    }
+
+    assert names == {
+        "DISCORD_TOKEN",
+        "MONGODB_URI",
+        "MONGODB_DATABASE",
+        "AUTO_SUMMARY_CHANNEL_ID",
+        "DISCORD_LOG_CHANNEL_ID",
+        "DISCORD_SEND_INTERVAL_SECONDS",
+        "POLL_INTERVAL_MINUTES",
+        "SOURCE_RETRY_LIMIT",
+        "DELIVERY_RETRY_LIMIT",
+        "HTTP_TIMEOUT_SECONDS",
+        "TWITCH_MAX_DURATION_SECONDS",
+        "LOG_FILE_PATH",
+        "LOG_LEVEL",
+    }
+
+
 def test_settings_loads_and_validates_runtime_configuration():
     settings = Settings.from_mapping(
         {

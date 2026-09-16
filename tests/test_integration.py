@@ -17,7 +17,7 @@ from vsummary.bot import Bot
 from vsummary.cogs.autosummary.autosummary import Autosummary
 from vsummary.cogs.manualsummary.manualsummary import ManualSummary
 from vsummary.cogs.misc.ping import Ping
-from vsummary.cogs.summarizer.summarizer import Summarizer, TopicsView
+from vsummary.cogs.summarizer.summarizer import Summarizer
 from vsummary.model.channel import (
     JobStatus,
     ManualSummaryJob,
@@ -362,35 +362,34 @@ async def test_summarization_cleanup_failure_does_not_mask_source_error(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_topics_command_returns_selectable_topic_view(monkeypatch):
-    bot = SimpleNamespace(notebook_client=object())
+async def test_topics_command_queues_youtube_topics_without_a_picker():
+    manual_summary = SimpleNamespace(enqueue=AsyncMock())
+    bot = SimpleNamespace(
+        notebook_client=object(),
+        get_cog=lambda name: manual_summary if name == "ManualSummary" else None,
+    )
     cog = Summarizer(bot)
     interaction = FakeInteraction()
-    monkeypatch.setattr(
-        summarizer_module,
-        "get_topic_list",
-        AsyncMock(return_value=[Topic(name="Intro"), Topic(name="Outro")]),
-    )
 
     await Summarizer.topics.callback(cog, interaction, VIDEO_ID)
 
     assert interaction.response.deferred == [{"thinking": True}]
-    assert len(interaction.followup.messages) == 1
-    content, kwargs = interaction.followup.messages[0]
-    assert content == "Here are the topics mentioned in the video:\n1: Intro\n2: Outro"
-    assert isinstance(kwargs["view"], TopicsView)
-    assert [option.label for option in kwargs["view"].topic_select.options] == [
-        "Intro",
-        "Outro",
+    assert interaction.followup.messages == [
+        ("YouTube video topics are queued and will be posted here.", {}),
     ]
+    manual_summary.enqueue.assert_awaited_once_with(
+        ref=VIDEO_REF,
+        operation=ManualSummaryOperation.TOPICS,
+        channel_id=123,
+        requester_id=456,
+    )
+    assert not hasattr(summarizer_module, "get_topic_list")
 
 
 @pytest.mark.asyncio
-async def test_topics_command_reports_invalid_video_input(monkeypatch):
+async def test_topics_command_reports_invalid_video_input():
     cog = Summarizer(SimpleNamespace(notebook_client=object()))
     interaction = FakeInteraction()
-    get_topics = AsyncMock()
-    monkeypatch.setattr(summarizer_module, "get_topic_list", get_topics)
 
     await Summarizer.topics.callback(cog, interaction, "https://example.com/video")
 
@@ -398,27 +397,7 @@ async def test_topics_command_reports_invalid_video_input(monkeypatch):
     assert interaction.followup.messages == [
         ("'https://example.com/video' is not a supported video source.", {})
     ]
-    get_topics.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_topics_command_reports_malformed_notebooklm_output_after_deferring(
-    monkeypatch,
-):
-    cog = Summarizer(SimpleNamespace(notebook_client=object()))
-    interaction = FakeInteraction()
-    monkeypatch.setattr(
-        summarizer_module,
-        "get_topic_list",
-        AsyncMock(side_effect=InvalidSummaryResponse("empty topic list")),
-    )
-
-    await Summarizer.topics.callback(cog, interaction, VIDEO_ID)
-
-    assert interaction.response.deferred == [{"thinking": True}]
-    assert interaction.followup.messages == [
-        ("NotebookLM returned an invalid topic list. Please try again later.", {})
-    ]
+    assert not hasattr(summarizer_module, "get_topic_list")
 
 
 @pytest.mark.asyncio
@@ -450,68 +429,7 @@ def test_topic_prompt_requests_detailed_english_prose_without_lists():
 
 
 @pytest.mark.asyncio
-async def test_topics_view_selected_topic_flow_disables_components(monkeypatch):
-    bot = SimpleNamespace(notebook_client=object())
-    view = TopicsView(bot, VIDEO_REF, [Topic(name="Intro")])
-    view.topic_select._values = ["1"]
-    interaction = FakeInteraction()
-    monkeypatch.setattr(
-        summarizer_module,
-        "get_topic_details",
-        AsyncMock(return_value={"topic_name": "Intro", "detail": "Details"}),
-    )
-
-    await view.on_topic_selected(interaction)
-
-    assert interaction.response.deferred == [{}]
-    assert interaction.followup.messages == [("**Intro**\nDetails", {})]
-    assert all(child.disabled for child in view.children)
-    assert interaction.edited_views == [{"view": view}]
-
-
-@pytest.mark.asyncio
-async def test_topics_view_reports_invalid_selected_topic(monkeypatch):
-    bot = SimpleNamespace(notebook_client=object())
-    view = TopicsView(bot, VIDEO_REF, [Topic(name="Intro")])
-    view.topic_select._values = ["2"]
-    interaction = FakeInteraction()
-    monkeypatch.setattr(
-        summarizer_module,
-        "get_topic_details",
-        AsyncMock(side_effect=IndexError),
-    )
-
-    await view.on_topic_selected(interaction)
-
-    assert interaction.followup.messages == [("Invalid topic index: 2", {})]
-    assert interaction.edited_views == [{"view": view}]
-
-
-@pytest.mark.asyncio
-async def test_topics_view_all_topics_flow_sends_each_detail(monkeypatch):
-    bot = SimpleNamespace(notebook_client=object())
-    view = TopicsView(bot, VIDEO_REF, [Topic(name="Intro"), Topic(name="Outro")])
-    interaction = FakeInteraction()
-    monkeypatch.setattr(
-        summarizer_module,
-        "get_topic_details_all",
-        AsyncMock(
-            return_value=[
-                {"topic_name": "Intro", "detail": "A"},
-                {"topic_name": "Outro", "detail": "B"},
-            ]
-        ),
-    )
-
-    await view.on_all_topics(interaction)
-
-    assert interaction.followup.messages == [("**Intro**\nA", {}), ("**Outro**\nB", {})]
-    assert all(child.disabled for child in view.children)
-    assert interaction.edited_views == [{"view": view}]
-
-
-@pytest.mark.asyncio
-async def test_detail_command_queues_youtube_summary_for_durable_delivery(monkeypatch):
+async def test_detail_command_queues_youtube_summary_for_durable_delivery():
     manual_summary = SimpleNamespace(enqueue=AsyncMock())
     cog = Summarizer(
         SimpleNamespace(
@@ -520,8 +438,6 @@ async def test_detail_command_queues_youtube_summary_for_durable_delivery(monkey
         )
     )
     all_interaction = FakeInteraction()
-    all_details = AsyncMock(side_effect=AssertionError("must be queued"))
-    monkeypatch.setattr(summarizer_module, "get_topic_details_all", all_details)
 
     await Summarizer.detail.callback(cog, all_interaction, VIDEO_ID, None)
 
@@ -535,11 +451,8 @@ async def test_detail_command_queues_youtube_summary_for_durable_delivery(monkey
         channel_id=123,
         requester_id=456,
     )
-    all_details.assert_not_awaited()
 
     one_interaction = FakeInteraction()
-    one_detail = AsyncMock(side_effect=AssertionError("must be queued"))
-    monkeypatch.setattr(summarizer_module, "get_topic_details", one_detail)
 
     await Summarizer.detail.callback(cog, one_interaction, VIDEO_ID, 2)
 
@@ -553,7 +466,8 @@ async def test_detail_command_queues_youtube_summary_for_durable_delivery(monkey
         "channel_id": 123,
         "requester_id": 456,
     }
-    one_detail.assert_not_awaited()
+    assert not hasattr(summarizer_module, "get_topic_details")
+    assert not hasattr(summarizer_module, "get_topic_details_all")
 
 
 @pytest.mark.asyncio
