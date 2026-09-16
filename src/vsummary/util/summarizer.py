@@ -26,8 +26,8 @@ class PermanentSummaryError(SummaryServiceError):
     """Raised when NotebookLM returned an unusable result."""
 
 
-class InvalidSummaryResponse(PermanentSummaryError):
-    """Raised when NotebookLM's topic JSON cannot be shown safely in Discord."""
+class InvalidSummaryResponse(TransientSummaryError):
+    """Raised when NotebookLM returns malformed topic data that may succeed on retry."""
 
 
 class NotebookLMSummaryService:

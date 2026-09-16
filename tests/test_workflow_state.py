@@ -7,6 +7,7 @@ import pytest
 from vsummary.cogs.autosummary.autosummary import Autosummary
 from vsummary.model.channel import JobStatus, SummaryJob
 from vsummary.model.video import Topic
+from vsummary.util.summarizer import InvalidSummaryResponse
 
 
 class FakeJob:
@@ -175,6 +176,28 @@ async def test_source_failure_uses_configured_retry_limit_in_notification():
 
     assert job.status is JobStatus.FAILED
     assert "after 2 attempts" in messages[0]
+
+
+@pytest.mark.asyncio
+async def test_invalid_notebooklm_topic_response_is_retried():
+    cog = Autosummary.__new__(Autosummary)
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.settings = SimpleNamespace(source_retry_limit=5)
+    cog.summary_service = SimpleNamespace(
+        summarize=AsyncMock(
+            side_effect=InvalidSummaryResponse(
+                "NotebookLM did not return JSON topic data"
+            )
+        )
+    )
+    job = FakeJob()
+
+    assert not await cog._generate_for_job(job)
+
+    assert job.retry_count == 1
+    assert job.status is JobStatus.QUEUED
+    assert job.last_error == "NotebookLM did not return JSON topic data"
+    assert job.next_attempt_at > datetime.now(UTC)
 
 
 @pytest.mark.asyncio
