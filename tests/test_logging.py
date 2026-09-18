@@ -100,8 +100,15 @@ async def test_discord_sink_queues_warning_after_ready_and_redacts_and_truncates
             "%s",
             ("mongodb://user:password@example.test/db " + "x" * 3_000,),
             exc_info=__import__("sys").exc_info(),
-            extra={"context": {"video_id": "video", "api_key": "also-secret"}},
+            extra={
+                "context": {
+                    "source": "twitch",
+                    "video_id": "123456789",
+                    "api_key": "also-secret",
+                }
+            },
         )
+    warning.created = 0
     handler.handle(warning)
 
     target = SimpleNamespace(send=AsyncMock())
@@ -111,7 +118,12 @@ async def test_discord_sink_queues_warning_after_ready_and_redacts_and_truncates
 
     target.send.assert_awaited_once()
     message = target.send.await_args.args[0]
-    assert "video_id=video" in message
+    assert message == (
+        "Timestamp: 1970-01-01T00:00:00Z\n"
+        "Video: https://www.twitch.tv/videos/123456789\n"
+        "Error: RuntimeError: token=<redacted>"
+    )
+    assert "Traceback" not in message
     assert "super-secret" not in message
     assert "also-secret" not in message
     assert "mongodb://user:password@" not in message

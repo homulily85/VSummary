@@ -6,7 +6,6 @@ import asyncio
 import logging
 import re
 import time
-import traceback
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from logging.handlers import TimedRotatingFileHandler
@@ -17,6 +16,7 @@ from rich.logging import RichHandler
 
 from vsummary.settings import Settings
 from vsummary.util.discord import send_limited
+from vsummary.util.video import UnsupportedVideoSource, VideoRef, build_video_url
 
 DISCORD_MESSAGE_LIMIT = 2_000
 DISCORD_QUEUE_SIZE = 1_000
@@ -119,33 +119,18 @@ class DiscordLogHandler(logging.Handler):
             await self.queue.join()
 
     def format_record(self, record: logging.LogRecord) -> str:
-        """Render a compact, redacted Discord-sized version of a log record."""
+        """Render the timestamp, video link, and concise error for Discord."""
         timestamp = (
             datetime.fromtimestamp(record.created, UTC)
             .isoformat(timespec="seconds")
             .replace("+00:00", "Z")
         )
-        context = _format_context(getattr(record, "context", None), redact=True)
-        header = _truncate(
-            f"[{timestamp}] {record.levelname} {record.name}{context}", 600
-        )
-        trace = ""
-        if record.exc_info:
-            trace = _truncate(
-                _redact_text(
-                    "".join(traceback.format_exception(*record.exc_info, limit=5))
-                ),
-                800,
-            )
-        message = _redact_text(record.getMessage())
-        if trace:
-            message_budget = max(
-                0, DISCORD_MESSAGE_LIMIT - len(header) - len(trace) - 2
-            )
-            return f"{header}\n{_truncate(message, message_budget)}\n{trace}"[
-                :DISCORD_MESSAGE_LIMIT
-            ]
-        return _truncate(f"{header}\n{message}", DISCORD_MESSAGE_LIMIT)
+        lines = [f"Timestamp: {timestamp}"]
+        video_url = _video_url_from_context(getattr(record, "context", None))
+        if video_url is not None:
+            lines.append(f"Video: {video_url}")
+        lines.append(f"Error: {_redact_text(_record_error(record))}")
+        return _truncate("\n".join(lines), DISCORD_MESSAGE_LIMIT)
 
     async def _deliver(self) -> None:
         while True:
@@ -271,6 +256,30 @@ def _format_context(value: object, *, redact: bool = False) -> str:
             rendered = _redact_text(str(item)) if redact else str(item)
         parts.append(f"{name}={rendered}")
     return " " + _truncate(" ".join(parts), 500)
+
+
+def _video_url_from_context(value: object) -> str | None:
+    """Build a video URL from log context when one is available."""
+    if not isinstance(value, Mapping):
+        return None
+    video_id = value.get("video_id")
+    if not isinstance(video_id, str) or not video_id:
+        return None
+    source = value.get("source", "youtube")
+    if not isinstance(source, str):
+        return None
+    try:
+        return build_video_url(VideoRef(source=source, video_id=video_id))
+    except (UnsupportedVideoSource, ValueError):
+        return None
+
+
+def _record_error(record: logging.LogRecord) -> str:
+    """Extract the exception text without its traceback when available."""
+    if record.exc_info and record.exc_info[1] is not None:
+        exception_type, exception, _ = record.exc_info
+        return f"{exception_type.__name__}: {exception}"
+    return record.getMessage()
 
 
 def _redact_text(value: str) -> str:
