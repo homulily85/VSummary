@@ -2,9 +2,26 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from vsummary.model.channel import ManualSummaryOperation
-from vsummary.util.discord import send_limited
-from vsummary.util.video import UnsupportedVideoSource, parse_video_source
+from vsummary.model.channel import (
+    JobStatus,
+    ManualSummaryJob,
+    ManualSummaryOperation,
+    SummaryJob,
+)
+from vsummary.util.discord import send_limited, split_message
+from vsummary.util.video import (
+    UnsupportedVideoSource,
+    VideoRef,
+    build_video_url,
+    parse_video_source,
+)
+
+_ACTIVE_JOB_STATUSES = [
+    JobStatus.QUEUED.value,
+    JobStatus.GENERATING.value,
+    JobStatus.READY_TO_DELIVER.value,
+    JobStatus.DELIVERING.value,
+]
 
 
 class Summarizer(commands.Cog):
@@ -78,6 +95,45 @@ class Summarizer(commands.Cog):
             )
         except UnsupportedVideoSource as exc:
             await send_limited(self.bot, interaction.followup.send, str(exc))
+
+    @app_commands.command(name="queue", description="List videos awaiting a summary.")
+    async def queue(self, interaction: discord.Interaction):
+        """List active auto-summary and manual-summary jobs in processing order."""
+        await interaction.response.defer(thinking=True)
+        query = {"status": {"$in": _ACTIVE_JOB_STATUSES}}
+        auto_jobs = await SummaryJob.find(query).to_list()
+        manual_jobs = await ManualSummaryJob.find(query).to_list()
+        entries = [
+            (
+                job.next_attempt_at,
+                "Auto",
+                job.title,
+                build_video_url(VideoRef(source="youtube", video_id=job.video_id)),
+            )
+            for job in auto_jobs
+        ]
+        entries.extend(
+            (
+                job.next_attempt_at,
+                "Manual",
+                getattr(job, "title", None) or job.video_id,
+                build_video_url(VideoRef(source=job.source, video_id=job.video_id)),
+            )
+            for job in manual_jobs
+        )
+        if not entries:
+            await send_limited(
+                self.bot, interaction.followup.send, "The queue is empty."
+            )
+            return
+        entries.sort(key=lambda entry: entry[0])
+        message = "Queued videos:\n" + "\n".join(
+            f"{index}. **{kind}:** {title} — <{url}> — "
+            f"{timestamp.isoformat(timespec='seconds').replace('+00:00', 'Z')}"
+            for index, (timestamp, kind, title, url) in enumerate(entries, start=1)
+        )
+        for chunk in split_message(message):
+            await send_limited(self.bot, interaction.followup.send, chunk)
 
 
 async def setup(bot):

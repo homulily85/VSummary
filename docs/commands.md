@@ -9,6 +9,7 @@ autocomplete and view Discord's parameter descriptions.
 | --- | --- | --- |
 | `/topics` | `video` (required) | Queues a topic-list request and posts the plain-text result to the invoking channel. |
 | `/detail` | `video` (required), `topic_index` (optional) | Generates detailed content. Omitting `topic_index` generates every topic; providing one generates only that topic. The request is always queued and the result is posted to the invoking channel. |
+| `/queue` | None | Lists active auto-summary and manual-summary jobs in processing order. |
 | `/ping` | None | Confirms that the bot is responding and displays gateway latency. |
 
 ### Supported video inputs

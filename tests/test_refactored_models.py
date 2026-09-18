@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from vsummary.model.channel import JobStatus, SummaryJob
+from vsummary.model.channel import JobStatus, ManualSummaryJob, SummaryJob
 from vsummary.model.video import VideoSummary
 from vsummary.util.video import VideoRef
 
@@ -32,6 +32,13 @@ def test_refactored_models_use_non_optional_topics_and_explicit_states():
         "completed",
         "failed",
     ]
+
+
+def test_manual_summary_jobs_can_store_video_metadata():
+    fields = ManualSummaryJob.model_fields
+
+    assert fields["title"].default is None
+    assert fields["channel_name"].default is None
 
 
 def test_refactored_models_reject_naive_job_datetimes():

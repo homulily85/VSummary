@@ -88,6 +88,8 @@ class SummaryJob(Document):
 class ManualSummaryJob(Document):
     source: str
     video_id: str
+    title: str | None = None
+    channel_name: str | None = None
     operation: ManualSummaryOperation
     topic_index: int | None = None
     channel_id: int

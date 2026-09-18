@@ -48,6 +48,42 @@ async def test_topic_delivery_posts_plain_text_without_a_topic_picker(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_enqueue_stores_video_metadata(monkeypatch):
+    captured = {}
+
+    class FakeManualSummaryJob:
+        def __init__(self, **values):
+            captured.update(values)
+
+        async def save(self):
+            captured["saved"] = True
+
+    cog = ManualSummary.__new__(ManualSummary)
+    cog.worker_id = "worker"
+    monkeypatch.setattr(manualsummary_module, "ManualSummaryJob", FakeManualSummaryJob)
+    monkeypatch.setattr(
+        manualsummary_module,
+        "get_video_metadata",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                title="Test Stream", channel_name="Test Channel"
+            )
+        ),
+    )
+
+    await cog.enqueue(
+        ref=manualsummary_module.VideoRef(source="youtube", video_id="dQw4w9WgXcQ"),
+        operation=ManualSummaryOperation.DETAIL_ONE,
+        channel_id=123,
+        requester_id=456,
+    )
+
+    assert captured["title"] == "Test Stream"
+    assert captured["channel_name"] == "Test Channel"
+    assert captured["saved"] is True
+
+
+@pytest.mark.asyncio
 async def test_twitch_audio_failure_is_logged_with_video_context(monkeypatch, caplog):
     cog = ManualSummary.__new__(ManualSummary)
     cog.bot = SimpleNamespace(notebook_client=object())

@@ -397,6 +397,61 @@ async def test_topics_command_reports_invalid_video_input():
     assert interaction.followup.messages == [
         ("'https://example.com/video' is not a supported video source.", {})
     ]
+
+
+@pytest.mark.asyncio
+async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monkeypatch):
+    class QueueModel:
+        jobs: ClassVar[list] = []
+        query: ClassVar[object | None] = None
+
+        @classmethod
+        def find(cls, query):
+            cls.query = query
+            return SimpleNamespace(to_list=AsyncMock(return_value=cls.jobs))
+
+    auto_jobs = type("AutoQueue", (QueueModel,), {})
+    auto_jobs.jobs = [
+        SimpleNamespace(
+            video_id="dQw4w9WgXcQ",
+            title="Auto video",
+            next_attempt_at=datetime(2026, 9, 19, 12, tzinfo=UTC),
+        )
+    ]
+    manual_jobs = type("ManualQueue", (QueueModel,), {})
+    manual_jobs.jobs = [
+        SimpleNamespace(
+            source="twitch",
+            video_id="123456789",
+            title="Manual video",
+            next_attempt_at=datetime(2026, 9, 19, 11, tzinfo=UTC),
+        )
+    ]
+    monkeypatch.setattr(summarizer_module, "SummaryJob", auto_jobs, raising=False)
+    monkeypatch.setattr(
+        summarizer_module, "ManualSummaryJob", manual_jobs, raising=False
+    )
+    interaction = FakeInteraction()
+
+    await Summarizer.queue.callback(Summarizer(SimpleNamespace()), interaction)
+
+    assert interaction.response.deferred == [{"thinking": True}]
+    assert interaction.followup.messages == [
+        (
+            (
+                "Queued videos:\n"
+                "1. **Manual:** Manual video — <https://www.twitch.tv/videos/123456789> "
+                "— 2026-09-19T11:00:00Z\n"
+                "2. **Auto:** Auto video — <https://www.youtube.com/watch?v=dQw4w9WgXcQ> "
+                "— 2026-09-19T12:00:00Z"
+            ),
+            {},
+        )
+    ]
+    assert auto_jobs.query == {
+        "status": {"$in": ["queued", "generating", "ready_to_deliver", "delivering"]}
+    }
+    assert manual_jobs.query == auto_jobs.query
     assert not hasattr(summarizer_module, "get_topic_list")
 
 

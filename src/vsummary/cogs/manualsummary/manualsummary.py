@@ -20,7 +20,11 @@ from vsummary.util.summarizer import (
 )
 from vsummary.util.twitch import TwitchAudioError, TwitchAudioUnavailableError
 from vsummary.util.video import VideoRef
-from vsummary.util.video_metadata import VideoMetadataError, get_video_metadata
+from vsummary.util.video_metadata import (
+    VideoMetadata,
+    VideoMetadataError,
+    get_video_metadata,
+)
 from vsummary.util.video_work import get_video_work_coordinator
 
 logger = logging.getLogger(__name__)
@@ -62,9 +66,12 @@ class ManualSummary(commands.Cog):
         requester_id: int,
         topic_index: int | None = None,
     ):
+        metadata = await self._load_metadata(ref)
         job = ManualSummaryJob(
             source=ref.source,
             video_id=ref.video_id,
+            title=metadata.title if metadata else None,
+            channel_name=metadata.channel_name if metadata else None,
             operation=operation,
             topic_index=topic_index,
             channel_id=channel_id,
@@ -139,17 +146,12 @@ class ManualSummary(commands.Cog):
     async def _generate(self, job):
         ref = VideoRef(source=job.source, video_id=job.video_id)
         max_duration = getattr(self.settings, "twitch_max_duration_seconds", 21_600)
-        metadata = None
+        metadata = self._stored_metadata(job)
         if job.operation != ManualSummaryOperation.TOPICS:
-            try:
-                metadata = await get_video_metadata(ref)
-            except VideoMetadataError as exc:
-                logger.warning(
-                    "Could not load manual summary metadata: %s",
-                    exc,
-                    exc_info=(type(exc), exc, exc.__traceback__),
-                    extra={"context": {"source": job.source, "video_id": job.video_id}},
-                )
+            metadata = metadata or await self._load_metadata(ref)
+            if metadata is not None:
+                job.title = metadata.title
+                job.channel_name = metadata.channel_name
         try:
             async with get_video_work_coordinator(self.bot).for_video(ref):
                 if job.operation == ManualSummaryOperation.TOPICS:
@@ -285,6 +287,31 @@ class ManualSummary(commands.Cog):
             f"**Video:** {metadata.title}\n**Channel:** {metadata.channel_name}\n\n"
             f"{message}"
         )
+
+    @staticmethod
+    def _stored_metadata(job) -> VideoMetadata | None:
+        title = getattr(job, "title", None)
+        channel_name = getattr(job, "channel_name", None)
+        if (
+            isinstance(title, str)
+            and title
+            and isinstance(channel_name, str)
+            and channel_name
+        ):
+            return VideoMetadata(title=title, channel_name=channel_name)
+        return None
+
+    async def _load_metadata(self, ref: VideoRef) -> VideoMetadata | None:
+        try:
+            return await get_video_metadata(ref)
+        except VideoMetadataError as exc:
+            logger.warning(
+                "Could not load manual summary metadata: %s",
+                exc,
+                exc_info=(type(exc), exc, exc.__traceback__),
+                extra={"context": {"source": ref.source, "video_id": ref.video_id}},
+            )
+            return None
 
     async def _save(self, job):
         values = job.model_dump(mode="python", by_alias=True, exclude={"id"})
