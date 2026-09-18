@@ -178,7 +178,7 @@ def _topic_prompt(topics: list[Topic], topic_index: int) -> str:
         f"Start after the previous topic "
         f"'{_topic_boundaries(topics, topic_index)['prev']}' ends and stop before "
         f"the next topic '{_topic_boundaries(topics, topic_index)['next']}' begins. "
-        f"Write 250-450 words in 2-4 connected prose paragraphs. Explain the flow "
+        f"Write 150-200 words in 2-3 connected prose paragraphs. Explain the flow "
         f"of the discussion and preserve the important claims, reasoning, examples, "
         f"events, distinctions, and conclusions that the speaker makes when they are "
         f"present in the video. Integrate related subtopics into a readable narrative; "

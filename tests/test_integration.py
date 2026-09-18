@@ -417,8 +417,8 @@ def test_topic_prompt_requests_detailed_english_prose_without_lists():
     )
 
     assert "English" in prompt
-    assert "250-450 words" in prompt
-    assert "2-4 connected prose paragraphs" in prompt
+    assert "150-200 words" in prompt
+    assert "2-3 connected prose paragraphs" in prompt
     assert (
         "important claims, reasoning, examples, events, distinctions, and conclusions"
         in prompt
