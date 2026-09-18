@@ -507,7 +507,9 @@ async def test_manual_detail_job_preserves_invalid_topic_index_response(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_manual_detail_waits_for_auto_summary_and_reuses_cached_details():
+async def test_manual_detail_waits_for_auto_summary_and_reuses_cached_details(
+    monkeypatch,
+):
     class BlockingNotebookClient(FakeNotebookClient):
         def __init__(self):
             super().__init__(
@@ -542,6 +544,13 @@ async def test_manual_detail_waits_for_auto_summary_and_reuses_cached_details():
     )
     manual_detail = make_manual_summary(bot)
     job = make_manual_detail_job()
+    monkeypatch.setattr(
+        manualsummary_module,
+        "get_video_metadata",
+        AsyncMock(
+            return_value=SimpleNamespace(title="A stream", channel_name="Test Channel")
+        ),
+    )
 
     automatic_task = asyncio.create_task(auto_summary._generate_for_job(item))
     await client.ask_started.wait()
@@ -556,7 +565,10 @@ async def test_manual_detail_waits_for_auto_summary_and_reuses_cached_details():
 
     assert job.status is JobStatus.DELIVERING
     assert job.delivery_chunks == [
-        "**Introduction**\nThe speaker introduces the subject."
+        (
+            "**Video:** A stream\n**Channel:** Test Channel\n\n"
+            "**Introduction**\nThe speaker introduces the subject."
+        )
     ]
     assert len(client.created) == 1
     assert len(client.prompts) == 3

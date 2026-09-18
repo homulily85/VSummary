@@ -53,9 +53,9 @@ def _download(url: str, directory: str, max_duration_seconds: int) -> Path:
             downloader.download([url])
     except TwitchAudioUnavailableError:
         raise
-    except yt_dlp.utils.DownloadError as exc:
+    except (yt_dlp.utils.DownloadError, yt_dlp.utils.PostProcessingError) as exc:
         raise TwitchAudioUnavailableError(
-            "Twitch VOD is unavailable or restricted"
+            f"Twitch audio download or conversion failed: {exc}"
         ) from exc
     paths = list(Path(directory).glob("*.m4a"))
     if len(paths) != 1:

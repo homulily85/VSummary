@@ -20,6 +20,7 @@ from vsummary.util.summarizer import (
 )
 from vsummary.util.twitch import TwitchAudioError, TwitchAudioUnavailableError
 from vsummary.util.video import VideoRef
+from vsummary.util.video_metadata import VideoMetadataError, get_video_metadata
 from vsummary.util.video_work import get_video_work_coordinator
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,17 @@ class ManualSummary(commands.Cog):
     async def _generate(self, job):
         ref = VideoRef(source=job.source, video_id=job.video_id)
         max_duration = getattr(self.settings, "twitch_max_duration_seconds", 21_600)
+        metadata = None
+        if job.operation != ManualSummaryOperation.TOPICS:
+            try:
+                metadata = await get_video_metadata(ref)
+            except VideoMetadataError as exc:
+                logger.warning(
+                    "Could not load manual summary metadata: %s",
+                    exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                    extra={"context": {"source": job.source, "video_id": job.video_id}},
+                )
         try:
             async with get_video_work_coordinator(self.bot).for_video(ref):
                 if job.operation == ManualSummaryOperation.TOPICS:
@@ -159,7 +171,7 @@ class ManualSummary(commands.Cog):
                         twitch_max_duration_seconds=max_duration,
                     )
                     job.delivery_chunks = split_message(
-                        f"**{detail['topic_name']}**\n{detail['detail']}"
+                        self._format_detail(detail, metadata)
                     )
                 else:
                     details = await get_topic_details_all(
@@ -169,9 +181,11 @@ class ManualSummary(commands.Cog):
                     )
                     job.delivery_chunks = [
                         chunk
-                        for detail in details
+                        for index, detail in enumerate(details)
                         for chunk in split_message(
-                            f"**{detail['topic_name']}**\n{detail['detail']}"
+                            self._format_detail(
+                                detail, metadata if index == 0 else None
+                            )
                         )
                     ]
         except IndexError:
@@ -219,6 +233,17 @@ class ManualSummary(commands.Cog):
             await self._delivery_failure(job, exc)
 
     async def _fail(self, job, exc, *, permanent=False):
+        logger.error(
+            "Manual summary failed: %s",
+            exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+            extra={
+                "context": {
+                    "source": job.source,
+                    "video_id": job.video_id,
+                }
+            },
+        )
         job.retry_count += 1
         job.last_error = str(exc)
         if permanent or job.retry_count >= getattr(
@@ -250,6 +275,16 @@ class ManualSummary(commands.Cog):
 
     def _release(self, job):
         job.claimed_by = job.claimed_at = job.lease_expires_at = None
+
+    @staticmethod
+    def _format_detail(detail, metadata) -> str:
+        message = f"**{detail['topic_name']}**\n{detail['detail']}"
+        if metadata is None:
+            return message
+        return (
+            f"**Video:** {metadata.title}\n**Channel:** {metadata.channel_name}\n\n"
+            f"{message}"
+        )
 
     async def _save(self, job):
         values = job.model_dump(mode="python", by_alias=True, exclude={"id"})
