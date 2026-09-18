@@ -49,7 +49,7 @@ def parse_video_source(value: str) -> VideoRef:
     twitch_segments = [segment for segment in parsed.path.split("/") if segment]
     if (
         parsed.scheme in {"http", "https"}
-        and hostname in {"twitch.tv", "www.twitch.tv"}
+        and hostname in {"twitch.tv", "www.twitch.tv", "m.twitch.tv"}
         and len(twitch_segments) == 2
         and twitch_segments[0] == "videos"
         and twitch_segments[1].isdigit()

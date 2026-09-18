@@ -16,6 +16,7 @@ VIDEO_ID = "dQw4w9WgXcQ"
         f"https://www.youtube.com/watch?v={VIDEO_ID}",
         f"https://youtube.com/watch?foo=bar&v={VIDEO_ID}",
         f"https://youtu.be/{VIDEO_ID}",
+        f"https://m.youtube.com/watch?v={VIDEO_ID}",
         VIDEO_ID,
     ],
 )
@@ -51,6 +52,7 @@ def test_parse_and_build_round_trip():
     [
         "https://www.twitch.tv/videos/123456789",
         "https://twitch.tv/videos/123456789?filter=archives",
+        "https://m.twitch.tv/videos/123456789",
     ],
 )
 def test_parse_video_source_accepts_full_twitch_vod_urls(value):
