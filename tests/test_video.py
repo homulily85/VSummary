@@ -77,3 +77,10 @@ def test_build_video_url_supports_twitch_vods():
     assert build_video_url(VideoRef(source="twitch", video_id="123456789")) == (
         "https://www.twitch.tv/videos/123456789"
     )
+
+
+def test_parse_and_build_direct_x_space_round_trip():
+    ref = parse_video_source("https://twitter.com/i/spaces/1OwxWwQOPlNxQ?ref=share")
+
+    assert ref == VideoRef(source="x_space", video_id="1OwxWwQOPlNxQ")
+    assert build_video_url(ref) == "https://x.com/i/spaces/1OwxWwQOPlNxQ"

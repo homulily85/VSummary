@@ -15,6 +15,11 @@ from vsummary.util.video import (
     build_video_url,
     parse_video_source,
 )
+from vsummary.util.x_space import (
+    XSpaceResolutionError,
+    is_x_space_input,
+    resolve_x_space,
+)
 
 _ACTIVE_JOB_STATUSES = [
     JobStatus.QUEUED.value,
@@ -22,6 +27,18 @@ _ACTIVE_JOB_STATUSES = [
     JobStatus.READY_TO_DELIVER.value,
     JobStatus.DELIVERING.value,
 ]
+_SOURCE_LABELS = {
+    "youtube": "YouTube video",
+    "twitch": "Twitch VOD",
+    "x_space": "X Space",
+}
+
+
+async def _resolve_manual_source(value: str) -> VideoRef:
+    """Resolve X status URLs before a manual-summary job is created."""
+    if is_x_space_input(value):
+        return await resolve_x_space(value)
+    return parse_video_source(value)
 
 
 class Summarizer(commands.Cog):
@@ -30,7 +47,9 @@ class Summarizer(commands.Cog):
 
     @app_commands.command(name="topics", description="Get topic list from a video.")
     @app_commands.describe(
-        video="A YouTube URL or ID, or a full public Twitch VOD URL to summarize."
+        video=(
+            "A YouTube URL or ID, a public Twitch VOD URL, or an archived X Space URL."
+        )
     )
     async def topics(
         self,
@@ -41,27 +60,29 @@ class Summarizer(commands.Cog):
         await interaction.response.defer(thinking=True)
 
         try:
-            ref = parse_video_source(video)
+            ref = await _resolve_manual_source(video)
             await self.bot.get_cog("ManualSummary").enqueue(
                 ref=ref,
                 operation=ManualSummaryOperation.TOPICS,
                 channel_id=interaction.channel_id,
                 requester_id=interaction.user.id,
             )
-            source_label = "Twitch VOD" if ref.source == "twitch" else "YouTube video"
+            source_label = _SOURCE_LABELS[ref.source]
             await send_limited(
                 self.bot,
                 interaction.followup.send,
                 f"{source_label} topics are queued and will be posted here.",
             )
-        except UnsupportedVideoSource as exc:
+        except (UnsupportedVideoSource, XSpaceResolutionError) as exc:
             await send_limited(self.bot, interaction.followup.send, str(exc))
 
     @app_commands.command(
         name="detail", description="Get details about a specific topic in the video."
     )
     @app_commands.describe(
-        video="A YouTube URL or ID, or a full public Twitch VOD URL to summarize.",
+        video=(
+            "A YouTube URL or ID, a public Twitch VOD URL, or an archived X Space URL."
+        ),
         topic_index="The index of the topic to get details for (1-based).",
     )
     async def detail(
@@ -74,7 +95,7 @@ class Summarizer(commands.Cog):
         await interaction.response.defer(thinking=True)
 
         try:
-            ref = parse_video_source(video)
+            ref = await _resolve_manual_source(video)
             operation = (
                 ManualSummaryOperation.DETAIL_ALL
                 if topic_index is None
@@ -87,13 +108,13 @@ class Summarizer(commands.Cog):
                 channel_id=interaction.channel_id,
                 requester_id=interaction.user.id,
             )
-            source_label = "Twitch VOD" if ref.source == "twitch" else "YouTube video"
+            source_label = _SOURCE_LABELS[ref.source]
             await send_limited(
                 self.bot,
                 interaction.followup.send,
                 f"{source_label} summary is queued and will be posted here.",
             )
-        except UnsupportedVideoSource as exc:
+        except (UnsupportedVideoSource, XSpaceResolutionError) as exc:
             await send_limited(self.bot, interaction.followup.send, str(exc))
 
     @app_commands.command(name="queue", description="List videos awaiting a summary.")

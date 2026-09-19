@@ -1,6 +1,7 @@
 """Download public Twitch VOD audio for NotebookLM uploads."""
 
 import asyncio
+import logging
 import shutil
 import tempfile
 from collections.abc import AsyncIterator
@@ -12,6 +13,7 @@ import yt_dlp
 from vsummary.util.video import VideoRef, build_video_url
 
 MAX_AUDIO_BYTES = 190 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 class TwitchAudioError(RuntimeError):
@@ -19,10 +21,10 @@ class TwitchAudioError(RuntimeError):
 
 
 class TwitchAudioUnavailableError(TwitchAudioError):
-    """A VOD is private, restricted, too long, or otherwise unsupported."""
+    """A VOD is private, restricted, or otherwise unsupported."""
 
 
-def _download(url: str, directory: str, max_duration_seconds: int) -> Path:
+def _download(url: str, directory: str) -> Path:
     if shutil.which("ffmpeg") is None:
         raise TwitchAudioUnavailableError("ffmpeg is required to process Twitch audio")
     options = {
@@ -42,14 +44,14 @@ def _download(url: str, directory: str, max_duration_seconds: int) -> Path:
     try:
         with yt_dlp.YoutubeDL(options) as downloader:
             info = downloader.extract_info(url, download=False)
-            duration = info.get("duration")
-            if (
-                not isinstance(duration, (int, float))
-                or duration > max_duration_seconds
-            ):
+            if not isinstance(info, dict):
                 raise TwitchAudioUnavailableError(
-                    f"Twitch VODs must be no longer than {max_duration_seconds // 3600} hours"
+                    "Twitch VOD is unavailable or cannot be accessed"
                 )
+            vod_id = info.get("id")
+            if not isinstance(vod_id, str) or not vod_id:
+                vod_id = url.rstrip("/").rsplit("/", maxsplit=1)[-1]
+            logger.info("Downloading Twitch VOD audio for %s.", vod_id)
             downloader.download([url])
     except TwitchAudioUnavailableError:
         raise
@@ -64,18 +66,15 @@ def _download(url: str, directory: str, max_duration_seconds: int) -> Path:
         raise TwitchAudioUnavailableError(
             "Twitch VOD audio exceeds NotebookLM's upload limit"
         )
+    logger.info("Prepared Twitch VOD audio for %s.", paths[0].stem)
     return paths[0]
 
 
 @asynccontextmanager
-async def download_twitch_audio(
-    ref: VideoRef, max_duration_seconds: int
-) -> AsyncIterator[Path]:
+async def download_twitch_audio(ref: VideoRef) -> AsyncIterator[Path]:
     """Download a public Twitch VOD to a temporary M4A audio file."""
     if ref.source != "twitch":
         raise ValueError("Twitch audio can only be downloaded for Twitch references")
     with tempfile.TemporaryDirectory(prefix="vsummary-twitch-") as directory:
-        path = await asyncio.to_thread(
-            _download, build_video_url(ref), directory, max_duration_seconds
-        )
+        path = await asyncio.to_thread(_download, build_video_url(ref), directory)
         yield path

@@ -87,9 +87,7 @@ async def test_enqueue_stores_video_metadata(monkeypatch):
 async def test_twitch_audio_failure_is_logged_with_video_context(monkeypatch, caplog):
     cog = ManualSummary.__new__(ManualSummary)
     cog.bot = SimpleNamespace(notebook_client=object())
-    cog.settings = SimpleNamespace(
-        source_retry_limit=5, twitch_max_duration_seconds=21_600
-    )
+    cog.settings = SimpleNamespace(source_retry_limit=5)
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
     job = ManualSummaryJob.model_construct(
@@ -126,7 +124,7 @@ async def test_twitch_audio_failure_is_logged_with_video_context(monkeypatch, ca
 async def test_detail_includes_video_and_channel_metadata(monkeypatch):
     cog = ManualSummary.__new__(ManualSummary)
     cog.bot = SimpleNamespace(notebook_client=object())
-    cog.settings = SimpleNamespace(twitch_max_duration_seconds=21_600)
+    cog.settings = SimpleNamespace()
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
     job = ManualSummaryJob.model_construct(
@@ -168,7 +166,7 @@ async def test_detail_includes_video_and_channel_metadata(monkeypatch):
 async def test_all_details_include_video_and_channel_metadata_once(monkeypatch):
     cog = ManualSummary.__new__(ManualSummary)
     cog.bot = SimpleNamespace(notebook_client=object())
-    cog.settings = SimpleNamespace(twitch_max_duration_seconds=21_600)
+    cog.settings = SimpleNamespace()
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
     job = ManualSummaryJob.model_construct(

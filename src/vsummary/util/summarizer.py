@@ -10,6 +10,7 @@ from vsummary.logging import log_event
 from vsummary.model.video import Topic, VideoSummary
 from vsummary.util.twitch import download_twitch_audio
 from vsummary.util.video import VideoRef, build_video_url
+from vsummary.util.x_space import download_x_space_audio
 
 logger = logging.getLogger(__name__)
 Video = VideoSummary
@@ -138,8 +139,6 @@ def _parse_topics(answer: str) -> list[Topic]:
 async def _create_notebook_with_source(
     client: NotebookLMClient,
     ref: VideoRef,
-    *,
-    twitch_max_duration_seconds: int = 21_600,
 ) -> "Notebook":
     """Create a temporary notebook with the video source attached.
 
@@ -151,7 +150,7 @@ async def _create_notebook_with_source(
     notebook = await client.notebooks.create(video_link)
     try:
         if ref.source == "twitch":
-            async with download_twitch_audio(ref, twitch_max_duration_seconds) as audio:
+            async with download_twitch_audio(ref) as audio:
                 await client.sources.add_file(
                     notebook.id,
                     audio,
@@ -159,6 +158,16 @@ async def _create_notebook_with_source(
                     wait=True,
                     wait_timeout=600,
                     title=f"Twitch VOD {ref.video_id}",
+                )
+        elif ref.source == "x_space":
+            async with download_x_space_audio(ref) as audio:
+                await client.sources.add_file(
+                    notebook.id,
+                    audio,
+                    mime_type="audio/mp4",
+                    wait=True,
+                    wait_timeout=600,
+                    title=f"X Space {ref.video_id}",
                 )
         else:
             await client.sources.add_url(notebook.id, video_link)
@@ -193,8 +202,6 @@ def _topic_prompt(topics: list[Topic], topic_index: int) -> str:
 async def _get_or_create_topic_list(
     client: NotebookLMClient,
     ref: VideoRef,
-    *,
-    twitch_max_duration_seconds: int = 21_600,
 ) -> tuple[Video, "Notebook | None"]:
     """
     Get the topic list for a video, creating it if it doesn't exist.
@@ -217,9 +224,7 @@ async def _get_or_create_topic_list(
         f"Video {video_link} not found in database, creating notebook and adding source..."
     )
 
-    notebook = await _create_notebook_with_source(
-        client, ref, twitch_max_duration_seconds=twitch_max_duration_seconds
-    )
+    notebook = await _create_notebook_with_source(client, ref)
     prompt = """
        What are the topics mentioned in the video?
        Return a json containing all topics mentioned in the order they appear in the video using 
@@ -260,13 +265,9 @@ async def _get_or_create_topic_list(
 async def get_topic_list(
     client: NotebookLMClient,
     ref: VideoRef,
-    *,
-    twitch_max_duration_seconds: int = 21_600,
 ):
     logger.info(f"Getting topics from {ref}")
-    video, notebook = await _get_or_create_topic_list(
-        client, ref, twitch_max_duration_seconds=twitch_max_duration_seconds
-    )
+    video, notebook = await _get_or_create_topic_list(client, ref)
     if notebook is None:
         return video.topics
     try:
@@ -280,12 +281,8 @@ async def get_topic_details(
     client: NotebookLMClient,
     ref: VideoRef,
     topic_index: int,
-    *,
-    twitch_max_duration_seconds: int = 21_600,
 ):
-    video, notebook = await _get_or_create_topic_list(
-        client, ref, twitch_max_duration_seconds=twitch_max_duration_seconds
-    )
+    video, notebook = await _get_or_create_topic_list(client, ref)
     topics = _validated_topics(video.topics or [])
 
     try:
@@ -300,9 +297,7 @@ async def get_topic_details(
             }
 
         if notebook is None:
-            notebook = await _create_notebook_with_source(
-                client, ref, twitch_max_duration_seconds=twitch_max_duration_seconds
-            )
+            notebook = await _create_notebook_with_source(client, ref)
         prompt = _topic_prompt(topics, topic_index)
         logger.info("Asking notebook for topic details...")
         response = await client.chat.ask(notebook.id, prompt)
@@ -324,18 +319,12 @@ async def get_topic_details(
 async def get_topic_details_all(
     client: NotebookLMClient,
     ref: VideoRef,
-    *,
-    twitch_max_duration_seconds: int = 21_600,
 ):
-    video, notebook = await _get_or_create_topic_list(
-        client, ref, twitch_max_duration_seconds=twitch_max_duration_seconds
-    )
+    video, notebook = await _get_or_create_topic_list(client, ref)
     topics = _validated_topics(video.topics or [])
 
     if notebook is None and any(t.detail is None for t in topics):
-        notebook = await _create_notebook_with_source(
-            client, ref, twitch_max_duration_seconds=twitch_max_duration_seconds
-        )
+        notebook = await _create_notebook_with_source(client, ref)
 
     results = []
     needs_db_save = False

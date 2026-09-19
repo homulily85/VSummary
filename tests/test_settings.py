@@ -24,7 +24,6 @@ def test_env_example_lists_every_runtime_configuration_variable():
         "SOURCE_RETRY_LIMIT",
         "DELIVERY_RETRY_LIMIT",
         "HTTP_TIMEOUT_SECONDS",
-        "TWITCH_MAX_DURATION_SECONDS",
         "LOG_FILE_PATH",
         "LOG_LEVEL",
     }
@@ -96,6 +95,18 @@ def test_settings_rejects_missing_and_invalid_values():
                 "AUTO_SUMMARY_CHANNEL_ID": "not-an-integer",
             }
         )
+
+
+def test_settings_ignores_the_removed_twitch_duration_limit():
+    settings = Settings.from_mapping(
+        {
+            "DISCORD_TOKEN": "token",
+            "MONGODB_URI": "mongodb://localhost",
+            "TWITCH_MAX_DURATION_SECONDS": "not-a-number",
+        }
+    )
+
+    assert not hasattr(settings, "twitch_max_duration_seconds")
 
 
 def test_load_settings_can_read_a_mapping_without_import_side_effects():

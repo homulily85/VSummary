@@ -327,9 +327,8 @@ async def test_twitch_source_uploads_temporary_audio_file(monkeypatch, tmp_path)
     audio.write_bytes(b"audio")
 
     @asynccontextmanager
-    async def fake_download(ref, max_duration_seconds):
+    async def fake_download(ref):
         assert ref == VideoRef(source="twitch", video_id="123456789")
-        assert max_duration_seconds == 21_600
         yield audio
 
     monkeypatch.setattr(summarizer_util, "download_twitch_audio", fake_download)
@@ -346,6 +345,40 @@ async def test_twitch_source_uploads_temporary_audio_file(monkeypatch, tmp_path)
                 "wait": True,
                 "wait_timeout": 600,
                 "title": "Twitch VOD 123456789",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_x_space_source_uploads_temporary_audio_file(monkeypatch, tmp_path):
+    client = FakeNotebookClient()
+    uploaded = []
+    client.sources.add_file = AsyncMock(
+        side_effect=lambda *args, **kwargs: uploaded.append((args, kwargs))
+    )
+    audio = tmp_path / "space.m4a"
+    audio.write_bytes(b"audio")
+
+    @asynccontextmanager
+    async def fake_download(ref):
+        assert ref == VideoRef(source="x_space", video_id="1OwxWwQOPlNxQ")
+        yield audio
+
+    monkeypatch.setattr(summarizer_util, "download_x_space_audio", fake_download)
+
+    notebook = await summarizer_util._create_notebook_with_source(
+        client, VideoRef(source="x_space", video_id="1OwxWwQOPlNxQ")
+    )
+
+    assert uploaded == [
+        (
+            (notebook.id, audio),
+            {
+                "mime_type": "audio/mp4",
+                "wait": True,
+                "wait_timeout": 600,
+                "title": "X Space 1OwxWwQOPlNxQ",
             },
         )
     ]
@@ -400,6 +433,71 @@ async def test_topics_command_reports_invalid_video_input():
 
 
 @pytest.mark.asyncio
+async def test_topics_command_resolves_an_archived_x_space_before_enqueueing(
+    monkeypatch,
+):
+    manual_summary = SimpleNamespace(enqueue=AsyncMock())
+    bot = SimpleNamespace(
+        notebook_client=object(),
+        get_cog=lambda name: manual_summary if name == "ManualSummary" else None,
+    )
+    cog = Summarizer(bot)
+    interaction = FakeInteraction()
+    x_space_ref = VideoRef(source="x_space", video_id="1OwxWwQOPlNxQ")
+    monkeypatch.setattr(summarizer_module, "is_x_space_input", lambda _: True)
+    monkeypatch.setattr(
+        summarizer_module, "resolve_x_space", AsyncMock(return_value=x_space_ref)
+    )
+
+    await Summarizer.topics.callback(
+        cog, interaction, "https://x.com/example/status/1234567890123456789"
+    )
+
+    assert interaction.followup.messages == [
+        ("X Space topics are queued and will be posted here.", {}),
+    ]
+    manual_summary.enqueue.assert_awaited_once_with(
+        ref=x_space_ref,
+        operation=ManualSummaryOperation.TOPICS,
+        channel_id=123,
+        requester_id=456,
+    )
+
+
+@pytest.mark.asyncio
+async def test_detail_command_reports_unarchived_x_space_without_queueing(monkeypatch):
+    from vsummary.util.x_space import XSpaceResolutionError
+
+    manual_summary = SimpleNamespace(enqueue=AsyncMock())
+    cog = Summarizer(
+        SimpleNamespace(
+            notebook_client=object(),
+            get_cog=lambda name: manual_summary if name == "ManualSummary" else None,
+        )
+    )
+    interaction = FakeInteraction()
+    monkeypatch.setattr(summarizer_module, "is_x_space_input", lambda _: True)
+    monkeypatch.setattr(
+        summarizer_module,
+        "resolve_x_space",
+        AsyncMock(
+            side_effect=XSpaceResolutionError(
+                "This X Space has ended but has not been archived yet."
+            )
+        ),
+    )
+
+    await Summarizer.detail.callback(
+        cog, interaction, "https://x.com/i/spaces/1OwxWwQOPlNxQ", None
+    )
+
+    assert interaction.followup.messages == [
+        ("This X Space has ended but has not been archived yet.", {}),
+    ]
+    manual_summary.enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monkeypatch):
     class QueueModel:
         jobs: ClassVar[list] = []
@@ -425,7 +523,13 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
             video_id="123456789",
             title="Manual video",
             next_attempt_at=datetime(2026, 9, 19, 11, tzinfo=UTC),
-        )
+        ),
+        SimpleNamespace(
+            source="x_space",
+            video_id="1DxleVnmlOmKL",
+            title="Archived Space",
+            next_attempt_at=datetime(2026, 9, 19, 11, 30, tzinfo=UTC),
+        ),
     ]
     monkeypatch.setattr(summarizer_module, "SummaryJob", auto_jobs, raising=False)
     monkeypatch.setattr(
@@ -442,7 +546,9 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
                 "Queued videos:\n"
                 "1. **Manual:** Manual video — <https://www.twitch.tv/videos/123456789> "
                 "— 2026-09-19T11:00:00Z\n"
-                "2. **Auto:** Auto video — <https://www.youtube.com/watch?v=dQw4w9WgXcQ> "
+                "2. **Manual:** Archived Space — <https://x.com/i/spaces/1DxleVnmlOmKL> "
+                "— 2026-09-19T11:30:00Z\n"
+                "3. **Auto:** Auto video — <https://www.youtube.com/watch?v=dQw4w9WgXcQ> "
                 "— 2026-09-19T12:00:00Z"
             ),
             {},

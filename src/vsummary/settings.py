@@ -25,7 +25,6 @@ class Settings:
     log_file_path: Path = Path("logs/vsummary.log")
     log_level: str = "INFO"
     discord_log_channel_id: int | None = None
-    twitch_max_duration_seconds: int = 21_600
     discord_send_interval_seconds: float = 1.0
 
     @classmethod
@@ -42,9 +41,6 @@ class Settings:
         discord_log_channel = _optional_int(
             values.get("DISCORD_LOG_CHANNEL_ID"), "DISCORD_LOG_CHANNEL_ID"
         )
-        twitch_max_duration = _positive_int(
-            values.get("TWITCH_MAX_DURATION_SECONDS"), 21_600
-        )
         discord_send_interval = _positive_float(
             values.get("DISCORD_SEND_INTERVAL_SECONDS"), 1.0
         )
@@ -60,7 +56,6 @@ class Settings:
             log_file_path=log_file_path,
             log_level=log_level,
             discord_log_channel_id=discord_log_channel,
-            twitch_max_duration_seconds=twitch_max_duration,
             discord_send_interval_seconds=discord_send_interval,
         )
 

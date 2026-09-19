@@ -19,6 +19,11 @@ autocomplete and view Discord's parameter descriptions.
 - **Twitch:** only a full public VOD URL, for example
   `https://www.twitch.tv/videos/123456789`. Bare VOD IDs, clip URLs, channel
   livestream URLs, and other domains are not accepted.
+- **X (Twitter) Space:** a public archived Space URL such as
+  `https://x.com/i/spaces/1OwxWwQOPlNxQ`, or an X post URL whose media resolves
+  to a Space. `twitter.com`/`x.com` plus `www`, `m`, and `mobile` variants and
+  query parameters are accepted. Upcoming, live, replay-disabled, and
+  not-yet-archived Spaces are rejected before a job is queued.
 
 Examples:
 
@@ -26,23 +31,12 @@ Examples:
 /topics video:https://www.youtube.com/watch?v=dQw4w9WgXcQ
 /detail video:dQw4w9WgXcQ topic_index:2
 /detail video:https://www.twitch.tv/videos/123456789
+/topics video:https://x.com/i/spaces/1OwxWwQOPlNxQ
 ```
 
 `topic_index` is one-based. For an invalid index, the bot posts an error after
 the worker processes the job. `/topics` does not provide an interactive topic
 picker; use `/detail` with `topic_index` to request a specific topic.
-
-### Queue and cache behavior
-
-- `/detail` replies promptly with a queued confirmation. A worker later posts
-  the summary as a normal message in the channel, so the interaction does not
-  need to remain open.
-- `/topics` is queued for both sources. Twitch additionally needs to download
-  and convert audio.
-- Cache entries are keyed by `(source, video_id)`. Repeated requests can reuse
-  existing results instead of creating another NotebookLM notebook.
-- Work for the same video is serialized in one bot process to avoid concurrent
-  cache writes. Different videos can still be processed independently.
 
 ## Automatic-summary channel tracking
 
@@ -71,5 +65,6 @@ has **View Channel** and **Send Messages**.
 | --- | --- |
 | `The application did not respond` | Confirm the bot is online, its token belongs to the Application that owns the slash command, and the process was restarted after changing the token. |
 | `Missing Access` while posting a result | Check the job `channel_id`, **View Channel**/**Send Messages**, and category overrides. |
-| A Twitch VOD cannot be processed | Use a full public VOD URL, install `ffmpeg`, confirm the VOD is within the duration limit, and ensure it is reachable from the bot host. |
+| A Twitch VOD cannot be processed | Use a full public VOD URL, install `ffmpeg`, and ensure its converted audio fits NotebookLM's upload limit. |
+| An X Space cannot be processed | Use a public archived Space (or a post that resolves to one), install `ffmpeg`, and ensure its converted audio fits NotebookLM's upload limit. |
 | NotebookLM is temporarily unavailable | The worker retries up to `SOURCE_RETRY_LIMIT`; inspect the log file or `DISCORD_LOG_CHANNEL_ID` for details. |

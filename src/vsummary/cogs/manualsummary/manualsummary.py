@@ -26,6 +26,7 @@ from vsummary.util.video_metadata import (
     get_video_metadata,
 )
 from vsummary.util.video_work import get_video_work_coordinator
+from vsummary.util.x_space import XSpaceAudioError, XSpaceAudioUnavailableError
 
 logger = logging.getLogger(__name__)
 LEASE_DURATION = timedelta(minutes=15)
@@ -145,7 +146,6 @@ class ManualSummary(commands.Cog):
 
     async def _generate(self, job):
         ref = VideoRef(source=job.source, video_id=job.video_id)
-        max_duration = getattr(self.settings, "twitch_max_duration_seconds", 21_600)
         metadata = self._stored_metadata(job)
         if job.operation != ManualSummaryOperation.TOPICS:
             metadata = metadata or await self._load_metadata(ref)
@@ -155,11 +155,7 @@ class ManualSummary(commands.Cog):
         try:
             async with get_video_work_coordinator(self.bot).for_video(ref):
                 if job.operation == ManualSummaryOperation.TOPICS:
-                    topics = await get_topic_list(
-                        self.bot.notebook_client,
-                        ref,
-                        twitch_max_duration_seconds=max_duration,
-                    )
+                    topics = await get_topic_list(self.bot.notebook_client, ref)
                     job.delivery_chunks = split_message(
                         "\n".join(
                             f"{i + 1}: {topic.name}" for i, topic in enumerate(topics)
@@ -170,17 +166,12 @@ class ManualSummary(commands.Cog):
                         self.bot.notebook_client,
                         ref,
                         job.topic_index or 0,
-                        twitch_max_duration_seconds=max_duration,
                     )
                     job.delivery_chunks = split_message(
                         self._format_detail(detail, metadata)
                     )
                 else:
-                    details = await get_topic_details_all(
-                        self.bot.notebook_client,
-                        ref,
-                        twitch_max_duration_seconds=max_duration,
-                    )
+                    details = await get_topic_details_all(self.bot.notebook_client, ref)
                     job.delivery_chunks = [
                         chunk
                         for index, detail in enumerate(details)
@@ -192,10 +183,10 @@ class ManualSummary(commands.Cog):
                     ]
         except IndexError:
             job.delivery_chunks = [f"Invalid topic index: {(job.topic_index or 0) + 1}"]
-        except TwitchAudioUnavailableError as exc:
+        except (TwitchAudioUnavailableError, XSpaceAudioUnavailableError) as exc:
             await self._fail(job, exc, permanent=True)
             return
-        except (TwitchAudioError, TransientSummaryError) as exc:
+        except (TwitchAudioError, XSpaceAudioError, TransientSummaryError) as exc:
             await self._fail(job, exc)
             return
         except PermanentSummaryError as exc:

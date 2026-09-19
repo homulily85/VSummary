@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
+from vsummary.util.x_space import XSpaceInputKind, parse_x_space_input
 from vsummary.util.youtube import InvalidYouTubeInputError, to_video_url
 
 
@@ -37,9 +38,8 @@ class VideoRef:
 def parse_video_source(value: str) -> VideoRef:
     """Split a video URL (or bare ID) into a ``VideoRef``.
 
-    Only YouTube is supported today, but this function is the single entry
-    point for adding other services later (Vimeo, Twitch, etc.) — each new
-    source just needs a branch that produces its own ``VideoRef``.
+    The function performs URL-shape normalization only; sources that need a
+    remote availability check are validated by their command backend.
     """
     if not value.strip():
         raise UnsupportedVideoSource("Video reference cannot be empty.")
@@ -55,6 +55,10 @@ def parse_video_source(value: str) -> VideoRef:
         and twitch_segments[1].isdigit()
     ):
         return VideoRef(source="twitch", video_id=twitch_segments[1])
+
+    x_space_input = parse_x_space_input(value)
+    if x_space_input and x_space_input.kind is XSpaceInputKind.SPACE:
+        return VideoRef(source="x_space", video_id=x_space_input.input_id)
 
     try:
         watch_url = to_video_url(value)
@@ -77,5 +81,7 @@ def build_video_url(ref: VideoRef) -> str:
         return f"https://www.youtube.com/watch?v={ref.video_id}"
     if ref.source == "twitch":
         return f"https://www.twitch.tv/videos/{ref.video_id}"
+    if ref.source == "x_space":
+        return f"https://x.com/i/spaces/{ref.video_id}"
 
     raise UnsupportedVideoSource(f"Unsupported video source: '{ref.source}'")

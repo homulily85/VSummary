@@ -24,6 +24,7 @@ for a video shared in your server.
 | --- | --- | --- |
 | YouTube | A video URL or video ID | Supports `/topics` and `/detail`. |
 | Twitch | A full public VOD URL | Requires `ffmpeg`; clips and bare VOD IDs are not supported. |
+| X (Twitter) Space | A public archived Space URL or post URL containing a Space | Supports `/topics` and `/detail`; requires `ffmpeg`. Upcoming, live, and unarchived Spaces are rejected. |
 
 ## How it works
 

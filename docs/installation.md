@@ -7,8 +7,8 @@
   application.
 - A MongoDB deployment: install it directly, run it with Docker, or use
   MongoDB Atlas.
-- `ffmpeg` on `PATH` when summarizing Twitch VODs. `yt-dlp` is already a Python
-  dependency of this project.
+- `ffmpeg` on `PATH` when summarizing Twitch VODs or X Spaces. `yt-dlp` is
+  already a Python dependency of this project.
 - A Discord Application with a bot user.
 - A Google account that can use NotebookLM.
 
@@ -26,7 +26,7 @@ Use a MongoDB instance installed directly on the host, a Docker deployment, or
 [MongoDB Atlas](https://www.mongodb.com/atlas). Set `MONGODB_URI` to the
 connection string for the deployment you choose.
 
-### Install `ffmpeg` for Twitch
+### Install `ffmpeg` for Twitch and X Space
 
 Ubuntu/Debian:
 
@@ -40,9 +40,9 @@ macOS with Homebrew:
 brew install ffmpeg
 ```
 
-Twitch VODs are added to NotebookLM as M4A audio files. A VOD must be public,
-available to `yt-dlp`, no longer than `TWITCH_MAX_DURATION_SECONDS` (six hours
-by default), and produce audio within NotebookLM's upload limit.
+Twitch VODs and X Spaces are added to NotebookLM as M4A audio files. They must
+be public, available to `yt-dlp`, and produce audio within NotebookLM's upload
+limit.
 
 ## 3. Create and invite the Discord bot
 
@@ -99,7 +99,6 @@ without brackets or quotation marks.
 | `SOURCE_RETRY_LIMIT` | No | `5` | Maximum attempts to generate a summary. |
 | `DELIVERY_RETRY_LIMIT` | No | `5` | Maximum attempts to deliver an already generated summary to Discord. |
 | `HTTP_TIMEOUT_SECONDS` | No | `15.0` | Holodex HTTP timeout. |
-| `TWITCH_MAX_DURATION_SECONDS` | No | `21600` | Maximum Twitch VOD duration in seconds. |
 | `LOG_FILE_PATH` | No | `logs/vsummary.log` | Daily rotating log-file path. |
 | `LOG_LEVEL` | No | `INFO` | One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 
