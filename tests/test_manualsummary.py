@@ -8,6 +8,8 @@ import pytest
 import vsummary.cogs.manualsummary.manualsummary as manualsummary_module
 from vsummary.cogs.manualsummary.manualsummary import ManualSummary
 from vsummary.model.channel import JobStatus, ManualSummaryJob, ManualSummaryOperation
+from vsummary.model.video import Topic
+from vsummary.util.summarizer import InvalidSummaryResponse
 from vsummary.util.twitch import TwitchAudioUnavailableError
 
 
@@ -207,3 +209,89 @@ async def test_all_details_include_video_and_channel_metadata_once(monkeypatch):
         ),
         "**Conclusion**\nLast details",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "summary_function", "summary_result"),
+    [
+        (
+            ManualSummaryOperation.TOPICS,
+            "get_topic_list",
+            [Topic(name="Introduction")],
+        ),
+        (
+            ManualSummaryOperation.DETAIL_ONE,
+            "get_topic_details",
+            {"topic_name": "Introduction", "detail": "Details"},
+        ),
+        (
+            ManualSummaryOperation.DETAIL_ALL,
+            "get_topic_details_all",
+            [{"topic_name": "Introduction", "detail": "Details"}],
+        ),
+    ],
+)
+async def test_manual_summary_retries_invalid_response_immediately(
+    monkeypatch, operation, summary_function, summary_result
+):
+    cog = ManualSummary.__new__(ManualSummary)
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.settings = SimpleNamespace(source_retry_limit=5)
+    cog.worker_id = "worker"
+    cog._save = AsyncMock(return_value=True)
+    job = ManualSummaryJob.model_construct(
+        source="youtube",
+        video_id="dQw4w9WgXcQ",
+        operation=operation,
+        topic_index=0,
+        channel_id=123,
+        requester_id=456,
+        next_attempt_at=datetime.now(UTC),
+    )
+    summary = AsyncMock(
+        side_effect=[
+            InvalidSummaryResponse("NotebookLM did not return JSON topic data"),
+            summary_result,
+        ]
+    )
+    monkeypatch.setattr(manualsummary_module, summary_function, summary)
+    monkeypatch.setattr(
+        manualsummary_module,
+        "get_video_metadata",
+        AsyncMock(return_value=None),
+    )
+
+    await cog._generate(job)
+
+    assert summary.await_count == 2
+    assert job.retry_count == 0
+    assert job.status is JobStatus.DELIVERING
+
+
+@pytest.mark.asyncio
+async def test_manual_summary_queues_after_two_invalid_responses(monkeypatch):
+    error = InvalidSummaryResponse("NotebookLM did not return JSON topic data")
+    cog = ManualSummary.__new__(ManualSummary)
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.settings = SimpleNamespace(source_retry_limit=5)
+    cog.worker_id = "worker"
+    cog._save = AsyncMock(return_value=True)
+    job = ManualSummaryJob.model_construct(
+        source="youtube",
+        video_id="dQw4w9WgXcQ",
+        operation=ManualSummaryOperation.TOPICS,
+        channel_id=123,
+        requester_id=456,
+        next_attempt_at=datetime.now(UTC),
+    )
+    summary = AsyncMock(side_effect=[error, error])
+    monkeypatch.setattr(manualsummary_module, "get_topic_list", summary)
+
+    await cog._generate(job)
+
+    assert summary.await_count == 2
+    assert job.retry_count == 1
+    assert job.status is JobStatus.QUEUED
+    assert job.last_error == "NotebookLM did not return JSON topic data"
+    assert job.next_attempt_at > datetime.now(UTC)

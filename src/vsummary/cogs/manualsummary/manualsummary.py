@@ -17,6 +17,7 @@ from vsummary.util.summarizer import (
     get_topic_details,
     get_topic_details_all,
     get_topic_list,
+    retry_invalid_summary_response,
 )
 from vsummary.util.twitch import TwitchAudioError, TwitchAudioUnavailableError
 from vsummary.util.video import VideoRef
@@ -152,35 +153,37 @@ class ManualSummary(commands.Cog):
             if metadata is not None:
                 job.title = metadata.title
                 job.channel_name = metadata.channel_name
+
+        async def generate_delivery_chunks():
+            if job.operation == ManualSummaryOperation.TOPICS:
+                topics = await get_topic_list(self.bot.notebook_client, ref)
+                return split_message(
+                    "\n".join(
+                        f"{i + 1}: {topic.name}" for i, topic in enumerate(topics)
+                    )
+                )
+            if job.operation == ManualSummaryOperation.DETAIL_ONE:
+                detail = await get_topic_details(
+                    self.bot.notebook_client,
+                    ref,
+                    job.topic_index or 0,
+                )
+                return split_message(self._format_detail(detail, metadata))
+
+            details = await get_topic_details_all(self.bot.notebook_client, ref)
+            return [
+                chunk
+                for index, detail in enumerate(details)
+                for chunk in split_message(
+                    self._format_detail(detail, metadata if index == 0 else None)
+                )
+            ]
+
         try:
             async with get_video_work_coordinator(self.bot).for_video(ref):
-                if job.operation == ManualSummaryOperation.TOPICS:
-                    topics = await get_topic_list(self.bot.notebook_client, ref)
-                    job.delivery_chunks = split_message(
-                        "\n".join(
-                            f"{i + 1}: {topic.name}" for i, topic in enumerate(topics)
-                        )
-                    )
-                elif job.operation == ManualSummaryOperation.DETAIL_ONE:
-                    detail = await get_topic_details(
-                        self.bot.notebook_client,
-                        ref,
-                        job.topic_index or 0,
-                    )
-                    job.delivery_chunks = split_message(
-                        self._format_detail(detail, metadata)
-                    )
-                else:
-                    details = await get_topic_details_all(self.bot.notebook_client, ref)
-                    job.delivery_chunks = [
-                        chunk
-                        for index, detail in enumerate(details)
-                        for chunk in split_message(
-                            self._format_detail(
-                                detail, metadata if index == 0 else None
-                            )
-                        )
-                    ]
+                job.delivery_chunks = await retry_invalid_summary_response(
+                    generate_delivery_chunks
+                )
         except IndexError:
             job.delivery_chunks = [f"Invalid topic index: {(job.topic_index or 0) + 1}"]
         except (TwitchAudioUnavailableError, XSpaceAudioUnavailableError) as exc:

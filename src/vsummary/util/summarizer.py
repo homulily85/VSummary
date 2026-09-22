@@ -1,6 +1,6 @@
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 
 import httpx
 from notebooklm import NotebookLMClient, SourceAddError
@@ -30,6 +30,16 @@ class PermanentSummaryError(SummaryServiceError):
 
 class InvalidSummaryResponse(TransientSummaryError):
     """Raised when NotebookLM returns malformed topic data that may succeed on retry."""
+
+
+async def retry_invalid_summary_response[SummaryResult](
+    operation: Callable[[], Awaitable[SummaryResult]],
+) -> SummaryResult:
+    """Retry a malformed NotebookLM response once without consuming a job retry."""
+    try:
+        return await operation()
+    except InvalidSummaryResponse:
+        return await operation()
 
 
 class NotebookLMSummaryService:

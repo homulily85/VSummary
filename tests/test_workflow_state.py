@@ -179,21 +179,42 @@ async def test_source_failure_uses_configured_retry_limit_in_notification():
 
 
 @pytest.mark.asyncio
-async def test_invalid_notebooklm_topic_response_is_retried():
+async def test_invalid_notebooklm_topic_response_retries_immediately_then_succeeds():
     cog = Autosummary.__new__(Autosummary)
     cog.bot = SimpleNamespace(notebook_client=object())
     cog.settings = SimpleNamespace(source_retry_limit=5)
     cog.summary_service = SimpleNamespace(
         summarize=AsyncMock(
-            side_effect=InvalidSummaryResponse(
-                "NotebookLM did not return JSON topic data"
-            )
+            side_effect=[
+                InvalidSummaryResponse("NotebookLM did not return JSON topic data"),
+                [Topic(name="Intro", detail="Details")],
+            ]
         )
+    )
+    job = FakeJob()
+
+    assert await cog._generate_for_job(job)
+
+    assert cog.summary_service.summarize.await_count == 2
+    assert job.retry_count == 0
+    assert job.status is JobStatus.READY_TO_DELIVER
+    assert job.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_invalid_notebooklm_topic_response_queues_after_immediate_retry():
+    error = InvalidSummaryResponse("NotebookLM did not return JSON topic data")
+    cog = Autosummary.__new__(Autosummary)
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.settings = SimpleNamespace(source_retry_limit=5)
+    cog.summary_service = SimpleNamespace(
+        summarize=AsyncMock(side_effect=[error, error])
     )
     job = FakeJob()
 
     assert not await cog._generate_for_job(job)
 
+    assert cog.summary_service.summarize.await_count == 2
     assert job.retry_count == 1
     assert job.status is JobStatus.QUEUED
     assert job.last_error == "NotebookLM did not return JSON topic data"

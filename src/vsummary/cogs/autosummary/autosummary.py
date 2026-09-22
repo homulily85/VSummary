@@ -41,6 +41,7 @@ from vsummary.util.summarizer import (
     PermanentSummaryError,
     TransientSummaryError,
     get_topic_details_all,
+    retry_invalid_summary_response,
 )
 from vsummary.util.video import VideoRef
 from vsummary.util.video_work import get_video_work_coordinator
@@ -354,15 +355,16 @@ class Autosummary(commands.Cog):
     async def _generate_for_job(self, item):
         if not getattr(item, "summary_details", None):
             ref = VideoRef(source="youtube", video_id=item.video_id)
+
+            async def generate_summary():
+                summary_service = getattr(self, "summary_service", None)
+                if summary_service is not None:
+                    return await summary_service.summarize(ref)
+                return await get_topic_details_all(getattr(self, "notebook", None), ref)
+
             try:
                 async with get_video_work_coordinator(self.bot).for_video(ref):
-                    summary_service = getattr(self, "summary_service", None)
-                    if summary_service is not None:
-                        details = await summary_service.summarize(ref)
-                    else:
-                        details = await get_topic_details_all(
-                            getattr(self, "notebook", None), ref
-                        )
+                    details = await retry_invalid_summary_response(generate_summary)
                 item.summary_details = [self._as_topic(detail) for detail in details]
             except (PermanentSummaryError, PermanentHolodexError) as exc:
                 logger.warning(
