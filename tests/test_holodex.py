@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from vsummary.util.holodex import (
+    DEFAULT_IGNORED_TOPICS,
     HOLODEX_API_URL,
     MAX_RETRIES,
     REFERER,
@@ -14,7 +15,6 @@ from vsummary.util.holodex import (
     PermanentHolodexError,
     TransientHolodexError,
     exponential_backoff_hours,
-    is_ignored,
     is_transcript_ready,
 )
 
@@ -36,13 +36,13 @@ def test_max_retries_matches_documented_backoff_window():
 @pytest.mark.parametrize(
     "topic_id", ["Original_Song", "membersonly", "shorts", "Music_Cover"]
 )
-def test_is_ignored_for_excluded_topics(topic_id):
-    assert is_ignored(topic_id)
+def test_default_ignored_topics_include_the_original_excluded_topics(topic_id):
+    assert topic_id in DEFAULT_IGNORED_TOPICS
 
 
 @pytest.mark.parametrize("topic_id", [None, "normal", "Gaming"])
-def test_is_ignored_for_other_topics(topic_id):
-    assert not is_ignored(topic_id)
+def test_default_ignored_topics_exclude_other_topics(topic_id):
+    assert topic_id not in DEFAULT_IGNORED_TOPICS
 
 
 def test_is_transcript_ready_after_two_hours():

@@ -21,7 +21,12 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 )
-IGNORED_TOPICS = {"Original_Song", "membersonly", "shorts", "Music_Cover"}
+DEFAULT_IGNORED_TOPICS = {
+    "Original_Song",
+    "membersonly",
+    "shorts",
+    "Music_Cover",
+}
 TRANSCRIPT_READY_DELAY = timedelta(hours=2)
 MAX_RETRIES = 5
 
@@ -29,11 +34,6 @@ MAX_RETRIES = 5
 def exponential_backoff_hours(retry_count: int) -> int:
     """Return the one-based exponential source-job retry delay in hours."""
     return 2 ** (retry_count - 1)
-
-
-def is_ignored(topic_id: str | None) -> bool:
-    """Return whether Holodex classifies a video as intentionally unsupported."""
-    return topic_id in IGNORED_TOPICS
 
 
 def is_transcript_ready(available_at: datetime) -> bool:

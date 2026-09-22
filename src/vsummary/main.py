@@ -12,7 +12,12 @@ from pymongo import AsyncMongoClient
 
 from vsummary.bot import Bot
 from vsummary.logging import LoggingConfigurationError, configure_logging
-from vsummary.model.channel import FollowedChannel, ManualSummaryJob, SummaryJob
+from vsummary.model.channel import (
+    AutoSummaryTopicPolicy,
+    FollowedChannel,
+    ManualSummaryJob,
+    SummaryJob,
+)
 from vsummary.model.video import VideoSummary
 from vsummary.settings import Settings, SettingsError, load_settings
 
@@ -46,6 +51,7 @@ async def async_main(settings: Settings | None = None):
             database=database,
             document_models=[
                 FollowedChannel,
+                AutoSummaryTopicPolicy,
                 SummaryJob,
                 ManualSummaryJob,
                 VideoSummary,

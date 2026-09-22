@@ -45,9 +45,13 @@ picker; use `/detail` with `topic_index` to request a specific topic.
 | `/addchannel` | `channel_id` (required) | Starts following a Holodex/YouTube channel. |
 | `/removechannel` | `channel_id` (required) | Stops following a channel and removes its related pending jobs. |
 | `/listchannels` | None | Lists followed channels. |
+| `/addignoredtopic` | `topic_id` (required) | Prevents future videos with this Holodex topic from creating auto-summary jobs. |
+| `/removeignoredtopic` | `topic_id` (required) | Allows future videos with this Holodex topic to create auto-summary jobs. |
+| `/listignoredtopics` | None | Lists Holodex topics currently ignored by auto-summary. |
 
-For these three commands, `channel_id` is a YouTube channel ID (usually starts
-with `UC`), not a Discord channel ID or a streamer's display name. For example:
+For `/addchannel`, `/removechannel`, and `/listchannels`, `channel_id` is a
+YouTube channel ID (usually starts with `UC`), not a Discord channel ID or a
+streamer's display name. For example:
 
 ```text
 /addchannel channel_id:UCQ0UDLQCjY0rmuxCDE38FGg
@@ -58,6 +62,18 @@ The bot checks for new videos according to `POLL_INTERVAL_MINUTES`. Automatic
 summaries are sent to `AUTO_SUMMARY_CHANNEL_ID`, not the channel where
 `/addchannel` was invoked. Set this variable to a Discord channel where the bot
 has **View Channel** and **Send Messages**.
+
+Topic-policy commands apply globally to this bot instance. Configure which
+users, roles, and channels may use them in Discord's **Server Settings →
+Integrations**. Their `topic_id` value is the Holodex topic classification, not
+a free-form video topic. Topic IDs are matched case-insensitively. The initial
+ignored topics are `Original_Song`, `membersonly`, `shorts`, and `Music_Cover`;
+server administrators can remove any of them.
+
+Policies are evaluated against a video's publication time, not the time the
+bot polls it. Adding a topic ignores only videos published after the command;
+removing it allows only videos published after that command. Existing queued
+jobs are not changed.
 
 ## Troubleshooting
 

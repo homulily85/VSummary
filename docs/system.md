@@ -63,6 +63,7 @@ after a restart or interrupted process.
 | Collection/model | Purpose | Important invariants |
 | --- | --- | --- |
 | `Channel` / `FollowedChannel` | Channels followed for automatic summaries. | One record per `channel_id`; `added_at` is UTC. |
+| `AutoSummaryTopicPolicy` | Effective-dated global topic decisions. | The latest decision before a video's publication controls whether it is queued. |
 | `PendingVideo` / `SummaryJob` | Automatic generation and delivery jobs. | Unique `(channel_id, video_id)`; all scheduling and lease timestamps are UTC. |
 | `ManualSummaryJob` | User-requested topic/detail jobs. | Separate source, operation, requester, retry, lease, and delivery checkpoint data. |
 | `Video` / `VideoSummary` | Cached NotebookLM topics and details. | Unique `(source, video_id)` cache key. |
@@ -99,6 +100,14 @@ one source retry. Permanent source failures bypass the source retry queue.
 Every outbound Discord message passes through the bot's shared rate limiter.
 Long output is split into non-empty chunks no longer than Discord's
 2,000-character limit, and delivery checkpoints each successful chunk.
+
+Automatic summary topic policies are global to the bot and stored as an
+effective-dated history. The first startup seeds the former built-in blacklist:
+`Original_Song`, `membersonly`, `shorts`, and `Music_Cover`. Discord server
+integrations control access to `/addignoredtopic`, `/removeignoredtopic`, and
+`/listignoredtopics`. A policy is selected using the video's publication
+timestamp, so adding or removing a topic affects only videos published after
+the relevant command and never rewrites queued jobs.
 
 ## External integrations
 

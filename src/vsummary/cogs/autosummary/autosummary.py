@@ -27,6 +27,13 @@ from vsummary.settings import (
     SettingsError,
     configured_auto_summary_channel_id,
 )
+from vsummary.util.auto_summary_topics import (
+    current_topic_policies,
+    ensure_default_auto_summary_topic_policies,
+    get_auto_summary_topic_policies,
+    policy_ignores_video,
+    set_auto_summary_topic_policy,
+)
 from vsummary.util.discord import send_limited, split_message
 from vsummary.util.holodex import (
     MAX_RETRIES,
@@ -36,7 +43,6 @@ from vsummary.util.holodex import (
     PermanentHolodexError,
     TransientHolodexError,
     exponential_backoff_hours,
-    is_ignored,
 )
 from vsummary.util.summarizer import (
     NotebookLMSummaryService,
@@ -115,6 +121,7 @@ class Autosummary(commands.Cog):
         self.notebook = self.bot.notebook_client
         if self.summary_service is None:
             self.summary_service = NotebookLMSummaryService(self.notebook)
+        await ensure_default_auto_summary_topic_policies()
 
     @tasks.loop(minutes=30)
     async def poll_loop(self):
@@ -183,7 +190,11 @@ class Autosummary(commands.Cog):
                 channel_id=channel.channel_id,
             )
             return
-        if is_ignored(video.topic_id):
+        if video.topic_id is not None and policy_ignores_video(
+            await get_auto_summary_topic_policies(),
+            video.topic_id,
+            video.available_at,
+        ):
             log_event(
                 logger,
                 logging.INFO,
@@ -719,6 +730,81 @@ class Autosummary(commands.Cog):
             item.status = old_status.get(status, PendingVideoStatus.QUEUED)
         else:
             item.status = status
+
+    @app_commands.command(
+        name="addignoredtopic",
+        description="Ignore a Holodex topic for future automatic summaries.",
+    )
+    @app_commands.describe(topic_id="The Holodex topic ID to ignore.")
+    async def addignoredtopic(self, interaction: discord.Interaction, topic_id: str):
+        """Ignore a topic for videos published after this command runs."""
+        try:
+            changed, policy = await set_auto_summary_topic_policy(
+                topic_id, ignored=True
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        if not changed:
+            await interaction.response.send_message(
+                f"Topic `{policy.topic_id if policy else topic_id.strip()}` is already "
+                "ignored for new videos.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            f"Topic `{policy.topic_id}` will be ignored for videos published after "
+            f"<t:{int(policy.effective_at.timestamp())}:F>.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="removeignoredtopic",
+        description="Allow a Holodex topic in future automatic summaries.",
+    )
+    @app_commands.describe(topic_id="The Holodex topic ID to allow.")
+    async def removeignoredtopic(self, interaction: discord.Interaction, topic_id: str):
+        """Allow a topic only for videos published after this command runs."""
+        try:
+            changed, policy = await set_auto_summary_topic_policy(
+                topic_id, ignored=False
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        if not changed:
+            await interaction.response.send_message(
+                f"Topic `{policy.topic_id if policy else topic_id.strip()}` is already "
+                "allowed for new videos.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            f"Topic `{policy.topic_id}` will be allowed for videos published after "
+            f"<t:{int(policy.effective_at.timestamp())}:F>.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="listignoredtopics",
+        description="List Holodex topics ignored by automatic summaries.",
+    )
+    async def listignoredtopics(self, interaction: discord.Interaction):
+        """List the globally ignored topics that are currently effective."""
+        policies = current_topic_policies(await get_auto_summary_topic_policies())
+        ignored = sorted(
+            policy.topic_id for policy in policies.values() if policy.ignored
+        )
+        if not ignored:
+            await interaction.response.send_message(
+                "No topics are ignored for automatic summaries.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            "Ignored auto-summary topics:\n"
+            + "\n".join(f"- `{topic}`" for topic in ignored),
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="addchannel",

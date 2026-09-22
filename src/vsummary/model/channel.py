@@ -58,6 +58,44 @@ class FollowedChannel(Document):
         indexes: ClassVar[list] = [IndexModel([("channel_id", 1)], unique=True)]
 
 
+class AutoSummaryTopicPolicy(Document):
+    """One effective-dated decision to ignore or allow a Holodex topic.
+
+    Multiple records for one ``topic_key`` preserve the policy history needed
+    to decide based on a video's publication time rather than poll time.
+    """
+
+    topic_id: str
+    topic_key: str
+    ignored: bool
+    effective_at: datetime
+
+    @field_validator("topic_id", "topic_key")
+    @classmethod
+    def require_nonempty_topic_text(cls, value: str) -> str:
+        """Strip and reject blank topic IDs and normalized lookup keys."""
+        value = value.strip()
+        if not value:
+            raise ValueError("topic IDs must not be blank")
+        return value
+
+    @field_validator("effective_at")
+    @classmethod
+    def require_policy_timezone(cls, value: datetime) -> datetime:
+        """Require UTC-normalizable policy activation timestamps."""
+        if value.tzinfo is None:
+            raise ValueError("effective_at must be timezone-aware")
+        return value.astimezone(UTC)
+
+    class Settings:
+        """Store topic-policy history with efficient topic and time lookup."""
+
+        name = "AutoSummaryTopicPolicy"
+        indexes: ClassVar[list] = [
+            IndexModel([("topic_key", 1), ("effective_at", 1)], unique=True)
+        ]
+
+
 class SummaryJob(Document):
     """Durable automatic-summary job with leased generation and delivery phases.
 

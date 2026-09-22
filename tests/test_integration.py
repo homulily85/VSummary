@@ -19,6 +19,7 @@ from vsummary.cogs.manualsummary.manualsummary import ManualSummary
 from vsummary.cogs.misc.ping import Ping
 from vsummary.cogs.summarizer.summarizer import Summarizer
 from vsummary.model.channel import (
+    AutoSummaryTopicPolicy,
     JobStatus,
     ManualSummaryJob,
     ManualSummaryOperation,
@@ -51,12 +52,14 @@ class FakeResponse:
     def __init__(self):
         self.deferred = []
         self.sent = None
+        self.sent_kwargs = None
 
     async def defer(self, **kwargs):
         self.deferred.append(kwargs)
 
-    async def send_message(self, content):
+    async def send_message(self, content, **kwargs):
         self.sent = content
+        self.sent_kwargs = kwargs
 
 
 class FakeFollowup:
@@ -1064,6 +1067,20 @@ async def test_autosummary_poll_only_enqueues_videos_released_after_channel_was_
 async def test_autosummary_enqueue_skips_ignored_and_duplicate_videos(monkeypatch):
     cog = make_autosummary()
     channel = FakeFollowedChannel("UC1", "Test")
+    monkeypatch.setattr(
+        autosummary_module,
+        "get_auto_summary_topic_policies",
+        AsyncMock(
+            return_value=[
+                AutoSummaryTopicPolicy.model_construct(
+                    topic_id="shorts",
+                    topic_key="shorts",
+                    ignored=True,
+                    effective_at=datetime(1970, 1, 1, tzinfo=UTC),
+                )
+            ]
+        ),
+    )
     ignored = HolodexVideo(
         id="ignored",
         title="Ignored",
@@ -1096,6 +1113,107 @@ async def test_autosummary_enqueue_skips_ignored_and_duplicate_videos(monkeypatc
     await cog._enqueue_new_video(duplicate, channel)
 
     assert FakePendingRecord.records == [existing]
+
+
+@pytest.mark.asyncio
+async def test_autosummary_only_enqueues_unignored_topic_videos_published_after_removal(
+    monkeypatch,
+):
+    cog = make_autosummary()
+    channel = FakeFollowedChannel("UC1", "Test")
+    removed_at = datetime.now(UTC)
+    monkeypatch.setattr(
+        autosummary_module,
+        "get_auto_summary_topic_policies",
+        AsyncMock(
+            return_value=[
+                AutoSummaryTopicPolicy.model_construct(
+                    topic_id="shorts",
+                    topic_key="shorts",
+                    ignored=True,
+                    effective_at=datetime(1970, 1, 1, tzinfo=UTC),
+                ),
+                AutoSummaryTopicPolicy.model_construct(
+                    topic_id="shorts",
+                    topic_key="shorts",
+                    ignored=False,
+                    effective_at=removed_at,
+                ),
+            ]
+        ),
+    )
+    before_removal = HolodexVideo(
+        "before", "Before", "shorts", removed_at - timedelta(seconds=1), "Test"
+    )
+    after_removal = HolodexVideo(
+        "after", "After", "shorts", removed_at + timedelta(seconds=1), "Test"
+    )
+
+    await cog._enqueue_new_video(before_removal, channel)
+    await cog._enqueue_new_video(after_removal, channel)
+
+    assert [job.video_id for job in FakePendingRecord.records] == ["after"]
+
+
+@pytest.mark.asyncio
+async def test_addignoredtopic_does_not_require_manage_guild_permission(monkeypatch):
+    """Discord integration permissions, not bot code, control topic commands."""
+    cog = make_autosummary()
+    interaction = FakeInteraction()
+    interaction.guild_id = 123
+    interaction.permissions = SimpleNamespace(manage_guild=False)
+    policy = SimpleNamespace(
+        topic_id="shorts", effective_at=datetime(2026, 9, 22, 12, tzinfo=UTC)
+    )
+    setter = AsyncMock(return_value=(True, policy))
+    monkeypatch.setattr(autosummary_module, "set_auto_summary_topic_policy", setter)
+
+    await Autosummary.addignoredtopic.callback(cog, interaction, "shorts")
+
+    setter.assert_awaited_once_with("shorts", ignored=True)
+    assert interaction.response.sent == (
+        "Topic `shorts` will be ignored for videos published after <t:1790078400:F>."
+    )
+    assert interaction.response.sent_kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+async def test_addignoredtopic_persists_a_future_policy(monkeypatch):
+    cog = make_autosummary()
+    interaction = FakeInteraction()
+    effective_at = datetime(2026, 9, 22, 12, tzinfo=UTC)
+    policy = SimpleNamespace(topic_id="shorts", effective_at=effective_at)
+    setter = AsyncMock(return_value=(True, policy))
+    monkeypatch.setattr(autosummary_module, "set_auto_summary_topic_policy", setter)
+
+    await Autosummary.addignoredtopic.callback(cog, interaction, "shorts")
+
+    setter.assert_awaited_once_with("shorts", ignored=True)
+    assert interaction.response.sent == (
+        "Topic `shorts` will be ignored for videos published after <t:1790078400:F>."
+    )
+    assert interaction.response.sent_kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+async def test_removeignoredtopic_is_idempotent_for_an_already_allowed_topic(
+    monkeypatch,
+):
+    cog = make_autosummary()
+    interaction = FakeInteraction()
+    monkeypatch.setattr(
+        autosummary_module,
+        "set_auto_summary_topic_policy",
+        AsyncMock(return_value=(False, None)),
+    )
+
+    await Autosummary.removeignoredtopic.callback(cog, interaction, "unlisted")
+
+    assert (
+        interaction.response.sent
+        == "Topic `unlisted` is already allowed for new videos."
+    )
+    assert interaction.response.sent_kwargs == {"ephemeral": True}
 
 
 @pytest.mark.asyncio
@@ -1286,3 +1404,7 @@ async def test_startup_configures_timezone_aware_mongodb_datetimes(monkeypatch):
     assert mongo_client is not None
     assert mongo_client.uri == "mongodb://localhost"
     assert mongo_client.kwargs == {"tz_aware": True}
+    assert (
+        main_module.AutoSummaryTopicPolicy
+        in (main_module.init_beanie.await_args.kwargs["document_models"])
+    )
