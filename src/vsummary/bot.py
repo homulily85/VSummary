@@ -1,3 +1,5 @@
+"""Discord client composition and cog lifecycle management."""
+
 import discord
 from discord.ext import commands
 from notebooklm import NotebookLMClient
@@ -9,6 +11,16 @@ from vsummary.util.video_work import VideoWorkCoordinator
 
 
 class Bot(commands.Bot):
+    """Application Discord client with shared external-service dependencies.
+
+    Attributes:
+        notebook_client: Process-local authenticated NotebookLM client.
+        settings: Validated runtime configuration.
+        holodex: Optional shared Holodex client owned by the application.
+        video_work: Per-video coordinator used by summary workers.
+        message_rate_limiter: Shared limiter for every Discord send.
+    """
+
     def __init__(
         self,
         notebook_client: NotebookLMClient,
@@ -16,6 +28,7 @@ class Bot(commands.Bot):
         holodex=None,
         discord_log_handler: DiscordLogHandler | None = None,
     ):
+        """Create a bot and attach services that cogs consume by dependency lookup."""
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix="/", intents=intents)
@@ -29,6 +42,7 @@ class Bot(commands.Bot):
         )
 
     async def close(self):
+        """Stop log delivery, close cogs and owned clients, then close Discord."""
         if self.discord_log_handler is not None:
             await self.discord_log_handler.stop()
         for cog in tuple(self.cogs.values()):
@@ -46,6 +60,7 @@ class Bot(commands.Bot):
             await self.discord_log_handler.start(self)
 
     async def setup_hook(self):
+        """Load all cogs and synchronize their slash commands with Discord."""
         cogs = [
             "vsummary.cogs.misc.ping",
             "vsummary.cogs.manualsummary.manualsummary",

@@ -119,7 +119,8 @@ async def test_discord_sink_queues_warning_after_ready_and_redacts_and_truncates
     target.send.assert_awaited_once()
     message = target.send.await_args.args[0]
     assert message == (
-        "Timestamp: 1970-01-01T00:00:00Z\n"
+        "Timestamp (UTC): 1970-01-01T00:00:00Z\n"
+        "Local time: <t:0:F>\n"
         "Video: https://www.twitch.tv/videos/123456789\n"
         "Error: RuntimeError: token=<redacted>"
     )

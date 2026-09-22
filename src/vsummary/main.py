@@ -1,3 +1,5 @@
+"""Application startup, resource ownership, and console entry points."""
+
 from __future__ import annotations
 
 import asyncio
@@ -18,6 +20,11 @@ logger = logging.getLogger(__name__)
 
 
 async def async_main(settings: Settings | None = None):
+    """Start the bot after configuring logging and database-backed models.
+
+    The function owns the MongoDB client and NotebookLM context, so both are
+    closed when Discord exits or startup fails.
+    """
     load_dotenv()
     if settings is None:
         try:

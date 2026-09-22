@@ -1,0 +1,1 @@
+"""VSummary Discord bot package."""

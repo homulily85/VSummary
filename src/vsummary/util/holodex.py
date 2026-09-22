@@ -1,3 +1,5 @@
+"""Typed Holodex API access with bounded HTTP retries and response validation."""
+
 from __future__ import annotations
 
 import asyncio
@@ -25,14 +27,17 @@ MAX_RETRIES = 5
 
 
 def exponential_backoff_hours(retry_count: int) -> int:
+    """Return the one-based exponential source-job retry delay in hours."""
     return 2 ** (retry_count - 1)
 
 
 def is_ignored(topic_id: str | None) -> bool:
+    """Return whether Holodex classifies a video as intentionally unsupported."""
     return topic_id in IGNORED_TOPICS
 
 
 def is_transcript_ready(available_at: datetime) -> bool:
+    """Return whether a stream has passed the transcript-availability delay."""
     if available_at.tzinfo is None:
         raise ValueError("available_at must be timezone-aware")
     return datetime.now(UTC) - available_at > TRANSCRIPT_READY_DELAY
@@ -60,12 +65,16 @@ class MalformedHolodexResponse(PermanentHolodexError):
 
 @dataclass(frozen=True)
 class HolodexChannel:
+    """Minimal channel data needed to create an automatic subscription."""
+
     id: str
     name: str
 
 
 @dataclass(frozen=True)
 class HolodexVideo:
+    """Normalized past-stream data returned by Holodex channel endpoints."""
+
     id: str
     title: str
     topic_id: str | None
@@ -75,6 +84,7 @@ class HolodexVideo:
 
     @property
     def video_id(self) -> str:
+        """Expose ``id`` under the naming used by summary models and workflows."""
         return self.id
 
 
@@ -88,6 +98,7 @@ class HolodexClient:
         timeout: float = 15.0,
         retries: int = 2,
     ):
+        """Create a client with a single timeout and retry policy for every request."""
         self._retries = max(0, retries)
         self._client = httpx.AsyncClient(
             base_url=HOLODEX_API_URL,
@@ -97,18 +108,23 @@ class HolodexClient:
         )
 
     async def __aenter__(self):
+        """Return this client for use as an asynchronous context manager."""
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
+        """Close the underlying HTTP client when its context exits."""
         await self.aclose()
 
     async def aclose(self):
+        """Close the underlying reusable HTTP connection pool."""
         await self._client.aclose()
 
     async def close(self):
+        """Provide a compatibility alias for :meth:`aclose`."""
         await self.aclose()
 
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        """Request Holodex, retrying transient transport and server failures."""
         for attempt in range(self._retries + 1):
             try:
                 response = await self._client.request(method, path, **kwargs)
@@ -157,6 +173,7 @@ class HolodexClient:
         raise AssertionError("unreachable")
 
     async def fetch_channel(self, channel_id: str) -> HolodexChannel:
+        """Fetch one channel or raise a typed error for its response status."""
         response = await self._request("GET", f"/channels/{channel_id}")
         if response.status_code == 404:
             raise ChannelNotFoundError(f"Channel '{channel_id}' not found on Holodex.")
@@ -175,6 +192,7 @@ class HolodexClient:
     async def fetch_channel_videos(
         self, channel_id: str, limit: int = 1, offset: int = 0
     ) -> list[HolodexVideo]:
+        """Fetch and validate one newest-first page of past channel streams."""
         response = await self._request(
             "GET",
             f"/channels/{channel_id}/videos",
@@ -270,22 +288,27 @@ class HolodexGateway:
     """Strict typed gateway used by workflows."""
 
     def __init__(self, client: HolodexClient | None = None, **client_kwargs):
+        """Wrap a client, creating one when the caller does not provide it."""
         self.client = client or HolodexClient(**client_kwargs)
 
     async def close(self) -> None:
+        """Close the gateway's underlying HTTP client."""
         await self.client.aclose()
 
     async def get_channel(self, channel_id: str) -> HolodexChannel:
+        """Return a channel while preserving strict typed client failures."""
         return await self.client.fetch_channel(channel_id)
 
     async def get_channel_videos(
         self, channel_id: str, limit: int = 1, offset: int = 0
     ) -> list[HolodexVideo]:
+        """Return one page of validated past streams for a channel."""
         return await self.client.fetch_channel_videos(channel_id, limit, offset)
 
     async def get_channel_videos_since(
         self, channel_id: str, since: datetime, *, page_size: int = 50
     ) -> list[HolodexVideo]:
+        """Return all validated past streams newer than a UTC lower bound."""
         return await self.client.fetch_channel_videos_since(
             channel_id, since, page_size=page_size
         )
@@ -309,6 +332,7 @@ def _retry_delay(response: httpx.Response, attempt: int) -> float:
 
 
 def _parse_video(video: dict) -> HolodexVideo:
+    """Map a raw Holodex video object to the strictly typed workflow shape."""
     try:
         channel = video["channel"]
         return HolodexVideo(
@@ -324,6 +348,7 @@ def _parse_video(video: dict) -> HolodexVideo:
 
 
 def _parse_duration(value) -> int:
+    """Parse a non-negative Holodex duration expressed in seconds."""
     try:
         duration = int(value)
     except (TypeError, ValueError) as exc:
@@ -334,6 +359,7 @@ def _parse_duration(value) -> int:
 
 
 def _parse_iso(value: str) -> datetime:
+    """Parse a timezone-aware ISO timestamp and normalize it to UTC."""
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:

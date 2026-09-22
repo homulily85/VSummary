@@ -1,3 +1,5 @@
+"""NotebookLM topic caching, detail generation, and failure classification."""
+
 import json
 import logging
 from collections.abc import Awaitable, Callable, Sequence
@@ -46,14 +48,17 @@ class NotebookLMSummaryService:
     """NotebookLM-backed summary generation with durable cache reuse."""
 
     def __init__(self, client: NotebookLMClient):
+        """Retain the authenticated NotebookLM client owned by the application."""
         self.client = client
 
     async def close(self) -> None:
+        """Close the client when it exposes the optional asynchronous close hook."""
         close = getattr(self.client, "aclose", None)
         if close is not None:
             await close()
 
     async def summarize(self, ref: VideoRef) -> list[Topic]:
+        """Generate all topic details and map backend failures to workflow errors."""
         try:
             details = await get_topic_details_all(self.client, ref)
         except SourceAddError as exc:
@@ -128,6 +133,7 @@ def _validated_topics(topics: Sequence[Topic]) -> list[Topic]:
 
 
 def _parse_topics(answer: str) -> list[Topic]:
+    """Decode NotebookLM's topic-list JSON and validate Discord-safe names."""
     try:
         payload = json.loads(answer)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -276,6 +282,7 @@ async def get_topic_list(
     client: NotebookLMClient,
     ref: VideoRef,
 ):
+    """Return cached topics or create them from a temporary NotebookLM notebook."""
     logger.info(f"Getting topics from {ref}")
     video, notebook = await _get_or_create_topic_list(client, ref)
     if notebook is None:
@@ -292,6 +299,7 @@ async def get_topic_details(
     ref: VideoRef,
     topic_index: int,
 ):
+    """Return one topic's cached or newly generated detail for ``ref``."""
     video, notebook = await _get_or_create_topic_list(client, ref)
     topics = _validated_topics(video.topics or [])
 
@@ -330,6 +338,7 @@ async def get_topic_details_all(
     client: NotebookLMClient,
     ref: VideoRef,
 ):
+    """Return every topic detail, generating and saving only missing details."""
     video, notebook = await _get_or_create_topic_list(client, ref)
     topics = _validated_topics(video.topics or [])
 
@@ -368,6 +377,7 @@ async def get_topic_details_all(
 
 
 async def _safe_delete_notebook(client: NotebookLMClient, notebook_id: str) -> None:
+    """Best-effort cleanup that logs failures without hiding the original error."""
     try:
         await client.notebooks.delete(notebook_id)
     except Exception:

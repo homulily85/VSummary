@@ -1,3 +1,5 @@
+"""Validated environment-backed runtime configuration."""
+
 from __future__ import annotations
 
 import os
@@ -14,6 +16,23 @@ class SettingsError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Settings:
+    """Immutable configuration consumed by the application and its cogs.
+
+    Attributes:
+        discord_token: Token used to connect the Discord bot.
+        mongodb_uri: MongoDB connection URI.
+        mongodb_database: Database containing VSummary collections.
+        auto_summary_channel_id: Destination for automatic summaries, if enabled.
+        poll_interval_minutes: Interval between Holodex polling cycles.
+        source_retry_limit: Durable generation failures allowed per job.
+        delivery_retry_limit: Durable Discord delivery failures allowed per job.
+        http_timeout_seconds: Timeout applied to Holodex HTTP requests.
+        log_file_path: Daily rotating application log destination.
+        log_level: Minimum level emitted by application log handlers.
+        discord_log_channel_id: Optional channel for warning-and-higher logs.
+        discord_send_interval_seconds: Minimum interval between Discord sends.
+    """
+
     discord_token: str
     mongodb_uri: str
     mongodb_database: str = "VSummary"
@@ -29,6 +48,7 @@ class Settings:
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str | None]) -> Settings:
+        """Parse and validate configuration values from an environment-like mapping."""
         token = _required(values, "DISCORD_TOKEN")
         mongodb_uri = _required(values, "MONGODB_URI")
         auto_channel = _optional_int(values.get("AUTO_SUMMARY_CHANNEL_ID"))
@@ -80,6 +100,7 @@ def configured_auto_summary_channel_id(settings: Settings | None = None) -> int 
 
 
 def _required(values: Mapping[str, str | None], name: str) -> str:
+    """Return a required non-blank setting or raise a descriptive error."""
     value = values.get(name)
     if not value or not value.strip():
         raise SettingsError(f"{name} is required")
@@ -89,6 +110,7 @@ def _required(values: Mapping[str, str | None], name: str) -> str:
 def _optional_int(
     value: str | None, name: str = "AUTO_SUMMARY_CHANNEL_ID"
 ) -> int | None:
+    """Parse a positive optional integer, treating a blank value as unset."""
     if value is None or not value.strip():
         return None
     try:
@@ -101,6 +123,7 @@ def _optional_int(
 
 
 def _positive_int(value: str | None, default: int) -> int:
+    """Parse a positive integer setting, falling back to ``default`` when absent."""
     try:
         parsed = int(value) if value is not None else default
     except (TypeError, ValueError) as exc:
@@ -111,6 +134,7 @@ def _positive_int(value: str | None, default: int) -> int:
 
 
 def _positive_float(value: str | None, default: float) -> float:
+    """Parse a positive floating-point setting, using ``default`` when absent."""
     try:
         parsed = float(value) if value is not None else default
     except (TypeError, ValueError) as exc:
@@ -121,6 +145,7 @@ def _positive_float(value: str | None, default: float) -> float:
 
 
 def _log_file_path(value: str | None) -> Path:
+    """Return the configured log path or the standard application log path."""
     if value is None or not value.strip():
         return Path("logs/vsummary.log")
     try:
@@ -130,6 +155,7 @@ def _log_file_path(value: str | None) -> Path:
 
 
 def _log_level(value: str | None) -> str:
+    """Normalize and validate one of Python's supported configured log levels."""
     level = (value or "INFO").strip().upper()
     valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
     if level not in valid_levels:

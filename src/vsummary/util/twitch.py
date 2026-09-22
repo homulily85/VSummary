@@ -25,6 +25,7 @@ class TwitchAudioUnavailableError(TwitchAudioError):
 
 
 def _download(url: str, directory: str) -> Path:
+    """Download, transcode, size-check, and return one temporary Twitch M4A file."""
     if shutil.which("ffmpeg") is None:
         raise TwitchAudioUnavailableError("ffmpeg is required to process Twitch audio")
     options = {

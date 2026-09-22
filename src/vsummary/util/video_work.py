@@ -9,6 +9,8 @@ from vsummary.util.video import VideoRef
 
 @dataclass
 class _VideoWorkState:
+    """Lock and reference count retained while one normalized video is in use."""
+
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     users: int = 0
 
@@ -21,6 +23,7 @@ class VideoWorkCoordinator:
     """
 
     def __init__(self) -> None:
+        """Initialize an empty registry of per-video locks."""
         self._states: dict[tuple[str, str], _VideoWorkState] = {}
 
     @property

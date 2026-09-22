@@ -1,3 +1,5 @@
+"""Holodex polling and durable automatic-summary job orchestration."""
+
 from __future__ import annotations
 
 import asyncio
@@ -57,6 +59,13 @@ PendingVideo = SummaryJob
 
 
 class Autosummary(commands.Cog):
+    """Follow channels, schedule their videos, and deliver persisted summaries.
+
+    Automatic jobs are claimed with a renewable lease and use separate
+    generation and delivery phases so a Discord outage never repeats expensive
+    NotebookLM work.
+    """
+
     def __init__(
         self,
         bot,
@@ -66,6 +75,7 @@ class Autosummary(commands.Cog):
         settings: Settings | None = None,
         start_polling: bool = True,
     ):
+        """Bind dependencies and optionally start the configured Holodex poller."""
         self.bot = bot
         self.settings = settings or getattr(bot, "settings", None)
         self.holodex = holodex or getattr(bot, "holodex", None)
@@ -86,6 +96,7 @@ class Autosummary(commands.Cog):
             self.poll_loop.start()
 
     def cog_unload(self):
+        """Cancel polling and schedule closure of a cog-owned Holodex client."""
         self.poll_loop.cancel()
         if self._owns_holodex:
             task = getattr(self.bot, "loop", None)
@@ -93,26 +104,31 @@ class Autosummary(commands.Cog):
                 task.create_task(self.holodex.aclose())
 
     async def close(self):
+        """Stop polling and close the Holodex client when this cog owns it."""
         self.poll_loop.cancel()
         if self._owns_holodex:
             await self.holodex.aclose()
             self.holodex = None
 
     async def cog_load(self):
+        """Refresh the NotebookLM dependency after the bot completes cog loading."""
         self.notebook = self.bot.notebook_client
         if self.summary_service is None:
             self.summary_service = NotebookLMSummaryService(self.notebook)
 
     @tasks.loop(minutes=30)
     async def poll_loop(self):
+        """Poll followed channels, then claim and process every due summary job."""
         await self.check_new_videos()
         await self.process_due_videos()
 
     @poll_loop.before_loop
     async def before_poll_loop(self):
+        """Wait for a ready Discord connection before any polling work begins."""
         await self.bot.wait_until_ready()
 
     async def check_new_videos(self):
+        """Fetch new streams for every followed channel and enqueue eligible ones."""
         channels = await Channel.find().to_list()
         for channel in channels:
             try:
@@ -155,6 +171,7 @@ class Autosummary(commands.Cog):
         return await self.holodex.get_channel_videos(channel.channel_id)
 
     async def _enqueue_new_video(self, video: HolodexVideo, channel):
+        """Create one delayed automatic job unless the video is old, ignored, or known."""
         if video.available_at <= channel.added_at:
             log_event(
                 logger,
@@ -226,6 +243,7 @@ class Autosummary(commands.Cog):
         )
 
     async def process_due_videos(self):
+        """Claim and advance every due automatic job without stopping on one crash."""
         due = await self._claim_due_jobs()
         for item in due:
             try:
@@ -238,6 +256,7 @@ class Autosummary(commands.Cog):
                 )
 
     async def _claim_due_jobs(self) -> list:
+        """Atomically claim due or abandoned automatic jobs for this worker instance."""
         now = datetime.now(UTC)
         if PendingVideo is not SummaryJob:
             return await PendingVideo.find(
@@ -321,6 +340,7 @@ class Autosummary(commands.Cog):
         return claimed
 
     async def _process_pending_video(self, item):
+        """Renew a lease while advancing one automatic job through its current phase."""
         stop_renewal = asyncio.Event()
         renewal_task = None
         if self._uses_leases(item):
@@ -353,10 +373,12 @@ class Autosummary(commands.Cog):
                     await renewal_task
 
     async def _generate_for_job(self, item):
+        """Generate and persist topics before Discord delivery can begin."""
         if not getattr(item, "summary_details", None):
             ref = VideoRef(source="youtube", video_id=item.video_id)
 
             async def generate_summary():
+                """Run the configured summary service or the legacy direct fallback."""
                 summary_service = getattr(self, "summary_service", None)
                 if summary_service is not None:
                     return await summary_service.summarize(ref)
@@ -408,6 +430,7 @@ class Autosummary(commands.Cog):
         return saved
 
     async def _deliver_for_job(self, item):
+        """Send persisted chunks, checkpointing each one for resumable delivery."""
         self._set_status(item, JobStatus.DELIVERING)
         chunks = list(getattr(item, "delivery_chunks", []))
         if not chunks:
@@ -455,6 +478,7 @@ class Autosummary(commands.Cog):
         exc: Exception | None = None,
         permanent: bool = False,
     ):
+        """Apply source retry policy, release the lease, and persist the next state."""
         exc = exc or RuntimeError("summary generation failed")
         item.retry_count = getattr(item, "retry_count", 0) + 1
         max_retries = getattr(
@@ -502,6 +526,7 @@ class Autosummary(commands.Cog):
         return saved
 
     async def _handle_delivery_error(self, item, exc: Exception):
+        """Apply delivery retry policy without discarding persisted summary content."""
         item.delivery_retry_count = getattr(item, "delivery_retry_count", 0) + 1
         max_retries = getattr(
             getattr(self, "settings", None), "delivery_retry_limit", MAX_RETRIES
@@ -532,12 +557,14 @@ class Autosummary(commands.Cog):
         return saved
 
     async def _post_summary(self, item, details):
+        """Compatibility helper that renders and sends a complete summary immediately."""
         channel = await self._get_auto_summary_channel()
         if channel is None:
             raise RuntimeError("auto-summary Discord channel is unavailable")
         await self._send_to_channel(channel, self._summary_message(item, details))
 
     def _summary_message(self, item, details) -> str:
+        """Render the video metadata and each topic detail into one Discord message."""
         message = f"**Video:** {item.title}\n**Channel:** {item.channel_name}"
         for detail in details:
             topic = self._as_topic(detail)
@@ -545,6 +572,7 @@ class Autosummary(commands.Cog):
         return message
 
     async def _post_failure(self, item):
+        """Notify the automatic-summary channel after transient retries are exhausted."""
         channel = await self._get_auto_summary_channel()
         if channel is None:
             return
@@ -556,6 +584,7 @@ class Autosummary(commands.Cog):
         await self._send_to_channel(channel, message)
 
     async def _get_auto_summary_channel(self):
+        """Resolve the configured auto-summary channel or log why it is unavailable."""
         try:
             channel_id = configured_auto_summary_channel_id(
                 getattr(self, "settings", None)
@@ -580,10 +609,12 @@ class Autosummary(commands.Cog):
         return channel
 
     async def _send_to_channel(self, channel, text: str):
+        """Split text to Discord's limit and send it through the shared limiter."""
         for chunk in split_message(text):
             await send_limited(self.bot, channel.send, chunk)
 
     def _lease_duration(self) -> timedelta:
+        """Return the configured lease duration, protecting against non-positive input."""
         seconds = getattr(getattr(self, "settings", None), "job_lease_seconds", None)
         if seconds is None:
             return JOB_LEASE_DURATION
@@ -591,6 +622,7 @@ class Autosummary(commands.Cog):
 
     @staticmethod
     def _uses_leases(item) -> bool:
+        """Identify canonical durable jobs rather than legacy compatibility records."""
         return PendingVideo is SummaryJob and isinstance(item, SummaryJob)
 
     @staticmethod
@@ -608,6 +640,7 @@ class Autosummary(commands.Cog):
         return context
 
     def _release_lease(self, item) -> None:
+        """Clear ownership fields after a canonical job leaves active processing."""
         if self._uses_leases(item):
             item.claimed_by = None
             item.claimed_at = None
@@ -636,6 +669,7 @@ class Autosummary(commands.Cog):
         return True
 
     async def _renew_lease_until_finished(self, item, stop: asyncio.Event) -> None:
+        """Renew a job lease periodically until processing ends or ownership is lost."""
         interval = max(1.0, self._lease_duration().total_seconds() / 3)
         while True:
             try:
@@ -647,6 +681,7 @@ class Autosummary(commands.Cog):
                 return
 
     async def _renew_lease(self, item) -> bool:
+        """Extend this worker's lease only when it still owns the persisted job."""
         expires_at = datetime.now(UTC) + self._lease_duration()
         result = await PendingVideo.get_pymongo_collection().update_one(
             {"_id": item.id, "claimed_by": self.worker_id},
@@ -666,12 +701,14 @@ class Autosummary(commands.Cog):
 
     @staticmethod
     def _as_topic(detail) -> Topic:
+        """Normalize a persisted mapping or ``Topic`` instance into a ``Topic``."""
         if isinstance(detail, Topic):
             return detail
         return Topic(name=detail["topic_name"], detail=detail.get("detail"))
 
     @staticmethod
     def _set_status(item, status: JobStatus):
+        """Assign canonical status or map it to the legacy pending-video equivalent."""
         current = getattr(item, "status", None)
         if isinstance(current, PendingVideoStatus):
             old_status = {
@@ -691,6 +728,7 @@ class Autosummary(commands.Cog):
         channel_id="The Holodex/YouTube channel ID (e.g. UCQ0UDLQCjY0rmuxCDE38FGg)."
     )
     async def addchannel(self, interaction: discord.Interaction, channel_id: str):
+        """Validate and persist a followed Holodex channel for future polling."""
         await interaction.response.defer(thinking=True)
         try:
             channel = await self.holodex.get_channel(channel_id)
@@ -747,6 +785,7 @@ class Autosummary(commands.Cog):
         channel_id="The Holodex/YouTube channel ID to stop following."
     )
     async def removechannel(self, interaction: discord.Interaction, channel_id: str):
+        """Delete a followed channel and any automatic jobs still tied to it."""
         await interaction.response.defer(thinking=True)
         result = await Channel.find_one(Channel.channel_id == channel_id)
         if result is None:
@@ -773,6 +812,7 @@ class Autosummary(commands.Cog):
         description="List channels followed for automatic summaries.",
     )
     async def listchannels(self, interaction: discord.Interaction):
+        """List all followed channels in Discord-safe response chunks."""
         await interaction.response.defer(thinking=True)
         channels = await Channel.find().to_list()
         if not channels:
@@ -788,4 +828,5 @@ class Autosummary(commands.Cog):
 
 
 async def setup(bot):
+    """Register the automatic-summary polling cog."""
     await bot.add_cog(Autosummary(bot))

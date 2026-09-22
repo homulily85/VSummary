@@ -1,3 +1,5 @@
+"""Discord slash commands that create and inspect durable summary jobs."""
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -42,7 +44,10 @@ async def _resolve_manual_source(value: str) -> VideoRef:
 
 
 class Summarizer(commands.Cog):
+    """Translate user-facing summary commands into manual worker jobs."""
+
     def __init__(self, bot):
+        """Retain the Discord client used to enqueue jobs and send follow-ups."""
         self.bot = bot
 
     @app_commands.command(name="topics", description="Get topic list from a video.")
@@ -158,4 +163,5 @@ class Summarizer(commands.Cog):
 
 
 async def setup(bot):
+    """Register the slash-command cog with Discord's extension loader."""
     await bot.add_cog(Summarizer(bot))

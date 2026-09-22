@@ -1,3 +1,5 @@
+"""Strict normalization of user-provided YouTube videos."""
+
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -32,10 +34,12 @@ def to_video_url(value: str) -> str:
 
 
 def _build_watch_url(video_id: str) -> str:
+    """Build the canonical watch URL from a validated YouTube ID."""
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
 def _require_video_id(video_id: str) -> str:
+    """Validate and return a YouTube's fixed-length video identifier."""
     if not _VIDEO_ID_PATTERN.fullmatch(video_id):
         raise InvalidYouTubeInputError(
             f"'{video_id}' is not a valid YouTube video ID or link."
@@ -44,6 +48,7 @@ def _require_video_id(video_id: str) -> str:
 
 
 def _extract_video_id_from_url(url: str) -> str:
+    """Extract and validate an ID from a recognized public YouTube URL shape."""
     try:
         parsed = urlparse(url)
     except ValueError as exc:

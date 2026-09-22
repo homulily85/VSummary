@@ -1,3 +1,5 @@
+"""Durable worker that generates and delivers manual Discord summary requests."""
+
 from __future__ import annotations
 
 import logging
@@ -39,6 +41,7 @@ class ManualSummary(commands.Cog):
     def __init__(
         self, bot, *, settings: Settings | None = None, start_worker: bool = True
     ):
+        """Bind shared services and optionally begin the ten-second worker loop."""
         self.bot = bot
         self.settings = settings or getattr(bot, "settings", None)
         self.worker_id = uuid.uuid4().hex
@@ -46,17 +49,21 @@ class ManualSummary(commands.Cog):
             self.worker_loop.start()
 
     def cog_unload(self):
+        """Stop future worker-loop iterations when Discord unloads this cog."""
         self.worker_loop.cancel()
 
     async def close(self):
+        """Stop the worker during the application's explicit shutdown sequence."""
         self.worker_loop.cancel()
 
     @tasks.loop(seconds=10)
     async def worker_loop(self):
+        """Claim and process all manual jobs that are due in this polling interval."""
         await self.process_due_jobs()
 
     @worker_loop.before_loop
     async def before_worker_loop(self):
+        """Wait until Discord can safely resolve channels before processing jobs."""
         await self.bot.wait_until_ready()
 
     async def enqueue(
@@ -68,6 +75,7 @@ class ManualSummary(commands.Cog):
         requester_id: int,
         topic_index: int | None = None,
     ):
+        """Persist a new manual job with optional source metadata for delivery."""
         metadata = await self._load_metadata(ref)
         job = ManualSummaryJob(
             source=ref.source,
@@ -84,6 +92,7 @@ class ManualSummary(commands.Cog):
         return job
 
     async def process_due_jobs(self):
+        """Process each atomically claimed job without stopping on a peer failure."""
         for job in await self._claim_due_jobs():
             try:
                 await self._process(job)
@@ -94,6 +103,7 @@ class ManualSummary(commands.Cog):
                 )
 
     async def _claim_due_jobs(self):
+        """Atomically claim scheduled jobs and expired generation or delivery leases."""
         now = datetime.now(UTC)
         claimed = []
         collection = ManualSummaryJob.get_pymongo_collection()
@@ -140,12 +150,14 @@ class ManualSummary(commands.Cog):
         return claimed
 
     async def _process(self, job):
+        """Advance a claimed job through its generation and delivery phase."""
         if job.status == JobStatus.GENERATING:
             await self._generate(job)
         if job.status == JobStatus.DELIVERING:
             await self._deliver(job)
 
     async def _generate(self, job):
+        """Build and persist delivery chunks, retrying source failures durably."""
         ref = VideoRef(source=job.source, video_id=job.video_id)
         metadata = self._stored_metadata(job)
         if job.operation != ManualSummaryOperation.TOPICS:
@@ -155,6 +167,7 @@ class ManualSummary(commands.Cog):
                 job.channel_name = metadata.channel_name
 
         async def generate_delivery_chunks():
+            """Execute the requested NotebookLM operation without mutating job state."""
             if job.operation == ManualSummaryOperation.TOPICS:
                 topics = await get_topic_list(self.bot.notebook_client, ref)
                 return split_message(
@@ -204,6 +217,7 @@ class ManualSummary(commands.Cog):
         await self._save(job)
 
     async def _deliver(self, job):
+        """Send unconfirmed chunks and checkpoint progress after every successful send."""
         try:
             channel = self.bot.get_channel(
                 job.channel_id
@@ -229,6 +243,7 @@ class ManualSummary(commands.Cog):
             await self._delivery_failure(job, exc)
 
     async def _fail(self, job, exc, *, permanent=False):
+        """Record a source failure and either fail or requeue the job with backoff."""
         logger.error(
             "Manual summary failed: %s",
             exc,
@@ -255,6 +270,7 @@ class ManualSummary(commands.Cog):
         await self._save(job)
 
     async def _delivery_failure(self, job, exc):
+        """Record a Discord failure while preserving generated chunks for redelivery."""
         job.delivery_retry_count += 1
         job.last_error = str(exc)
         if job.delivery_retry_count >= getattr(
@@ -270,10 +286,12 @@ class ManualSummary(commands.Cog):
         await self._save(job)
 
     def _release(self, job):
+        """Clear this worker's lease fields before a completed, failed, or queued save."""
         job.claimed_by = job.claimed_at = job.lease_expires_at = None
 
     @staticmethod
     def _format_detail(detail, metadata) -> str:
+        """Render one generated detail, adding source metadata only for the first one."""
         message = f"**{detail['topic_name']}**\n{detail['detail']}"
         if metadata is None:
             return message
@@ -284,6 +302,7 @@ class ManualSummary(commands.Cog):
 
     @staticmethod
     def _stored_metadata(job) -> VideoMetadata | None:
+        """Return complete metadata previously persisted on a job, if any."""
         title = getattr(job, "title", None)
         channel_name = getattr(job, "channel_name", None)
         if (
@@ -296,6 +315,7 @@ class ManualSummary(commands.Cog):
         return None
 
     async def _load_metadata(self, ref: VideoRef) -> VideoMetadata | None:
+        """Load display metadata without allowing lookup failures to block a request."""
         try:
             return await get_video_metadata(ref)
         except VideoMetadataError as exc:
@@ -308,6 +328,7 @@ class ManualSummary(commands.Cog):
             return None
 
     async def _save(self, job):
+        """Persist a job only while this worker still owns its lease."""
         values = job.model_dump(mode="python", by_alias=True, exclude={"id"})
         values.pop("_id", None)
         result = await ManualSummaryJob.get_pymongo_collection().update_one(
@@ -317,4 +338,5 @@ class ManualSummary(commands.Cog):
 
 
 async def setup(bot):
+    """Register the durable manual-summary worker cog."""
     await bot.add_cog(ManualSummary(bot))

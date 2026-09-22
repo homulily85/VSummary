@@ -49,6 +49,8 @@ class XSpaceAudioUnavailableError(XSpaceAudioError):
 
 
 class XSpaceInputKind(str, Enum):
+    """The supported X URL shapes accepted before remote resolution."""
+
     SPACE = "space"
     STATUS = "status"
 
@@ -117,6 +119,7 @@ async def resolve_x_space(value: str) -> VideoRef:
 
 
 def _extract_x_space_info(url: str) -> dict:
+    """Ask yt-dlp for X metadata without downloading audio."""
     options = {
         "quiet": True,
         "no_warnings": True,
@@ -133,6 +136,7 @@ def _extract_x_space_info(url: str) -> dict:
 
 
 def _ref_from_info(info: dict, input_kind: XSpaceInputKind) -> VideoRef:
+    """Validate yt-dlp metadata and create an archived X Space reference."""
     if not _is_x_space_result(info):
         if input_kind is XSpaceInputKind.STATUS:
             raise XSpaceResolutionError("This X post does not contain an X Space.")
@@ -153,12 +157,14 @@ def _ref_from_info(info: dict, input_kind: XSpaceInputKind) -> VideoRef:
 
 
 def _is_x_space_result(info: dict) -> bool:
+    """Identify metadata emitted by yt-dlp's Twitter Spaces extractor."""
     extractor_key = info.get("extractor_key")
     extractor = info.get("extractor")
     return extractor_key == "TwitterSpaces" or extractor == "twitter:spaces"
 
 
 def _require_archived_replay(info: dict) -> None:
+    """Reject upcoming, live, and ended-but-unarchived Space states."""
     live_status = info.get("live_status")
     if live_status == "is_upcoming":
         raise XSpaceResolutionError("This X Space has not started yet.")
@@ -177,6 +183,7 @@ def _require_archived_replay(info: dict) -> None:
 def _resolution_error_from_exception(
     exc: Exception, input_kind: XSpaceInputKind
 ) -> XSpaceResolutionError:
+    """Translate variable yt-dlp failures into actionable user-facing messages."""
     message = str(exc).lower()
     if "not started yet" in message:
         return XSpaceResolutionError("This X Space has not started yet.")
@@ -192,6 +199,7 @@ def _resolution_error_from_exception(
 
 
 def _download(url: str, directory: str) -> Path:
+    """Download, transcode, size-check, and return one archived Space M4A file."""
     if shutil.which("ffmpeg") is None:
         raise XSpaceAudioUnavailableError("ffmpeg is required to process X Space audio")
     options = {

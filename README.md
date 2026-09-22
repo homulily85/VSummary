@@ -41,3 +41,4 @@ the destination channel with `AUTO_SUMMARY_CHANNEL_ID`.
 
 - [Installation, configuration, and deployment](docs/installation.md)
 - [Slash command reference](docs/commands.md)
+- [System architecture and operations](docs/system.md)

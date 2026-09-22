@@ -22,7 +22,7 @@ every change, no exceptions:
 
 1. **Write the test(s) first.** Before implementing or modifying any
    feature, add or update the closest relevant file under `tests/`
-   (`test_settings.py`, `test_migrations.py`, `test_models.py`,
+   (`test_settings.py`, `test_models.py`,
    `test_refactored_models.py`, `test_holodex.py`, `test_video.py`,
    `test_youtube.py`, `test_formatting.py`, or `test_workflow_state.py`).
    Use `test_integration.py` only when coverage genuinely spans multiple
@@ -85,7 +85,6 @@ Rules of thumb:
 ```
 src/vsummary/
 ├── main.py              # process entry point; loads settings and owns resources
-├── migrations.py        # explicit, idempotent MongoDB data migration command
 ├── settings.py          # validated runtime configuration and .env loading
 ├── bot.py               # Bot subclass, dependency injection, cog loading, shutdown
 ├── cogs/                # Discord adapters and slash-command handlers
@@ -109,7 +108,6 @@ tests/
 ├── test_formatting.py       # Discord message chunking
 ├── test_holodex.py          # Holodex client contracts and retry behavior
 ├── test_integration.py      # mixed Discord, NotebookLM, and autosummary coverage
-├── test_migrations.py       # migration preflight and data-shape behavior
 ├── test_models.py           # legacy model compatibility behavior
 ├── test_refactored_models.py# current model names, states, and validation
 ├── test_settings.py         # settings parsing and validation
@@ -150,22 +148,6 @@ Notes for agents:
   `test_integration.py`; add focused tests beside the closest existing test
   file rather than assuming the old `test_cogs.py`/`test_summarizer.py`
   layout.
-
-### Migrations
-
-Migrations never run as part of bot startup. Before deploying this schema to
-an existing production database, back it up and run:
-
-```bash
-uv run vsummary-migrate --check
-uv run vsummary-migrate
-```
-
-The check reports duplicate natural keys that would block required unique
-indexes and makes no writes. Resolve those records manually before running the
-migration. The migration is additive and idempotent: it maps legacy pending
-job status `done` to `completed`, fills lease/delivery fields, adds missing
-channel timestamps, and preserves the original collections.
 
 ## Setup & common commands
 

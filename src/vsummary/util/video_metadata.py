@@ -14,6 +14,8 @@ class VideoMetadataError(RuntimeError):
 
 @dataclass(frozen=True)
 class VideoMetadata:
+    """Display metadata loaded before a manual job begins generation."""
+
     title: str
     channel_name: str
 
@@ -24,6 +26,7 @@ async def get_video_metadata(ref: VideoRef) -> VideoMetadata:
 
 
 def _extract_video_metadata(url: str) -> VideoMetadata:
+    """Use yt-dlp metadata extraction and validate the display fields it returns."""
     options = {
         "quiet": True,
         "no_warnings": True,
@@ -50,4 +53,5 @@ def _extract_video_metadata(url: str) -> VideoMetadata:
 
 
 def _nonempty_text(value: object) -> str | None:
+    """Return stripped text only when ``value`` is a non-blank string."""
     return value.strip() if isinstance(value, str) and value.strip() else None

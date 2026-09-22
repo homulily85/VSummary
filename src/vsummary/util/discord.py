@@ -1,3 +1,5 @@
+"""Discord-sized message formatting and process-wide send throttling."""
+
 from __future__ import annotations
 
 import asyncio
@@ -18,6 +20,7 @@ class DiscordMessageRateLimiter:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ):
+        """Create a limiter with injectable time functions for deterministic tests."""
         if minimum_interval_seconds <= 0:
             raise ValueError("minimum_interval_seconds must be positive")
         self.minimum_interval_seconds = minimum_interval_seconds

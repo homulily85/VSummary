@@ -30,7 +30,6 @@ dev = [
 
 [project.scripts]
 vsummary = "vsummary.main:main"
-vsummary-migrate = "vsummary.migrations:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

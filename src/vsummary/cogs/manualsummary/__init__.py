@@ -1,1 +1,1 @@
-"""Durable manual Twitch summary requests."""
+"""Durable worker for user-requested summary jobs."""

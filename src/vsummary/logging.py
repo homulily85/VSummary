@@ -48,6 +48,7 @@ class ContextFormatter(logging.Formatter):
     """Formatter that renders optional structured log context consistently."""
 
     def format(self, record: logging.LogRecord) -> str:
+        """Append normalized structured context before delegating to logging."""
         record.context_text = _format_context(getattr(record, "context", None))
         return super().format(record)
 
@@ -56,6 +57,7 @@ class DiscordLogHandler(logging.Handler):
     """A non-blocking, warning-only logging sink delivered by a Discord bot."""
 
     def __init__(self, channel_id: int, *, queue_size: int = DISCORD_QUEUE_SIZE):
+        """Create a bounded warning-only queue for one configured Discord channel."""
         super().__init__(logging.WARNING)
         self.channel_id = channel_id
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_size)
@@ -119,13 +121,16 @@ class DiscordLogHandler(logging.Handler):
             await self.queue.join()
 
     def format_record(self, record: logging.LogRecord) -> str:
-        """Render the timestamp, video link, and concise error for Discord."""
+        """Render UTC and viewer-local timestamps, a video link, and a concise error."""
         timestamp = (
             datetime.fromtimestamp(record.created, UTC)
             .isoformat(timespec="seconds")
             .replace("+00:00", "Z")
         )
-        lines = [f"Timestamp: {timestamp}"]
+        lines = [
+            f"Timestamp (UTC): {timestamp}",
+            f"Local time: <t:{int(record.created)}:F>",
+        ]
         video_url = _video_url_from_context(getattr(record, "context", None))
         if video_url is not None:
             lines.append(f"Video: {video_url}")
@@ -133,6 +138,7 @@ class DiscordLogHandler(logging.Handler):
         return _truncate("\n".join(lines), DISCORD_MESSAGE_LIMIT)
 
     async def _deliver(self) -> None:
+        """Drain queued logs until cancellation or an unrecoverable send failure."""
         while True:
             message = await self.queue.get()
             try:
@@ -147,6 +153,7 @@ class DiscordLogHandler(logging.Handler):
             self._enqueue_dropped_summary()
 
     def _enqueue(self, message: str) -> None:
+        """Queue a message or record its loss when the bounded queue is full."""
         if self.queue.full():
             self._dropped_count += 1
             return
@@ -157,6 +164,7 @@ class DiscordLogHandler(logging.Handler):
         self.queue.put_nowait(message)
 
     def _enqueue_dropped_summary(self) -> None:
+        """Queue one warning summarizing events dropped while the sink was saturated."""
         if not self._dropped_count or self.queue.full() or self.disabled:
             return
         summary = _truncate(
@@ -169,6 +177,7 @@ class DiscordLogHandler(logging.Handler):
         self._dropped_count = 0
 
     def _disable(self, reason: str) -> None:
+        """Permanently stop this sink after an unavailable-channel or send failure."""
         if self.disabled:
             return
         self.disabled = True
@@ -245,6 +254,7 @@ def log_event(
 
 
 def _format_context(value: object, *, redact: bool = False) -> str:
+    """Render mapping context as stable key/value pairs, optionally redacting secrets."""
     if not isinstance(value, Mapping) or not value:
         return ""
     parts = []
@@ -283,11 +293,13 @@ def _record_error(record: logging.LogRecord) -> str:
 
 
 def _redact_text(value: str) -> str:
+    """Remove common credentials from arbitrary log text before external delivery."""
     value = _URI_CREDENTIALS.sub(r"\1<redacted>@", value)
     return _SECRET_ASSIGNMENT.sub(r"\1<redacted>", value)
 
 
 def _truncate(value: str, limit: int) -> str:
+    """Limit text length with an ellipsis while preserving the requested maximum."""
     if limit <= 0:
         return ""
     if len(value) <= limit:

@@ -1,0 +1,1 @@
+"""Small operational Discord cogs."""

@@ -1,3 +1,5 @@
+"""Source-agnostic parsing and URL construction for supported video inputs."""
+
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
@@ -24,6 +26,7 @@ class VideoRef:
         *,
         id: str | None = None,
     ):
+        """Construct a reference, accepting ``id`` as a legacy keyword alias."""
         resolved_id = video_id or id
         if not resolved_id:
             raise ValueError("video_id is required")
@@ -32,6 +35,7 @@ class VideoRef:
 
     @property
     def id(self) -> str:
+        """Expose ``video_id`` through the compatibility alias used by callers."""
         return self.video_id
 
 
