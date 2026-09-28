@@ -396,6 +396,26 @@ class Autosummary(commands.Cog):
                 return await get_topic_details_all(getattr(self, "notebook", None), ref)
 
             try:
+                topic_id = await self._refresh_video_topic(item)
+                if topic_id is not None and policy_ignores_video(
+                    await get_auto_summary_topic_policies(),
+                    topic_id,
+                    item.available_at,
+                ):
+                    self._set_status(item, JobStatus.CANCELLED)
+                    item.last_error = None
+                    self._release_lease(item)
+                    saved = await self._save_item(item)
+                    if saved:
+                        log_event(
+                            logger,
+                            logging.INFO,
+                            "Cancelled auto-summary for ignored video %s (topic %s).",
+                            item.video_id,
+                            topic_id,
+                            **self._job_context(item, topic_id=topic_id),
+                        )
+                    return False
                 async with get_video_work_coordinator(self.bot).for_video(ref):
                     details = await retry_invalid_summary_response(generate_summary)
                 item.summary_details = [self._as_topic(detail) for detail in details]
@@ -439,6 +459,35 @@ class Autosummary(commands.Cog):
                 **self._job_context(item),
             )
         return saved
+
+    async def _refresh_video_topic(self, item) -> str | None:
+        """Try Holodex twice, then allow generation if topic lookup is unavailable."""
+        for attempt in (1, 2):
+            try:
+                topic_id = await self.holodex.get_video_topic(item.video_id)
+                if topic_id is not None:
+                    return topic_id
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "Holodex topic is unavailable for video %s (attempt %s/2).",
+                    item.video_id,
+                    attempt,
+                    **self._job_context(item, attempt=attempt),
+                )
+            except Exception as exc:  # noqa: BLE001 - lookup failure must not block generation
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "Could not refresh Holodex topic for video %s (attempt %s/2): %s",
+                    item.video_id,
+                    attempt,
+                    exc,
+                    **self._job_context(
+                        item, attempt=attempt, error_type=type(exc).__name__
+                    ),
+                )
+        return None
 
     async def _deliver_for_job(self, item):
         """Send persisted chunks, checkpointing each one for resumable delivery."""
@@ -725,6 +774,7 @@ class Autosummary(commands.Cog):
             old_status = {
                 JobStatus.QUEUED: PendingVideoStatus.QUEUED,
                 JobStatus.COMPLETED: PendingVideoStatus.DONE,
+                JobStatus.CANCELLED: PendingVideoStatus.DONE,
                 JobStatus.FAILED: PendingVideoStatus.FAILED,
             }
             item.status = old_status.get(status, PendingVideoStatus.QUEUED)

@@ -56,7 +56,11 @@ a `SummaryJob` for each eligible stream. Generation is delayed until at least
 two hours after the stream ends to give a transcript time to become available.
 
 The poller claims automatic jobs atomically, renews their lease while working,
-generates and persists topics, then delivers the saved chunks to
+refreshes each video's Holodex topic before generation, and cancels the job
+without posting when the topic is ignored under the policy effective at the
+video's publication time. If the lookup fails or Holodex has no topic, the bot
+tries once more and then proceeds with generation if the topic is still unknown.
+Other jobs generate and persist topics, then deliver the saved chunks to
 `AUTO_SUMMARY_CHANNEL_ID`. An expired lease can be reclaimed by another worker
 after a restart or interrupted process.
 
@@ -77,6 +81,8 @@ queued -> generating -> ready_to_deliver -> delivering -> completed
                      ^                    |
                      |                    v
                    retry <-------------- failed
+
+generating -> cancelled (refreshed Holodex topic is ignored)
 ```
 
 Manual jobs use the same generation and delivery statuses. Jobs save generated

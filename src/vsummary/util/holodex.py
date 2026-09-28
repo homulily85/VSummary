@@ -123,9 +123,12 @@ class HolodexClient:
         """Provide a compatibility alias for :meth:`aclose`."""
         await self.aclose()
 
-    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+    async def _request(
+        self, method: str, path: str, *, retries: int | None = None, **kwargs
+    ) -> httpx.Response:
         """Request Holodex, retrying transient transport and server failures."""
-        for attempt in range(self._retries + 1):
+        retry_limit = self._retries if retries is None else max(0, retries)
+        for attempt in range(retry_limit + 1):
             try:
                 response = await self._client.request(method, path, **kwargs)
             except (
@@ -133,7 +136,7 @@ class HolodexClient:
                 httpx.NetworkError,
                 httpx.ConnectError,
             ) as exc:
-                if attempt >= self._retries:
+                if attempt >= retry_limit:
                     raise TransientHolodexError(str(exc)) from exc
                 delay = 2**attempt
                 log_event(
@@ -143,14 +146,14 @@ class HolodexClient:
                     method,
                     path,
                     attempt=attempt + 1,
-                    retry_limit=self._retries + 1,
+                    retry_limit=retry_limit + 1,
                     retry_delay_seconds=delay,
                     error_type=type(exc).__name__,
                 )
                 await asyncio.sleep(delay)
                 continue
             if response.status_code in {408, 429} or response.status_code >= 500:
-                if attempt >= self._retries:
+                if attempt >= retry_limit:
                     raise TransientHolodexError(
                         f"Holodex returned HTTP {response.status_code}"
                     )
@@ -163,7 +166,7 @@ class HolodexClient:
                     method,
                     path,
                     attempt=attempt + 1,
-                    retry_limit=self._retries + 1,
+                    retry_limit=retry_limit + 1,
                     retry_delay_seconds=delay,
                     http_status=response.status_code,
                 )
@@ -216,6 +219,30 @@ class HolodexClient:
         except (KeyError, TypeError, ValueError) as exc:
             raise MalformedHolodexResponse(
                 f"Invalid videos response for '{channel_id}'"
+            ) from exc
+
+    async def get_video_topic(self, video_id: str) -> str | None:
+        """Fetch the current topic of one video, preserving API failures."""
+        response = await self._request("GET", f"/videos/{video_id}", retries=0)
+        if response.status_code == 404:
+            raise PermanentHolodexError(f"Video '{video_id}' not found on Holodex")
+        if response.is_error:
+            raise PermanentHolodexError(
+                f"Holodex returned HTTP {response.status_code} for video '{video_id}'"
+            )
+        try:
+            data = response.json()
+            if not isinstance(data, dict) or str(data.get("id")) != video_id:
+                raise ValueError("invalid video response")
+            topic_id = data.get("topic_id")
+            if topic_id is None:
+                return None
+            if not isinstance(topic_id, str):
+                raise TypeError("invalid topic ID")
+            return topic_id.strip() or None
+        except (TypeError, ValueError) as exc:
+            raise MalformedHolodexResponse(
+                f"Invalid topic response for video '{video_id}'"
             ) from exc
 
     async def fetch_channel_videos_since(
@@ -298,6 +325,10 @@ class HolodexGateway:
     async def get_channel(self, channel_id: str) -> HolodexChannel:
         """Return a channel while preserving strict typed client failures."""
         return await self.client.fetch_channel(channel_id)
+
+    async def get_video_topic(self, video_id: str) -> str | None:
+        """Return the latest Holodex topic for one video."""
+        return await self.client.get_video_topic(video_id)
 
     async def get_channel_videos(
         self, channel_id: str, limit: int = 1, offset: int = 0

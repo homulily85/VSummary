@@ -139,6 +139,48 @@ async def test_get_channel_videos_returns_empty_list_for_http_errors():
 
 
 @pytest.mark.asyncio
+async def test_get_video_topic_refreshes_one_video_from_holodex():
+    seen = []
+
+    async def handler(request):
+        seen.append(request.url)
+        return httpx.Response(200, json={"id": VIDEO_ID, "topic_id": "shorts"})
+
+    async with HolodexClient(transport=httpx.MockTransport(handler)) as client:
+        assert await client.get_video_topic(VIDEO_ID) == "shorts"
+
+    assert seen == [httpx.URL(f"{HOLODEX_API_URL}/videos/{VIDEO_ID}")]
+
+
+@pytest.mark.asyncio
+async def test_get_video_topic_allows_missing_topic():
+    async def handler(request):
+        return httpx.Response(200, json={"id": VIDEO_ID, "topic_id": None})
+
+    async with HolodexClient(transport=httpx.MockTransport(handler)) as client:
+        assert await client.get_video_topic(VIDEO_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_topic_lookup_makes_one_http_attempt_per_call():
+    requests = []
+
+    async def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503)
+        return httpx.Response(200, json={"id": VIDEO_ID, "topic_id": "shorts"})
+
+    async with HolodexClient(
+        transport=httpx.MockTransport(handler), retries=1
+    ) as client:
+        with pytest.raises(TransientHolodexError):
+            await client.get_video_topic(VIDEO_ID)
+
+    assert len(requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_strict_gateway_raises_typed_timeout_error():
     async def handler(request):
         raise httpx.ReadTimeout("timed out")

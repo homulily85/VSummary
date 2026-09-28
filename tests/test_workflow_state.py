@@ -4,9 +4,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import vsummary.cogs.autosummary.autosummary as autosummary_module
 from vsummary.cogs.autosummary.autosummary import Autosummary
-from vsummary.model.channel import JobStatus, SummaryJob
+from vsummary.model.channel import AutoSummaryTopicPolicy, JobStatus, SummaryJob
 from vsummary.model.video import Topic
+from vsummary.util.holodex import TransientHolodexError
 from vsummary.util.summarizer import InvalidSummaryResponse
 
 
@@ -38,6 +40,7 @@ async def test_delivery_failure_keeps_persisted_summary_and_does_not_regenerate(
     cog = Autosummary.__new__(Autosummary)
     cog.bot = SimpleNamespace(get_channel=lambda _: target, notebook_client=object())
     cog.settings = SimpleNamespace(auto_summary_channel_id=123, delivery_retry_limit=3)
+    cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value=None))
     cog.summary_service = SimpleNamespace(
         summarize=AsyncMock(return_value=[Topic(name="Intro", detail="Details")])
     )
@@ -183,6 +186,7 @@ async def test_invalid_notebooklm_topic_response_retries_immediately_then_succee
     cog = Autosummary.__new__(Autosummary)
     cog.bot = SimpleNamespace(notebook_client=object())
     cog.settings = SimpleNamespace(source_retry_limit=5)
+    cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value=None))
     cog.summary_service = SimpleNamespace(
         summarize=AsyncMock(
             side_effect=[
@@ -207,6 +211,7 @@ async def test_invalid_notebooklm_topic_response_queues_after_immediate_retry():
     cog = Autosummary.__new__(Autosummary)
     cog.bot = SimpleNamespace(notebook_client=object())
     cog.settings = SimpleNamespace(source_retry_limit=5)
+    cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value=None))
     cog.summary_service = SimpleNamespace(
         summarize=AsyncMock(side_effect=[error, error])
     )
@@ -219,6 +224,203 @@ async def test_invalid_notebooklm_topic_response_queues_after_immediate_retry():
     assert job.status is JobStatus.QUEUED
     assert job.last_error == "NotebookLM did not return JSON topic data"
     assert job.next_attempt_at > datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_generation_cancels_when_refreshed_topic_is_ignored(monkeypatch):
+    published_at = datetime(2026, 9, 20, tzinfo=UTC)
+    policy = AutoSummaryTopicPolicy.model_construct(
+        topic_id="shorts",
+        topic_key="shorts",
+        ignored=True,
+        effective_at=published_at - timedelta(days=1),
+    )
+    monkeypatch.setattr(
+        autosummary_module,
+        "get_auto_summary_topic_policies",
+        AsyncMock(return_value=[policy]),
+    )
+    cog = Autosummary.__new__(Autosummary)
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value="SHORTS"))
+    cog.summary_service = SimpleNamespace(summarize=AsyncMock())
+    job = FakeJob()
+    job.available_at = published_at
+
+    assert not await cog._generate_for_job(job)
+
+    cog.holodex.get_video_topic.assert_awaited_once_with(job.video_id)
+    cog.summary_service.summarize.assert_not_awaited()
+    assert job.status is JobStatus.CANCELLED
+    assert job.retry_count == 0
+    assert job.saved == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_persists_and_releases_claimed_job(monkeypatch):
+    published_at = datetime(2026, 9, 20, tzinfo=UTC)
+    policy = AutoSummaryTopicPolicy.model_construct(
+        topic_id="shorts",
+        topic_key="shorts",
+        ignored=True,
+        effective_at=published_at - timedelta(days=1),
+    )
+    monkeypatch.setattr(
+        autosummary_module,
+        "get_auto_summary_topic_policies",
+        AsyncMock(return_value=[policy]),
+    )
+    collection = SimpleNamespace(
+        update_one=AsyncMock(return_value=SimpleNamespace(matched_count=1))
+    )
+    monkeypatch.setattr(
+        SummaryJob,
+        "get_pymongo_collection",
+        classmethod(lambda cls: collection),
+    )
+    job = SummaryJob.model_construct(
+        id="job-id",
+        video_id="video",
+        channel_id="channel",
+        channel_name="Channel",
+        title="Title",
+        available_at=published_at,
+        next_attempt_at=datetime.now(UTC),
+        status=JobStatus.GENERATING,
+        claimed_by="worker",
+        claimed_at=datetime.now(UTC),
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=15),
+    )
+    cog = Autosummary.__new__(Autosummary)
+    cog.worker_id = "worker"
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value="shorts"))
+    cog.summary_service = SimpleNamespace(summarize=AsyncMock())
+
+    assert not await cog._generate_for_job(job)
+
+    query, update = collection.update_one.await_args.args
+    assert query == {"_id": "job-id", "claimed_by": "worker"}
+    assert update["$set"]["status"] == JobStatus.CANCELLED
+    assert update["$set"]["claimed_by"] is None
+    assert update["$set"]["lease_expires_at"] is None
+    cog.summary_service.summarize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generation_uses_policy_effective_at_video_publication(monkeypatch):
+    published_at = datetime(2026, 9, 20, tzinfo=UTC)
+    later_policy = AutoSummaryTopicPolicy.model_construct(
+        topic_id="shorts",
+        topic_key="shorts",
+        ignored=True,
+        effective_at=published_at + timedelta(days=1),
+    )
+    monkeypatch.setattr(
+        autosummary_module,
+        "get_auto_summary_topic_policies",
+        AsyncMock(return_value=[later_policy]),
+    )
+    cog = Autosummary.__new__(Autosummary)
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value="shorts"))
+    cog.summary_service = SimpleNamespace(
+        summarize=AsyncMock(return_value=[Topic(name="Intro", detail="Details")])
+    )
+    job = FakeJob()
+    job.available_at = published_at
+
+    assert await cog._generate_for_job(job)
+    cog.summary_service.summarize.assert_awaited_once()
+    assert job.status is JobStatus.READY_TO_DELIVER
+
+
+@pytest.mark.asyncio
+async def test_generation_continues_after_two_failed_topic_refreshes():
+    cog = Autosummary.__new__(Autosummary)
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.settings = SimpleNamespace(source_retry_limit=5)
+    cog.holodex = SimpleNamespace(
+        get_video_topic=AsyncMock(
+            side_effect=[
+                TransientHolodexError("unavailable"),
+                TransientHolodexError("still unavailable"),
+            ]
+        )
+    )
+    cog.summary_service = SimpleNamespace(
+        summarize=AsyncMock(return_value=[Topic(name="Intro", detail="Details")])
+    )
+    job = FakeJob()
+
+    assert await cog._generate_for_job(job)
+
+    assert cog.holodex.get_video_topic.await_count == 2
+    cog.summary_service.summarize.assert_awaited_once()
+    assert job.status is JobStatus.READY_TO_DELIVER
+    assert job.retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_second_topic_refresh_can_still_cancel_ignored_video(monkeypatch):
+    published_at = datetime(2026, 9, 20, tzinfo=UTC)
+    policy = AutoSummaryTopicPolicy.model_construct(
+        topic_id="shorts",
+        topic_key="shorts",
+        ignored=True,
+        effective_at=published_at - timedelta(days=1),
+    )
+    monkeypatch.setattr(
+        autosummary_module,
+        "get_auto_summary_topic_policies",
+        AsyncMock(return_value=[policy]),
+    )
+    cog = Autosummary.__new__(Autosummary)
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.holodex = SimpleNamespace(
+        get_video_topic=AsyncMock(
+            side_effect=[TransientHolodexError("unavailable"), "shorts"]
+        )
+    )
+    cog.summary_service = SimpleNamespace(summarize=AsyncMock())
+    job = FakeJob()
+    job.available_at = published_at
+
+    assert not await cog._generate_for_job(job)
+
+    assert cog.holodex.get_video_topic.await_count == 2
+    cog.summary_service.summarize.assert_not_awaited()
+    assert job.status is JobStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_missing_topic_is_retried_before_generation(monkeypatch):
+    published_at = datetime(2026, 9, 20, tzinfo=UTC)
+    policy = AutoSummaryTopicPolicy.model_construct(
+        topic_id="shorts",
+        topic_key="shorts",
+        ignored=True,
+        effective_at=published_at - timedelta(days=1),
+    )
+    monkeypatch.setattr(
+        autosummary_module,
+        "get_auto_summary_topic_policies",
+        AsyncMock(return_value=[policy]),
+    )
+    cog = Autosummary.__new__(Autosummary)
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.holodex = SimpleNamespace(
+        get_video_topic=AsyncMock(side_effect=[None, "shorts"])
+    )
+    cog.summary_service = SimpleNamespace(summarize=AsyncMock())
+    job = FakeJob()
+    job.available_at = published_at
+
+    assert not await cog._generate_for_job(job)
+
+    assert cog.holodex.get_video_topic.await_count == 2
+    cog.summary_service.summarize.assert_not_awaited()
+    assert job.status is JobStatus.CANCELLED
 
 
 @pytest.mark.asyncio

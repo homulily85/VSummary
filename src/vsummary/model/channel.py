@@ -20,6 +20,7 @@ class JobStatus(str, Enum):
     DELIVERING = "delivering"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class ManualSummaryOperation(str, Enum):

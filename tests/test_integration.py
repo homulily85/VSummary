@@ -238,6 +238,7 @@ def make_autosummary(bot=None):
     cog = Autosummary.__new__(Autosummary)
     cog.bot = bot or SimpleNamespace(notebook_client=object())
     cog.holodex = AsyncMock()
+    cog.holodex.get_video_topic = AsyncMock(return_value=None)
     cog.notebook = cog.bot.notebook_client
     return cog
 

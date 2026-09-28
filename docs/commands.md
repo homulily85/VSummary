@@ -76,8 +76,11 @@ server administrators can remove any of them.
 
 Policies are evaluated against a video's publication time, not the time the
 bot polls it. Adding a topic ignores only videos published after the command;
-removing it allows only videos published after that command. Existing queued
-jobs are not changed.
+removing it allows only videos published after that command. Before generating
+an automatic summary, the bot checks the video's Holodex topic again. A queued
+job is cancelled without posting if Holodex has since classified the video
+under a topic ignored at its publication time. If Holodex cannot provide a
+topic, the bot retries the lookup once and then continues with auto-summary.
 
 ## Troubleshooting
 

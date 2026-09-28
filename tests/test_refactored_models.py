@@ -31,6 +31,7 @@ def test_refactored_models_use_non_optional_topics_and_explicit_states():
         "delivering",
         "completed",
         "failed",
+        "cancelled",
     ]
 
 
