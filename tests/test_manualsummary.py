@@ -1,5 +1,6 @@
+import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -9,8 +10,10 @@ import vsummary.cogs.manualsummary.manualsummary as manualsummary_module
 from vsummary.cogs.manualsummary.manualsummary import ManualSummary
 from vsummary.model.channel import JobStatus, ManualSummaryJob, ManualSummaryOperation
 from vsummary.model.video import Topic
+from vsummary.util.generic_media import GenericMediaUnavailableError
 from vsummary.util.summarizer import InvalidSummaryResponse
 from vsummary.util.twitch import TwitchAudioUnavailableError
+from vsummary.util.video import parse_video_source
 
 
 @pytest.mark.asyncio
@@ -83,6 +86,137 @@ async def test_enqueue_stores_video_metadata(monkeypatch):
     assert captured["title"] == "Test Stream"
     assert captured["channel_name"] == "Test Channel"
     assert captured["saved"] is True
+
+
+@pytest.mark.asyncio
+async def test_enqueue_checks_generic_media_and_persists_url(monkeypatch):
+    saved = {}
+
+    class FakeJob:
+        def __init__(self, **values):
+            saved.update(values)
+
+        async def save(self):
+            saved["saved"] = True
+
+    monkeypatch.setattr(manualsummary_module, "ManualSummaryJob", FakeJob)
+    inspect = AsyncMock(return_value=SimpleNamespace(title="Talk", channel_name=None))
+    monkeypatch.setattr(manualsummary_module, "inspect_generic_media", inspect)
+    ref = parse_video_source("https://vimeo.com/123")
+    cog = ManualSummary.__new__(ManualSummary)
+
+    await cog.enqueue(
+        ref=ref,
+        operation=ManualSummaryOperation.TOPICS,
+        channel_id=123,
+        requester_id=456,
+    )
+
+    inspect.assert_awaited_once_with(ref)
+    assert saved["source_url"] == "https://vimeo.com/123"
+    assert saved["title"] == "Talk"
+    assert saved["saved"] is True
+
+
+@pytest.mark.asyncio
+async def test_generic_job_restores_url_for_generation(monkeypatch):
+    cog = ManualSummary.__new__(ManualSummary)
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.settings = SimpleNamespace()
+    cog.worker_id = "worker"
+    cog._save = AsyncMock(return_value=True)
+    ref = parse_video_source("https://vimeo.com/123")
+    job = ManualSummaryJob.model_construct(
+        source=ref.source,
+        video_id=ref.video_id,
+        source_url=ref.url,
+        operation=ManualSummaryOperation.TOPICS,
+        channel_id=123,
+        requester_id=456,
+        next_attempt_at=datetime.now(UTC),
+    )
+    summary = AsyncMock(return_value=[Topic(name="Introduction")])
+    monkeypatch.setattr(manualsummary_module, "get_topic_list", summary)
+
+    await cog._generate(job)
+
+    assert summary.await_args.args[1] == ref
+    assert job.delivery_chunks == ["1: Introduction"]
+
+
+def test_generic_detail_displays_title_without_missing_channel():
+    message = ManualSummary._format_detail(
+        {"topic_name": "Introduction", "detail": "Details"},
+        SimpleNamespace(title="Talk", channel_name=None),
+    )
+
+    assert message == "**Video:** Talk\n\n**Introduction**\nDetails"
+
+
+@pytest.mark.asyncio
+async def test_generic_terminal_failure_is_delivered_as_failure_notice(monkeypatch):
+    sent = []
+
+    class Channel:
+        async def send(self, content, **kwargs):
+            sent.append(content)
+
+    channel = Channel()
+    cog = ManualSummary.__new__(ManualSummary)
+    cog.bot = SimpleNamespace(get_channel=lambda _: channel)
+    cog.settings = SimpleNamespace(source_retry_limit=5)
+    cog.worker_id = "worker"
+    cog._save = AsyncMock(return_value=True)
+    job = ManualSummaryJob.model_construct(
+        source="yt_dlp",
+        video_id="hash",
+        source_url="https://vimeo.com/123",
+        operation=ManualSummaryOperation.TOPICS,
+        channel_id=123,
+        requester_id=456,
+        next_attempt_at=datetime.now(UTC),
+        retry_count=0,
+        delivery_chunk_index=0,
+    )
+
+    await cog._fail(
+        job,
+        GenericMediaUnavailableError("Playlist URLs are unsupported."),
+        permanent=True,
+    )
+    assert job.status is JobStatus.READY_TO_DELIVER
+
+    await cog._deliver(job)
+
+    assert sent == [
+        "Could not summarize the requested media: Playlist URLs are unsupported."
+    ]
+    assert job.status is JobStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_manual_generation_renews_owned_lease(monkeypatch):
+    renewed = asyncio.Event()
+
+    class Collection:
+        async def update_one(self, query, values):
+            assert query == {"_id": "job", "claimed_by": "worker"}
+            assert values["$set"]["lease_expires_at"] > datetime.now(UTC)
+            renewed.set()
+
+    monkeypatch.setattr(
+        manualsummary_module, "LEASE_DURATION", timedelta(milliseconds=30)
+    )
+    monkeypatch.setattr(
+        manualsummary_module.ManualSummaryJob,
+        "get_pymongo_collection",
+        lambda: Collection(),
+    )
+    cog = ManualSummary.__new__(ManualSummary)
+    cog.worker_id = "worker"
+
+    async with cog._renew_generation_lease(SimpleNamespace(id="job")):
+        await asyncio.wait_for(renewed.wait(), timeout=1)
 
 
 @pytest.mark.asyncio

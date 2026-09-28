@@ -17,7 +17,7 @@ class VideoMetadata:
     """Display metadata loaded before a manual job begins generation."""
 
     title: str
-    channel_name: str
+    channel_name: str | None
 
 
 async def get_video_metadata(ref: VideoRef) -> VideoMetadata:

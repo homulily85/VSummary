@@ -33,7 +33,7 @@ from vsummary.util.holodex import (
     HolodexVideo,
 )
 from vsummary.util.summarizer import InvalidSummaryResponse, NotebookLMSummaryService
-from vsummary.util.video import VideoRef
+from vsummary.util.video import VideoRef, parse_video_source
 from vsummary.util.video_work import VideoWorkCoordinator
 
 VIDEO_ID = "dQw4w9WgXcQ"
@@ -388,6 +388,33 @@ async def test_x_space_source_uploads_temporary_audio_file(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_generic_source_uploads_temporary_audio_file(monkeypatch, tmp_path):
+    client = FakeNotebookClient()
+    client.sources.add_file = AsyncMock()
+    audio = tmp_path / "media.m4a"
+    audio.write_bytes(b"audio")
+    ref = parse_video_source("https://vimeo.com/123")
+
+    @asynccontextmanager
+    async def fake_download(received):
+        assert received == ref
+        yield audio
+
+    monkeypatch.setattr(summarizer_util, "download_generic_audio", fake_download)
+
+    notebook = await summarizer_util._create_notebook_with_source(client, ref)
+
+    client.sources.add_file.assert_awaited_once_with(
+        notebook.id,
+        audio,
+        mime_type="audio/mp4",
+        wait=True,
+        wait_timeout=600,
+        title="Media",
+    )
+
+
+@pytest.mark.asyncio
 async def test_summarization_cleanup_failure_does_not_mask_source_error(monkeypatch):
     client = FakeNotebookClient(source_error=True)
     client.notebooks.delete = AsyncMock(side_effect=RuntimeError("delete failed"))
@@ -427,12 +454,70 @@ async def test_topics_command_reports_invalid_video_input():
     cog = Summarizer(SimpleNamespace(notebook_client=object()))
     interaction = FakeInteraction()
 
-    await Summarizer.topics.callback(cog, interaction, "https://example.com/video")
+    await Summarizer.topics.callback(cog, interaction, "not-a-url")
 
     assert interaction.response.deferred == [{"thinking": True}]
     assert interaction.followup.messages == [
-        ("'https://example.com/video' is not a supported video source.", {})
+        ("'not-a-url' is not a supported video source.", {})
     ]
+
+
+@pytest.mark.asyncio
+async def test_topics_command_queues_generic_media_url():
+    manual_summary = SimpleNamespace(enqueue=AsyncMock())
+    cog = Summarizer(SimpleNamespace(get_cog=lambda _: manual_summary))
+    interaction = FakeInteraction()
+
+    await Summarizer.topics.callback(cog, interaction, "https://vimeo.com/123")
+
+    assert interaction.followup.messages == [
+        ("Media topics are queued and will be posted here.", {})
+    ]
+    assert manual_summary.enqueue.await_args.kwargs["ref"] == parse_video_source(
+        "https://vimeo.com/123"
+    )
+
+
+@pytest.mark.asyncio
+async def test_detail_reports_generic_media_preflight_failure():
+    from vsummary.util.generic_media import GenericMediaError
+
+    manual_summary = SimpleNamespace(
+        enqueue=AsyncMock(
+            side_effect=GenericMediaError("Could not resolve the media host.")
+        )
+    )
+    cog = Summarizer(SimpleNamespace(get_cog=lambda _: manual_summary))
+    interaction = FakeInteraction()
+
+    await Summarizer.detail.callback(cog, interaction, "https://vimeo.com/123", 1)
+
+    assert interaction.followup.messages == [("Could not resolve the media host.", {})]
+
+
+@pytest.mark.asyncio
+async def test_x_post_without_space_falls_back_to_generic_media(monkeypatch):
+    from vsummary.util.x_space import XSpaceResolutionError
+
+    manual_summary = SimpleNamespace(enqueue=AsyncMock())
+    cog = Summarizer(SimpleNamespace(get_cog=lambda _: manual_summary))
+    interaction = FakeInteraction()
+    monkeypatch.setattr(summarizer_module, "is_x_space_input", lambda _: True)
+    monkeypatch.setattr(
+        summarizer_module,
+        "resolve_x_space",
+        AsyncMock(
+            side_effect=XSpaceResolutionError(
+                "This X post does not contain an X Space."
+            )
+        ),
+    )
+
+    await Summarizer.topics.callback(
+        cog, interaction, "https://x.com/speaker/status/123456789"
+    )
+
+    assert manual_summary.enqueue.await_args.kwargs["ref"].source == "yt_dlp"
 
 
 @pytest.mark.asyncio
@@ -533,6 +618,13 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
             title="Archived Space",
             next_attempt_at=datetime(2026, 9, 19, 11, 30, tzinfo=UTC),
         ),
+        SimpleNamespace(
+            source="yt_dlp",
+            video_id="hash",
+            source_url="https://vimeo.com/123",
+            title="Other media",
+            next_attempt_at=datetime(2026, 9, 19, 11, 45, tzinfo=UTC),
+        ),
     ]
     monkeypatch.setattr(summarizer_module, "SummaryJob", auto_jobs, raising=False)
     monkeypatch.setattr(
@@ -551,7 +643,9 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
                 "— 2026-09-19T11:00:00Z\n"
                 "2. **Manual:** Archived Space — <https://x.com/i/spaces/1DxleVnmlOmKL> "
                 "— 2026-09-19T11:30:00Z\n"
-                "3. **Auto:** Auto video — <https://www.youtube.com/watch?v=dQw4w9WgXcQ> "
+                "3. **Manual:** Other media — <https://vimeo.com/123> "
+                "— 2026-09-19T11:45:00Z\n"
+                "4. **Auto:** Auto video — <https://www.youtube.com/watch?v=dQw4w9WgXcQ> "
                 "— 2026-09-19T12:00:00Z"
             ),
             {},
@@ -645,10 +739,10 @@ async def test_detail_command_reports_unsupported_source_without_queueing():
     )
     interaction = FakeInteraction()
 
-    await Summarizer.detail.callback(cog, interaction, "https://example.com/video", 1)
+    await Summarizer.detail.callback(cog, interaction, "not-a-url", 1)
 
     assert interaction.followup.messages == [
-        ("'https://example.com/video' is not a supported video source.", {}),
+        ("'not-a-url' is not a supported video source.", {}),
     ]
     manual_summary.enqueue.assert_not_awaited()
 

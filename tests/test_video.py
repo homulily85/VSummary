@@ -24,7 +24,7 @@ def test_parse_video_source_returns_normalized_youtube_reference(value):
     assert parse_video_source(value) == VideoRef(source="youtube", id=VIDEO_ID)
 
 
-@pytest.mark.parametrize("value", ["", "   ", "not-a-url", "https://vimeo.com/12345"])
+@pytest.mark.parametrize("value", ["", "   ", "not-a-url", "file:///tmp/audio.mp3"])
 def test_parse_video_source_rejects_unsupported_sources(value):
     with pytest.raises(UnsupportedVideoSource):
         parse_video_source(value)
@@ -39,6 +39,24 @@ def test_build_video_url_supports_youtube():
 def test_build_video_url_rejects_unknown_sources():
     with pytest.raises(UnsupportedVideoSource):
         build_video_url(VideoRef(source="vimeo", id="12345"))
+
+
+def test_generic_media_url_has_stable_cache_identity_and_round_trips():
+    first = parse_video_source("https://Vimeo.com:443/12345#section")
+    second = parse_video_source("https://vimeo.com/12345")
+
+    assert first.source == "yt_dlp"
+    assert first.video_id == second.video_id
+    assert build_video_url(first) == "https://vimeo.com/12345"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["http://127.0.0.1/media", "http://localhost/media", "http://[::1]/media"],
+)
+def test_parse_video_source_rejects_private_destinations(value):
+    with pytest.raises(UnsupportedVideoSource):
+        parse_video_source(value)
 
 
 def test_parse_and_build_round_trip():
@@ -63,14 +81,15 @@ def test_parse_video_source_accepts_full_twitch_vod_urls(value):
     "value",
     [
         "123456789",
-        "https://clips.twitch.tv/ExampleClip",
-        "https://www.twitch.tv/example_channel",
-        "https://www.twitch.tv/videos/not-a-number",
     ],
 )
 def test_parse_video_source_rejects_unsupported_twitch_inputs(value):
     with pytest.raises(UnsupportedVideoSource):
         parse_video_source(value)
+
+
+def test_twitch_clip_uses_generic_media_backend():
+    assert parse_video_source("https://clips.twitch.tv/ExampleClip").source == "yt_dlp"
 
 
 def test_build_video_url_supports_twitch_vods():

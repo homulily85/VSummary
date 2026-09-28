@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 
 from discord.ext import commands, tasks
@@ -12,6 +14,11 @@ from pymongo import ReturnDocument
 from vsummary.model.channel import JobStatus, ManualSummaryJob, ManualSummaryOperation
 from vsummary.settings import Settings
 from vsummary.util.discord import send_limited, split_message
+from vsummary.util.generic_media import (
+    GenericMediaError,
+    GenericMediaUnavailableError,
+    inspect_generic_media,
+)
 from vsummary.util.holodex import MAX_RETRIES, exponential_backoff_hours
 from vsummary.util.summarizer import (
     PermanentSummaryError,
@@ -76,10 +83,15 @@ class ManualSummary(commands.Cog):
         topic_index: int | None = None,
     ):
         """Persist a new manual job with optional source metadata for delivery."""
-        metadata = await self._load_metadata(ref)
+        metadata = (
+            await inspect_generic_media(ref)
+            if ref.source == "yt_dlp"
+            else await self._load_metadata(ref)
+        )
         job = ManualSummaryJob(
             source=ref.source,
             video_id=ref.video_id,
+            source_url=ref.url,
             title=metadata.title if metadata else None,
             channel_name=metadata.channel_name if metadata else None,
             operation=operation,
@@ -152,13 +164,45 @@ class ManualSummary(commands.Cog):
     async def _process(self, job):
         """Advance a claimed job through its generation and delivery phase."""
         if job.status == JobStatus.GENERATING:
-            await self._generate(job)
+            async with self._renew_generation_lease(job):
+                await self._generate(job)
         if job.status == JobStatus.DELIVERING:
             await self._deliver(job)
 
+    @asynccontextmanager
+    async def _renew_generation_lease(self, job):
+        """Keep a long download from being claimed by another worker."""
+
+        async def renew():
+            while True:
+                await asyncio.sleep(LEASE_DURATION.total_seconds() / 3)
+                try:
+                    await ManualSummaryJob.get_pymongo_collection().update_one(
+                        {"_id": job.id, "claimed_by": self.worker_id},
+                        {
+                            "$set": {
+                                "lease_expires_at": datetime.now(UTC) + LEASE_DURATION
+                            }
+                        },
+                    )
+                except Exception:
+                    logger.exception("Could not renew manual summary lease")
+
+        task = asyncio.create_task(renew())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
     async def _generate(self, job):
         """Build and persist delivery chunks, retrying source failures durably."""
-        ref = VideoRef(source=job.source, video_id=job.video_id)
+        ref = VideoRef(
+            source=job.source,
+            video_id=job.video_id,
+            url=getattr(job, "source_url", None),
+        )
         metadata = self._stored_metadata(job)
         if job.operation != ManualSummaryOperation.TOPICS:
             metadata = metadata or await self._load_metadata(ref)
@@ -199,10 +243,19 @@ class ManualSummary(commands.Cog):
                 )
         except IndexError:
             job.delivery_chunks = [f"Invalid topic index: {(job.topic_index or 0) + 1}"]
-        except (TwitchAudioUnavailableError, XSpaceAudioUnavailableError) as exc:
+        except (
+            TwitchAudioUnavailableError,
+            XSpaceAudioUnavailableError,
+            GenericMediaUnavailableError,
+        ) as exc:
             await self._fail(job, exc, permanent=True)
             return
-        except (TwitchAudioError, XSpaceAudioError, TransientSummaryError) as exc:
+        except (
+            TwitchAudioError,
+            XSpaceAudioError,
+            GenericMediaError,
+            TransientSummaryError,
+        ) as exc:
             await self._fail(job, exc)
             return
         except PermanentSummaryError as exc:
@@ -225,6 +278,7 @@ class ManualSummary(commands.Cog):
             if (
                 job.operation == ManualSummaryOperation.TOPICS
                 and job.delivery_chunk_index == 0
+                and not getattr(job, "failure_notice", False)
             ):
                 await send_limited(
                     self.bot,
@@ -236,7 +290,11 @@ class ManualSummary(commands.Cog):
             for chunk in job.delivery_chunks[job.delivery_chunk_index :]:
                 await send_limited(self.bot, channel.send, chunk)
                 job.delivery_chunk_index += 1
-            job.status = JobStatus.COMPLETED
+            job.status = (
+                JobStatus.FAILED
+                if getattr(job, "failure_notice", False)
+                else JobStatus.COMPLETED
+            )
             self._release(job)
             await self._save(job)
         except Exception as exc:  # noqa: BLE001 - Discord channel delivery varies
@@ -257,10 +315,20 @@ class ManualSummary(commands.Cog):
         )
         job.retry_count += 1
         job.last_error = str(exc)
-        if permanent or job.retry_count >= getattr(
+        terminal = permanent or job.retry_count >= getattr(
             self.settings, "source_retry_limit", MAX_RETRIES
-        ):
-            job.status = JobStatus.FAILED
+        )
+        if terminal:
+            if job.source == "yt_dlp":
+                job.failure_notice = True
+                job.delivery_chunks = [
+                    f"Could not summarize the requested media: {str(exc)[:1500]}"
+                ]
+                job.delivery_chunk_index = 0
+                job.status = JobStatus.READY_TO_DELIVER
+                job.next_attempt_at = datetime.now(UTC)
+            else:
+                job.status = JobStatus.FAILED
         else:
             job.status = JobStatus.QUEUED
             job.next_attempt_at = datetime.now(UTC) + timedelta(
@@ -295,23 +363,23 @@ class ManualSummary(commands.Cog):
         message = f"**{detail['topic_name']}**\n{detail['detail']}"
         if metadata is None:
             return message
-        return (
-            f"**Video:** {metadata.title}\n**Channel:** {metadata.channel_name}\n\n"
-            f"{message}"
-        )
+        heading = f"**Video:** {metadata.title}"
+        if metadata.channel_name:
+            heading += f"\n**Channel:** {metadata.channel_name}"
+        return f"{heading}\n\n{message}"
 
     @staticmethod
     def _stored_metadata(job) -> VideoMetadata | None:
         """Return complete metadata previously persisted on a job, if any."""
         title = getattr(job, "title", None)
         channel_name = getattr(job, "channel_name", None)
-        if (
-            isinstance(title, str)
-            and title
-            and isinstance(channel_name, str)
-            and channel_name
-        ):
-            return VideoMetadata(title=title, channel_name=channel_name)
+        if isinstance(title, str) and title:
+            return VideoMetadata(
+                title=title,
+                channel_name=channel_name
+                if isinstance(channel_name, str) and channel_name
+                else None,
+            )
         return None
 
     async def _load_metadata(self, ref: VideoRef) -> VideoMetadata | None:

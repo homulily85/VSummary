@@ -35,7 +35,9 @@ rate limiter.
 ### Manual requests
 
 `/topics` and `/detail` normalize the user input into a `VideoRef`. X Space
-post URLs are resolved to an archived Space before a job is created. The
+post URLs are resolved to an archived Space before a job is created. Other
+public media URLs are checked with `yt-dlp`; their URL is stored with the job
+so the worker can download audio after a restart. The
 command writes a `ManualSummaryJob` and returns immediately so Discord does not
 time out while NotebookLM is working.
 

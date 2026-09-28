@@ -10,6 +10,7 @@ from notebooklm.types import Notebook
 
 from vsummary.logging import log_event
 from vsummary.model.video import Topic, VideoSummary
+from vsummary.util.generic_media import download_generic_audio
 from vsummary.util.twitch import download_twitch_audio
 from vsummary.util.video import VideoRef, build_video_url
 from vsummary.util.x_space import download_x_space_audio
@@ -184,6 +185,16 @@ async def _create_notebook_with_source(
                     wait=True,
                     wait_timeout=600,
                     title=f"X Space {ref.video_id}",
+                )
+        elif ref.source == "yt_dlp":
+            async with download_generic_audio(ref) as audio:
+                await client.sources.add_file(
+                    notebook.id,
+                    audio,
+                    mime_type="audio/mp4",
+                    wait=True,
+                    wait_timeout=600,
+                    title="Media",
                 )
         else:
             await client.sources.add_url(notebook.id, video_link)

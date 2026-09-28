@@ -2,7 +2,7 @@
 
 VSummary is a Discord bot for Vtuber fans who want to catch up on long streams,
 zatsudan, game sessions, announcements, and other video content without losing
-the important context. It uses NotebookLM to turn YouTube videos and Twitch VODs
+the important context. It uses NotebookLM to turn public video and audio recordings
 into topic lists and detailed, readable summaries right in Discord.
 
 Follow your favourite Vtuber channels for automatic recaps, or request a summary
@@ -11,7 +11,7 @@ for a video shared in your server.
 ## Features
 
 - **Catch up on streams faster** — get a topic list or detailed explanation for
-  a YouTube video or public Twitch VOD.
+  a public video or audio recording.
 - **Ask for exactly what you need** — use `/detail` for one topic or for the
   complete video summary.
 - **Follow favourite Vtubers** — track Holodex/YouTube channels and post new
@@ -23,8 +23,9 @@ for a video shared in your server.
 | Source | Accepted input | Notes |
 | --- | --- | --- |
 | YouTube | A video URL or video ID | Supports `/topics` and `/detail`. |
-| Twitch | A full public VOD URL | Requires `ffmpeg`; clips and bare VOD IDs are not supported. |
+| Twitch | A full public VOD URL | Requires `ffmpeg`; bare VOD IDs are not supported. |
 | X (Twitter) Space | A public archived Space URL or post URL containing a Space | Supports `/topics` and `/detail`; requires `ffmpeg`. Upcoming, live, and unarchived Spaces are rejected. |
+| Other media supported by `yt-dlp` | A public HTTP(S) URL for one finished video or audio item | Requires `ffmpeg`. Playlists, live media, and private sources are rejected. |
 
 ## How it works
 

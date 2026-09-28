@@ -159,6 +159,7 @@ class ManualSummaryJob(Document):
 
     source: str
     video_id: str
+    source_url: str | None = None
     title: str | None = None
     channel_name: str | None = None
     operation: ManualSummaryOperation
@@ -172,6 +173,7 @@ class ManualSummaryJob(Document):
     delivery_chunks: list[str] = Field(default_factory=list)
     delivery_chunk_index: int = 0
     last_error: str | None = None
+    failure_notice: bool = False
     claimed_by: str | None = None
     claimed_at: datetime | None = None
     lease_expires_at: datetime | None = None

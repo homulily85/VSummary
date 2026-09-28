@@ -7,7 +7,7 @@
   application.
 - A MongoDB deployment: install it directly, run it with Docker, or use
   MongoDB Atlas.
-- `ffmpeg` on `PATH` when summarizing Twitch VODs or X Spaces. `yt-dlp` is
+- `ffmpeg` on `PATH` when summarizing Twitch VODs, X Spaces, or other media URLs. `yt-dlp` is
   already a Python dependency of this project.
 - A Discord Application with a bot user.
 - A Google account that can use NotebookLM.
@@ -26,7 +26,7 @@ Use a MongoDB instance installed directly on the host, a Docker deployment, or
 [MongoDB Atlas](https://www.mongodb.com/atlas). Set `MONGODB_URI` to the
 connection string for the deployment you choose.
 
-### Install `ffmpeg` for Twitch and X Space
+### Install `ffmpeg` for audio uploads
 
 Ubuntu/Debian:
 
@@ -40,9 +40,12 @@ macOS with Homebrew:
 brew install ffmpeg
 ```
 
-Twitch VODs and X Spaces are added to NotebookLM as M4A audio files. They must
-be public, available to `yt-dlp`, and produce audio within NotebookLM's upload
-limit.
+Twitch VODs, X Spaces, and other public media URLs are added to NotebookLM as
+M4A audio files. They must be available to `yt-dlp` and produce audio within
+NotebookLM's upload limit. Each request must refer to one completed recording.
+For a bot exposed to untrusted users, block outbound connections to private
+networks at the host or container network boundary; media sites can redirect
+requests to other hosts.
 
 ## 3. Create and invite the Discord bot
 

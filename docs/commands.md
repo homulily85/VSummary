@@ -16,14 +16,17 @@ autocomplete and view Discord's parameter descriptions.
 
 - **YouTube:** a valid YouTube URL or video ID, for example `dQw4w9WgXcQ` or
   `https://www.youtube.com/watch?v=dQw4w9WgXcQ`.
-- **Twitch:** only a full public VOD URL, for example
-  `https://www.twitch.tv/videos/123456789`. Bare VOD IDs, clip URLs, channel
-  livestream URLs, and other domains are not accepted.
+- **Twitch:** a full public VOD URL, for example
+  `https://www.twitch.tv/videos/123456789`. Bare VOD IDs are not accepted.
 - **X (Twitter) Space:** a public archived Space URL such as
   `https://x.com/i/spaces/1OwxWwQOPlNxQ`, or an X post URL whose media resolves
   to a Space. `twitter.com`/`x.com` plus `www`, `m`, and `mobile` variants and
   query parameters are accepted. Upcoming, live, replay-disabled, and
   not-yet-archived Spaces are rejected before a job is queued.
+- **Other media:** a public HTTP(S) URL for one finished video or audio item
+  accessible to `yt-dlp`, including Twitch clips and public video posts.
+  Playlist, live, upcoming, private, and unsupported URLs are rejected.
+  Support depends on the site and may change when the site changes.
 
 Examples:
 
@@ -32,6 +35,7 @@ Examples:
 /detail video:dQw4w9WgXcQ topic_index:2
 /detail video:https://www.twitch.tv/videos/123456789
 /topics video:https://x.com/i/spaces/1OwxWwQOPlNxQ
+/topics video:https://vimeo.com/123456789
 ```
 
 `topic_index` is one-based. For an invalid index, the bot posts an error after
@@ -83,4 +87,5 @@ jobs are not changed.
 | `Missing Access` while posting a result | Check the job `channel_id`, **View Channel**/**Send Messages**, and category overrides. |
 | A Twitch VOD cannot be processed | Use a full public VOD URL, install `ffmpeg`, and ensure its converted audio fits NotebookLM's upload limit. |
 | An X Space cannot be processed | Use a public archived Space (or a post that resolves to one), install `ffmpeg`, and ensure its converted audio fits NotebookLM's upload limit. |
+| Another media URL cannot be processed | Use a public URL for one completed recording supported by `yt-dlp`, install `ffmpeg`, and ensure its audio fits NotebookLM's upload limit. |
 | NotebookLM is temporarily unavailable | The worker retries up to `SOURCE_RETRY_LIMIT`; inspect the log file or `DISCORD_LOG_CHANNEL_ID` for details. |
