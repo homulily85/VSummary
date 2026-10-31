@@ -277,6 +277,53 @@ def reset_fake_storage(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_topic_list_requests_english_names_and_caches_them_in_order():
+    client = FakeNotebookClient(
+        answers=['[{"name": "Preparing for the concert"}, {"name": "Future plans"}]']
+    )
+
+    topics = await summarizer_util.get_topic_list(client, VIDEO_REF)
+
+    prompt = " ".join(client.prompts[0][1].split())
+    assert "Write every topic name in English" in prompt
+    assert (
+        "regardless of the language spoken in the video or used in its transcript"
+        in prompt
+    )
+    assert "Translate non-English descriptive topic names into English" in prompt
+    assert [topic.name for topic in topics] == [
+        "Preparing for the concert",
+        "Future plans",
+    ]
+    assert len(FakeVideoRecord.records) == 1
+    assert FakeVideoRecord.records[0].topics == topics
+    assert client.deleted == ["notebook-1"]
+
+    cached_client = FakeNotebookClient()
+    assert await summarizer_util.get_topic_list(cached_client, VIDEO_REF) == topics
+    assert cached_client.created == []
+    assert cached_client.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_topic_list_preserves_existing_cached_non_english_names():
+    topics = [Topic(name="今後の予定", detail="The speaker discusses future plans.")]
+    video = FakeVideoRecord(
+        source=VIDEO_REF.source, video_id=VIDEO_REF.video_id, topics=topics
+    )
+    await video.save()
+    client = FakeNotebookClient()
+
+    cached_topics = await summarizer_util.get_topic_list(client, VIDEO_REF)
+
+    assert cached_topics == topics
+    assert cached_topics[0].name == "今後の予定"
+    assert cached_topics[0].detail == "The speaker discusses future plans."
+    assert client.created == []
+    assert client.prompts == []
+
+
+@pytest.mark.asyncio
 async def test_summarization_pipeline_generates_caches_and_reuses_all_topic_details():
     client = FakeNotebookClient(
         answers=[

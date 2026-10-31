@@ -254,6 +254,9 @@ async def _get_or_create_topic_list(
     notebook = await _create_notebook_with_source(client, ref)
     prompt = """
        What are the topics mentioned in the video?
+       Write every topic name in English, regardless of the language spoken in
+       the video or used in its transcript. Translate non-English descriptive
+       topic names into English.
        Return a json containing all topics mentioned in the order they appear in the video using 
        following structure:
        [
