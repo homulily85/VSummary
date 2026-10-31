@@ -463,6 +463,156 @@ async def test_generic_source_uploads_temporary_audio_file(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["topics", "detail", "all", "service"])
+async def test_youtube_audio_fallback_uploads_audio_and_keeps_the_youtube_cache(
+    monkeypatch,
+    tmp_path,
+    operation,
+):
+    answers = ['[{"name": "Intro"}]']
+    if operation != "topics":
+        answers.append("Details")
+    client = FakeNotebookClient(answers=answers, source_error=True)
+    client.sources.add_file = AsyncMock()
+    audio = tmp_path / "youtube.m4a"
+    audio.write_bytes(b"audio")
+    downloads = []
+    cleaned = []
+
+    @asynccontextmanager
+    async def fake_download(ref):
+        assert ref == VIDEO_REF
+        downloads.append(ref)
+        try:
+            yield audio
+        finally:
+            cleaned.append(ref)
+
+    monkeypatch.setattr(summarizer_util, "download_generic_audio", fake_download)
+    if operation == "topics":
+        result = await summarizer_util.get_topic_list(
+            client, VIDEO_REF, use_youtube_audio=True
+        )
+        assert result == [Topic(name="Intro")]
+    elif operation == "detail":
+        result = await summarizer_util.get_topic_details(
+            client, VIDEO_REF, 0, use_youtube_audio=True
+        )
+        assert result == {"topic_name": "Intro", "detail": "Details"}
+    elif operation == "all":
+        result = await summarizer_util.get_topic_details_all(
+            client, VIDEO_REF, use_youtube_audio=True
+        )
+        assert result == [{"topic_name": "Intro", "detail": "Details"}]
+    else:
+        result = await NotebookLMSummaryService(client).summarize(
+            VIDEO_REF, use_youtube_audio=True
+        )
+        assert result == [Topic(name="Intro", detail="Details")]
+
+    assert len(downloads) == len(cleaned) == 1
+    client.sources.add_file.assert_awaited_once_with(
+        "notebook-1",
+        audio,
+        mime_type="audio/mp4",
+        wait=True,
+        wait_timeout=600,
+        title=f"YouTube video {VIDEO_ID}",
+    )
+    assert client.added_urls == []
+    assert client.deleted == ["notebook-1"]
+    assert len(FakeVideoRecord.records) == 1
+    assert FakeVideoRecord.records[0].source == "youtube"
+    assert FakeVideoRecord.records[0].video_id == VIDEO_ID
+    assert await summarizer_util.get_topic_list(client, VIDEO_REF) == [
+        Topic(name="Intro", detail=None if operation == "topics" else "Details")
+    ]
+    assert len(downloads) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("all_details", [False, True])
+async def test_youtube_audio_fallback_preserves_cached_topics_and_completed_details(
+    monkeypatch,
+    tmp_path,
+    all_details,
+):
+    video = FakeVideoRecord(
+        source="youtube",
+        video_id=VIDEO_ID,
+        topics=[
+            Topic(name="Intro", detail="Cached details"),
+            Topic(name="Outro"),
+        ],
+    )
+    await video.save()
+    client = FakeNotebookClient(answers=["New details"], source_error=True)
+    client.sources.add_file = AsyncMock()
+    audio = tmp_path / "youtube.m4a"
+    audio.write_bytes(b"audio")
+
+    @asynccontextmanager
+    async def fake_download(ref):
+        assert ref == VIDEO_REF
+        yield audio
+
+    monkeypatch.setattr(summarizer_util, "download_generic_audio", fake_download)
+    if all_details:
+        assert await summarizer_util.get_topic_details_all(
+            client, VIDEO_REF, use_youtube_audio=True
+        ) == [
+            {"topic_name": "Intro", "detail": "Cached details"},
+            {"topic_name": "Outro", "detail": "New details"},
+        ]
+    else:
+        assert await summarizer_util.get_topic_details(
+            client, VIDEO_REF, 1, use_youtube_audio=True
+        ) == {"topic_name": "Outro", "detail": "New details"}
+    assert video.topics == [
+        Topic(name="Intro", detail="Cached details"),
+        Topic(name="Outro", detail="New details"),
+    ]
+    assert len(client.prompts) == 1
+    client.sources.add_file.assert_awaited_once()
+    assert client.deleted == ["notebook-1"]
+    cached_client = FakeNotebookClient()
+    assert await summarizer_util.get_topic_details_all(
+        cached_client, VIDEO_REF, use_youtube_audio=True
+    )
+    assert cached_client.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["download", "upload", "chat"])
+async def test_youtube_audio_fallback_cleans_up_failed_generation(
+    monkeypatch, tmp_path, failure_stage
+):
+    client = FakeNotebookClient(answers=["not JSON"], source_error=True)
+    client.sources.add_file = AsyncMock(
+        side_effect=RuntimeError("upload failed") if failure_stage == "upload" else None
+    )
+    audio = tmp_path / "youtube.m4a"
+    audio.write_bytes(b"audio")
+    cleaned = []
+
+    @asynccontextmanager
+    async def fake_download(ref):
+        try:
+            if failure_stage == "download":
+                raise RuntimeError("download failed")
+            yield audio
+        finally:
+            cleaned.append(ref)
+
+    monkeypatch.setattr(summarizer_util, "download_generic_audio", fake_download)
+    with pytest.raises((RuntimeError, InvalidSummaryResponse)):
+        await summarizer_util.get_topic_list(client, VIDEO_REF, use_youtube_audio=True)
+    assert cleaned == [VIDEO_REF]
+    assert client.deleted == ["notebook-1"]
+    assert FakeVideoRecord.records == []
+
+
+@pytest.mark.asyncio
 async def test_summarization_cleanup_failure_does_not_mask_source_error(monkeypatch):
     client = FakeNotebookClient(source_error=True)
     client.notebooks.delete = AsyncMock(side_effect=RuntimeError("delete failed"))

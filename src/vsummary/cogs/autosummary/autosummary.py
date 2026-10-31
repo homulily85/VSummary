@@ -387,13 +387,31 @@ class Autosummary(commands.Cog):
         """Generate and persist topics before Discord delivery can begin."""
         if not getattr(item, "summary_details", None):
             ref = VideoRef(source="youtube", video_id=item.video_id)
+            use_youtube_audio = getattr(item, "youtube_audio_fallback", False)
+            if use_youtube_audio and not getattr(
+                getattr(self, "settings", None),
+                "youtube_yt_dlp_fallback_enabled",
+                False,
+            ):
+                self._set_status(item, JobStatus.FAILED)
+                item.last_error = "YouTube audio fallback is disabled."
+                self._release_lease(item)
+                if await self._save_item(item):
+                    await self._post_failure(item)
+                return False
+            generation_options = (
+                {"use_youtube_audio": True} if use_youtube_audio else {}
+            )
+            generation_started = False
 
             async def generate_summary():
                 """Run the configured summary service or the legacy direct fallback."""
                 summary_service = getattr(self, "summary_service", None)
                 if summary_service is not None:
-                    return await summary_service.summarize(ref)
-                return await get_topic_details_all(getattr(self, "notebook", None), ref)
+                    return await summary_service.summarize(ref, **generation_options)
+                return await get_topic_details_all(
+                    getattr(self, "notebook", None), ref, **generation_options
+                )
 
             try:
                 topic_id = await self._refresh_video_topic(item)
@@ -417,7 +435,12 @@ class Autosummary(commands.Cog):
                         )
                     return False
                 async with get_video_work_coordinator(self.bot).for_video(ref):
-                    details = await retry_invalid_summary_response(generate_summary)
+                    generation_started = True
+                    details = (
+                        await generate_summary()
+                        if use_youtube_audio
+                        else await retry_invalid_summary_response(generate_summary)
+                    )
                 item.summary_details = [self._as_topic(detail) for detail in details]
             except (PermanentSummaryError, PermanentHolodexError) as exc:
                 logger.warning(
@@ -435,7 +458,9 @@ class Autosummary(commands.Cog):
                     exc_info=True,
                     extra={"context": self._job_context(item)},
                 )
-                await self._handle_source_error(item, exc)
+                await self._handle_source_error(
+                    item, exc, allow_youtube_fallback=generation_started
+                )
                 return False
             except Exception as exc:
                 logger.exception(
@@ -443,7 +468,9 @@ class Autosummary(commands.Cog):
                     item.video_id,
                     extra={"context": self._job_context(item)},
                 )
-                await self._handle_source_error(item, exc)
+                await self._handle_source_error(
+                    item, exc, allow_youtube_fallback=generation_started
+                )
                 return False
 
         item.generated_at = datetime.now(UTC)
@@ -537,6 +564,8 @@ class Autosummary(commands.Cog):
         item,
         exc: Exception | None = None,
         permanent: bool = False,
+        *,
+        allow_youtube_fallback: bool = False,
     ):
         """Apply source retry policy, release the lease, and persist the next state."""
         exc = exc or RuntimeError("summary generation failed")
@@ -544,12 +573,39 @@ class Autosummary(commands.Cog):
         max_retries = getattr(
             getattr(self, "settings", None), "source_retry_limit", MAX_RETRIES
         )
-        if permanent or item.retry_count >= max_retries:
+        fallback_active = getattr(item, "youtube_audio_fallback", False)
+        if (
+            allow_youtube_fallback
+            and not permanent
+            and not fallback_active
+            and item.retry_count >= max_retries
+            and getattr(
+                getattr(self, "settings", None),
+                "youtube_yt_dlp_fallback_enabled",
+                False,
+            )
+        ):
+            item.youtube_audio_fallback = True
+            self._set_status(item, JobStatus.QUEUED)
+            item.next_attempt_at = datetime.now(UTC)
+            item.last_error = str(exc)
+            self._release_lease(item)
+            saved = await self._save_item(item)
+            if saved:
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "Queued final YouTube audio fallback for %s.",
+                    item.video_id,
+                    **self._job_context(item),
+                )
+            return saved
+        if permanent or fallback_active or item.retry_count >= max_retries:
             self._set_status(item, JobStatus.FAILED)
             item.last_error = str(exc)
             self._release_lease(item)
             saved = await self._save_item(item)
-            if saved and not permanent:
+            if saved and (not permanent or fallback_active):
                 await self._post_failure(item)
             log_event(
                 logger,
@@ -636,10 +692,28 @@ class Autosummary(commands.Cog):
         channel = await self._get_auto_summary_channel()
         if channel is None:
             return
+        if getattr(item, "youtube_audio_fallback", False):
+            if not getattr(
+                getattr(self, "settings", None),
+                "youtube_yt_dlp_fallback_enabled",
+                False,
+            ):
+                failure = (
+                    f"Failed to generate a summary after {item.retry_count} normal attempts; "
+                    "the yt-dlp audio fallback was disabled before it could run."
+                )
+            else:
+                failure = (
+                    f"Failed to generate a summary after {item.retry_count - 1} normal attempts "
+                    "and one yt-dlp audio fallback attempt."
+                )
+        else:
+            failure = (
+                f"Failed to generate a summary after {getattr(getattr(self, 'settings', None), 'source_retry_limit', MAX_RETRIES)} attempts; "
+                "no transcript could be fetched for this video."
+            )
         message = (
-            f"**Video:** {item.title}\n**Channel:** {item.channel_name}\n\n"
-            f"Failed to generate a summary after {getattr(getattr(self, 'settings', None), 'source_retry_limit', MAX_RETRIES)} attempts; "
-            "no transcript could be fetched for this video."
+            f"**Video:** {item.title}\n**Channel:** {item.channel_name}\n\n{failure}"
         )
         await self._send_to_channel(channel, message)
 

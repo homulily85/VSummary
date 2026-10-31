@@ -7,7 +7,8 @@
   application.
 - A MongoDB deployment: install it directly, run it with Docker, or use
   MongoDB Atlas.
-- `ffmpeg` on `PATH` when summarizing Twitch VODs, X Spaces, or other media URLs. `yt-dlp` is
+- `ffmpeg` on `PATH` when summarizing Twitch VODs, X Spaces, other media URLs,
+  or using the optional YouTube audio fallback. `yt-dlp` is
   already a Python dependency of this project.
 - A Discord Application with a bot user.
 - A Google account that can use NotebookLM.
@@ -100,10 +101,43 @@ without brackets or quotation marks.
 | `DISCORD_SEND_INTERVAL_SECONDS` | No | `1.0` | Minimum gap between bot messages; must be greater than 0. |
 | `POLL_INTERVAL_MINUTES` | No | `30` | Holodex polling interval for new videos. |
 | `SOURCE_RETRY_LIMIT` | No | `5` | Maximum attempts to generate a summary. |
+| `YOUTUBE_YT_DLP_FALLBACK_ENABLED` | No | `false` | Allow one final YouTube audio-based attempt after normal generation retries are exhausted. Requires `ffmpeg`. |
 | `DELIVERY_RETRY_LIMIT` | No | `5` | Maximum attempts to deliver an already generated summary to Discord. |
 | `HTTP_TIMEOUT_SECONDS` | No | `15.0` | Holodex HTTP timeout. |
 | `LOG_FILE_PATH` | No | `logs/vsummary.log` | Daily rotating log-file path. |
 | `LOG_LEVEL` | No | `INFO` | One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
+
+### Optional YouTube audio fallback
+
+To try downloaded audio when NotebookLM cannot generate a YouTube summary, add
+this to `.env` and restart the bot:
+
+```dotenv
+YOUTUBE_YT_DLP_FALLBACK_ENABLED=true
+```
+
+The option is disabled by default. It accepts `true`/`false`, `1`/`0`,
+`yes`/`no`, or `on`/`off`, ignoring case and surrounding whitespace. Missing or
+blank values disable it; other values prevent startup with a configuration error.
+
+Manual `/topics` and `/detail` requests and automatic summaries first use the
+normal YouTube path, including `SOURCE_RETRY_LIMIT` and its backoff. If a
+retryable NotebookLM generation failure exhausts that budget, the job queues
+one final attempt for the next worker pass. That attempt uses the existing
+`yt-dlp` downloader and `ffmpeg` to prepare M4A audio, uploads it to NotebookLM,
+and generates the requested output. The recording must be accessible to
+`yt-dlp`, completed, and within the existing audio upload size limit.
+
+The audio attempt receives no immediate malformed-response retry or additional
+generation retries. Successful output is saved before Discord delivery, so
+delivery failures can still retry without downloading or generating again.
+Existing cached topics, completed details, and the YouTube cache key are retained.
+
+Permanent errors, invalid topic indices, ignored-video cancellations, Holodex
+errors, and Discord delivery errors do not trigger this fallback. Enabling it
+affects active and new jobs; already failed jobs are not requeued. The fallback
+phase survives restarts. Disabling the option before a queued fallback runs
+finishes that exhausted job without downloading audio.
 
 ## 5. Authenticate with NotebookLM
 

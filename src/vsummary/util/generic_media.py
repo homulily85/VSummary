@@ -139,8 +139,8 @@ def _download(url: str, directory: str) -> Path:
 @asynccontextmanager
 async def download_generic_audio(ref: VideoRef) -> AsyncIterator[Path]:
     """Download one public media item into a temporary M4A file."""
-    if ref.source != "yt_dlp":
-        raise ValueError("Generic audio requires a yt-dlp reference.")
+    if ref.source not in {"yt_dlp", "youtube"}:
+        raise ValueError("Generic audio requires a yt-dlp or YouTube reference.")
     with tempfile.TemporaryDirectory(prefix="vsummary-media-") as directory:
         path = await asyncio.to_thread(_download, build_video_url(ref), directory)
         yield path

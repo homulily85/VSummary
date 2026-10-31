@@ -58,10 +58,14 @@ class NotebookLMSummaryService:
         if close is not None:
             await close()
 
-    async def summarize(self, ref: VideoRef) -> list[Topic]:
+    async def summarize(
+        self, ref: VideoRef, *, use_youtube_audio: bool = False
+    ) -> list[Topic]:
         """Generate all topic details and map backend failures to workflow errors."""
         try:
-            details = await get_topic_details_all(self.client, ref)
+            details = await get_topic_details_all(
+                self.client, ref, use_youtube_audio=use_youtube_audio
+            )
         except SourceAddError as exc:
             log_event(
                 logger,
@@ -156,12 +160,17 @@ def _parse_topics(answer: str) -> list[Topic]:
 async def _create_notebook_with_source(
     client: NotebookLMClient,
     ref: VideoRef,
+    *,
+    use_youtube_audio: bool = False,
 ) -> "Notebook":
     """Create a temporary notebook with the video source attached.
 
     The caller is responsible for deleting the returned notebook when it is
     no longer needed. If the source cannot be added, the notebook is deleted
     here before the error is re-raised.
+
+    ``use_youtube_audio`` uploads downloaded audio for YouTube references while
+    retaining the original reference for cache and concurrency coordination.
     """
     video_link = build_video_url(ref)
     notebook = await client.notebooks.create(video_link)
@@ -186,7 +195,7 @@ async def _create_notebook_with_source(
                     wait_timeout=600,
                     title=f"X Space {ref.video_id}",
                 )
-        elif ref.source == "yt_dlp":
+        elif ref.source == "yt_dlp" or (ref.source == "youtube" and use_youtube_audio):
             async with download_generic_audio(ref) as audio:
                 await client.sources.add_file(
                     notebook.id,
@@ -194,7 +203,9 @@ async def _create_notebook_with_source(
                     mime_type="audio/mp4",
                     wait=True,
                     wait_timeout=600,
-                    title="Media",
+                    title=f"YouTube video {ref.video_id}"
+                    if ref.source == "youtube"
+                    else "Media",
                 )
         else:
             await client.sources.add_url(notebook.id, video_link)
@@ -229,6 +240,8 @@ def _topic_prompt(topics: list[Topic], topic_index: int) -> str:
 async def _get_or_create_topic_list(
     client: NotebookLMClient,
     ref: VideoRef,
+    *,
+    use_youtube_audio: bool = False,
 ) -> tuple[Video, "Notebook | None"]:
     """
     Get the topic list for a video, creating it if it doesn't exist.
@@ -251,7 +264,9 @@ async def _get_or_create_topic_list(
         f"Video {video_link} not found in database, creating notebook and adding source..."
     )
 
-    notebook = await _create_notebook_with_source(client, ref)
+    notebook = await _create_notebook_with_source(
+        client, ref, use_youtube_audio=use_youtube_audio
+    )
     prompt = """
        What are the topics mentioned in the video?
        Write every topic name in English, regardless of the language spoken in
@@ -295,10 +310,14 @@ async def _get_or_create_topic_list(
 async def get_topic_list(
     client: NotebookLMClient,
     ref: VideoRef,
+    *,
+    use_youtube_audio: bool = False,
 ):
     """Return cached topics or create them from a temporary NotebookLM notebook."""
     logger.info(f"Getting topics from {ref}")
-    video, notebook = await _get_or_create_topic_list(client, ref)
+    video, notebook = await _get_or_create_topic_list(
+        client, ref, use_youtube_audio=use_youtube_audio
+    )
     if notebook is None:
         return video.topics
     try:
@@ -312,9 +331,13 @@ async def get_topic_details(
     client: NotebookLMClient,
     ref: VideoRef,
     topic_index: int,
+    *,
+    use_youtube_audio: bool = False,
 ):
     """Return one topic's cached or newly generated detail for ``ref``."""
-    video, notebook = await _get_or_create_topic_list(client, ref)
+    video, notebook = await _get_or_create_topic_list(
+        client, ref, use_youtube_audio=use_youtube_audio
+    )
     topics = _validated_topics(video.topics or [])
 
     try:
@@ -329,7 +352,9 @@ async def get_topic_details(
             }
 
         if notebook is None:
-            notebook = await _create_notebook_with_source(client, ref)
+            notebook = await _create_notebook_with_source(
+                client, ref, use_youtube_audio=use_youtube_audio
+            )
         prompt = _topic_prompt(topics, topic_index)
         logger.info("Asking notebook for topic details...")
         response = await client.chat.ask(notebook.id, prompt)
@@ -351,13 +376,19 @@ async def get_topic_details(
 async def get_topic_details_all(
     client: NotebookLMClient,
     ref: VideoRef,
+    *,
+    use_youtube_audio: bool = False,
 ):
     """Return every topic detail, generating and saving only missing details."""
-    video, notebook = await _get_or_create_topic_list(client, ref)
+    video, notebook = await _get_or_create_topic_list(
+        client, ref, use_youtube_audio=use_youtube_audio
+    )
     topics = _validated_topics(video.topics or [])
 
     if notebook is None and any(t.detail is None for t in topics):
-        notebook = await _create_notebook_with_source(client, ref)
+        notebook = await _create_notebook_with_source(
+            client, ref, use_youtube_audio=use_youtube_audio
+        )
 
     results = []
     needs_db_save = False

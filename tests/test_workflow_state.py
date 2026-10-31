@@ -9,7 +9,11 @@ from vsummary.cogs.autosummary.autosummary import Autosummary
 from vsummary.model.channel import AutoSummaryTopicPolicy, JobStatus, SummaryJob
 from vsummary.model.video import Topic
 from vsummary.util.holodex import TransientHolodexError
-from vsummary.util.summarizer import InvalidSummaryResponse
+from vsummary.util.summarizer import (
+    InvalidSummaryResponse,
+    PermanentSummaryError,
+    TransientSummaryError,
+)
 
 
 class FakeJob:
@@ -30,6 +34,175 @@ class FakeJob:
 
     async def save(self):
         self.saved += 1
+
+
+def make_youtube_fallback_job(*, enabled=True, retry_count=1):
+    cog = Autosummary.__new__(Autosummary)
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.settings = SimpleNamespace(
+        source_retry_limit=2,
+        delivery_retry_limit=3,
+        auto_summary_channel_id=123,
+        youtube_yt_dlp_fallback_enabled=enabled,
+    )
+    cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value=None))
+    cog.summary_service = SimpleNamespace(
+        summarize=AsyncMock(side_effect=TransientSummaryError("no transcript"))
+    )
+    cog._save_item = AsyncMock(return_value=True)
+    cog._post_failure = AsyncMock()
+    job = SummaryJob.model_construct(
+        video_id="dQw4w9WgXcQ",
+        channel_id="channel",
+        channel_name="Channel",
+        title="Title",
+        available_at=datetime.now(UTC),
+        next_attempt_at=datetime.now(UTC),
+        retry_count=retry_count,
+    )
+    return cog, job
+
+
+@pytest.mark.asyncio
+async def test_auto_summary_queues_one_persisted_audio_fallback_after_native_retries():
+    cog, job = make_youtube_fallback_job()
+    before = datetime.now(UTC)
+
+    assert not await cog._generate_for_job(job)
+
+    assert job.status is JobStatus.QUEUED
+    assert job.youtube_audio_fallback is True
+    assert job.retry_count == 2
+    assert before <= job.next_attempt_at <= datetime.now(UTC)
+    cog._post_failure.assert_not_awaited()
+    cog._save_item.assert_awaited_once_with(job)
+    assert SummaryJob.model_construct(**job.model_dump()).youtube_audio_fallback is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enabled", "retry_count", "permanent", "expected_status"),
+    [
+        (False, 1, False, JobStatus.FAILED),
+        (True, 0, False, JobStatus.QUEUED),
+        (True, 1, True, JobStatus.FAILED),
+    ],
+)
+async def test_auto_summary_only_schedules_audio_fallback_for_eligible_failures(
+    enabled,
+    retry_count,
+    permanent,
+    expected_status,
+):
+    cog, job = make_youtube_fallback_job(enabled=enabled, retry_count=retry_count)
+    if permanent:
+        cog.summary_service.summarize.side_effect = PermanentSummaryError("invalid")
+
+    assert not await cog._generate_for_job(job)
+
+    assert job.status is expected_status
+    assert job.youtube_audio_fallback is False
+
+
+@pytest.mark.asyncio
+async def test_holodex_failure_does_not_trigger_youtube_audio_fallback():
+    cog, job = make_youtube_fallback_job()
+    cog._refresh_video_topic = AsyncMock(side_effect=TransientHolodexError("offline"))
+
+    assert not await cog._generate_for_job(job)
+
+    assert job.status is JobStatus.FAILED
+    assert job.youtube_audio_fallback is False
+    cog.summary_service.summarize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_audio_fallback_resumes_and_delivery_retries_reuse_its_output():
+    cog, job = make_youtube_fallback_job(retry_count=2)
+    job.youtube_audio_fallback = True
+    job = SummaryJob.model_construct(**job.model_dump())
+    cog.summary_service.summarize = AsyncMock(
+        return_value=[Topic(name="Intro", detail="Details")]
+    )
+    target = SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("discord down")))
+    cog.bot.get_channel = lambda _: target
+
+    await cog._process_pending_video(job)
+
+    assert job.status is JobStatus.READY_TO_DELIVER
+    assert job.summary_details == [Topic(name="Intro", detail="Details")]
+    assert cog.summary_service.summarize.await_args.kwargs == {
+        "use_youtube_audio": True
+    }
+    assert cog.summary_service.summarize.await_args.args[0].source == "youtube"
+    target.send = AsyncMock()
+    await cog._process_pending_video(job)
+    assert job.status is JobStatus.COMPLETED
+    cog.summary_service.summarize.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        InvalidSummaryResponse("bad JSON"),
+        TransientSummaryError("upload failed"),
+        PermanentSummaryError("too large"),
+    ],
+)
+async def test_auto_audio_fallback_failure_is_terminal_without_generation_retries(
+    error,
+):
+    cog, job = make_youtube_fallback_job(retry_count=2)
+    job.youtube_audio_fallback = True
+    cog.summary_service.summarize.side_effect = error
+
+    assert not await cog._generate_for_job(job)
+
+    assert job.status is JobStatus.FAILED
+    assert job.retry_count == 3
+    cog.summary_service.summarize.assert_awaited_once()
+    cog._post_failure.assert_awaited_once_with(job)
+
+
+@pytest.mark.asyncio
+async def test_auto_pending_audio_fallback_stops_when_setting_is_disabled():
+    cog, job = make_youtube_fallback_job(enabled=False, retry_count=2)
+    job.youtube_audio_fallback = True
+
+    assert not await cog._generate_for_job(job)
+
+    assert job.status is JobStatus.FAILED
+    assert job.retry_count == 2
+    cog.summary_service.summarize.assert_not_awaited()
+    cog._post_failure.assert_awaited_once_with(job)
+
+
+@pytest.mark.asyncio
+async def test_auto_terminal_failure_notice_mentions_the_audio_fallback():
+    cog, job = make_youtube_fallback_job(retry_count=3)
+    job.youtube_audio_fallback = True
+    target = SimpleNamespace(send=AsyncMock())
+    cog.bot.get_channel = lambda _: target
+
+    await Autosummary._post_failure(cog, job)
+
+    message = target.send.await_args.args[0]
+    assert "2 normal attempts" in message
+    assert "one yt-dlp audio fallback attempt" in message
+    assert "no transcript could be fetched" not in message
+
+
+@pytest.mark.asyncio
+async def test_enabling_audio_fallback_does_not_revive_failed_auto_jobs():
+    cog, job = make_youtube_fallback_job(retry_count=2)
+    job.status = JobStatus.FAILED
+
+    await cog._process_pending_video(job)
+
+    assert job.status is JobStatus.FAILED
+    cog.summary_service.summarize.assert_not_awaited()
+    cog._save_item.assert_not_awaited()
 
 
 @pytest.mark.asyncio

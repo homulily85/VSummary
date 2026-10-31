@@ -31,6 +31,7 @@ class Settings:
         log_level: Minimum level emitted by application log handlers.
         discord_log_channel_id: Optional channel for warning-and-higher logs.
         discord_send_interval_seconds: Minimum interval between Discord sends.
+        youtube_yt_dlp_fallback_enabled: Allow one audio attempt after YouTube retries.
     """
 
     discord_token: str
@@ -45,6 +46,7 @@ class Settings:
     log_level: str = "INFO"
     discord_log_channel_id: int | None = None
     discord_send_interval_seconds: float = 1.0
+    youtube_yt_dlp_fallback_enabled: bool = False
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, str | None]) -> Settings:
@@ -77,6 +79,10 @@ class Settings:
             log_level=log_level,
             discord_log_channel_id=discord_log_channel,
             discord_send_interval_seconds=discord_send_interval,
+            youtube_yt_dlp_fallback_enabled=_boolean(
+                values.get("YOUTUBE_YT_DLP_FALLBACK_ENABLED"),
+                "YOUTUBE_YT_DLP_FALLBACK_ENABLED",
+            ),
         )
 
 
@@ -105,6 +111,16 @@ def _required(values: Mapping[str, str | None], name: str) -> str:
     if not value or not value.strip():
         raise SettingsError(f"{name} is required")
     return value.strip()
+
+
+def _boolean(value: str | None, name: str) -> bool:
+    """Parse an optional boolean, treating an absent or blank value as false."""
+    normalized = (value or "").strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"", "false", "0", "no", "off"}:
+        return False
+    raise SettingsError(f"{name} must be true/false, 1/0, yes/no, or on/off")
 
 
 def _optional_int(

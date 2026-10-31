@@ -105,6 +105,20 @@ Transient source and Discord delivery failures use exponential delays of 1, 2,
 claimed; only a subsequent failure enters the durable retry queue and consumes
 one source retry. Permanent source failures bypass the source retry queue.
 
+With `YOUTUBE_YT_DLP_FALLBACK_ENABLED=true` (default `false`), a retryable
+NotebookLM generation failure that exhausts normal YouTube retries queues one
+final audio-based attempt. Both automatic and manual jobs persist the
+`youtube_audio_fallback` flag before returning to the queue, so restart recovery
+uses the same phase. Old records default to `false`, and historical failed jobs
+are not requeued. Holodex and delivery errors do not activate the fallback.
+
+The final attempt downloads temporary M4A audio through the existing yt-dlp
+backend and uploads it to NotebookLM. It retains the YouTube identity, per-video
+lock, and cache, reusing completed topics and details. It bypasses the immediate
+malformed-response retry and ends generation on any failure. Delivery retries
+still reuse the persisted output. Disabling the option stops queued audio
+fallbacks without starting another native or audio attempt.
+
 Every outbound Discord message passes through the bot's shared rate limiter.
 Long output is split into non-empty chunks no longer than Discord's
 2,000-character limit, and delivery checkpoints each successful chunk.

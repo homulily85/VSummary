@@ -11,9 +11,191 @@ from vsummary.cogs.manualsummary.manualsummary import ManualSummary
 from vsummary.model.channel import JobStatus, ManualSummaryJob, ManualSummaryOperation
 from vsummary.model.video import Topic
 from vsummary.util.generic_media import GenericMediaUnavailableError
-from vsummary.util.summarizer import InvalidSummaryResponse
+from vsummary.util.summarizer import InvalidSummaryResponse, PermanentSummaryError
 from vsummary.util.twitch import TwitchAudioUnavailableError
 from vsummary.util.video import parse_video_source
+
+
+def make_manual_fallback_job(
+    *,
+    enabled=True,
+    source="youtube",
+    retry_count=1,
+    operation=ManualSummaryOperation.TOPICS,
+):
+    cog = ManualSummary.__new__(ManualSummary)
+    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.settings = SimpleNamespace(
+        source_retry_limit=2, youtube_yt_dlp_fallback_enabled=enabled
+    )
+    cog.worker_id = "worker"
+    cog._save = AsyncMock(return_value=True)
+    job = ManualSummaryJob.model_construct(
+        source=source,
+        video_id="dQw4w9WgXcQ",
+        title="Title",
+        channel_name="Channel",
+        operation=operation,
+        topic_index=0,
+        channel_id=123,
+        requester_id=456,
+        next_attempt_at=datetime.now(UTC),
+        retry_count=retry_count,
+    )
+    return cog, job
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", list(ManualSummaryOperation))
+async def test_manual_summary_queues_audio_fallback_after_native_retries(
+    monkeypatch, operation
+):
+    cog, job = make_manual_fallback_job(operation=operation)
+    name = {
+        ManualSummaryOperation.TOPICS: "get_topic_list",
+        ManualSummaryOperation.DETAIL_ONE: "get_topic_details",
+        ManualSummaryOperation.DETAIL_ALL: "get_topic_details_all",
+    }[operation]
+    summary = AsyncMock(side_effect=RuntimeError("no transcript"))
+    monkeypatch.setattr(manualsummary_module, name, summary)
+    before = datetime.now(UTC)
+
+    await cog._generate(job)
+
+    assert job.status is JobStatus.QUEUED
+    assert job.youtube_audio_fallback is True
+    assert job.retry_count == 2
+    assert before <= job.next_attempt_at <= datetime.now(UTC)
+    assert (
+        ManualSummaryJob.model_construct(**job.model_dump()).youtube_audio_fallback
+        is True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enabled", "source", "retry_count", "error"),
+    [
+        (False, "youtube", 1, RuntimeError("no transcript")),
+        (True, "youtube", 0, RuntimeError("no transcript")),
+        (True, "twitch", 1, RuntimeError("unavailable")),
+        (True, "youtube", 1, PermanentSummaryError("invalid")),
+        (True, "youtube", 1, IndexError("invalid topic index")),
+    ],
+)
+async def test_manual_summary_excludes_ineligible_audio_fallbacks(
+    monkeypatch, enabled, source, retry_count, error
+):
+    cog, job = make_manual_fallback_job(
+        enabled=enabled, source=source, retry_count=retry_count
+    )
+    monkeypatch.setattr(
+        manualsummary_module, "get_topic_list", AsyncMock(side_effect=error)
+    )
+
+    await cog._generate(job)
+
+    assert job.youtube_audio_fallback is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "name", "result"),
+    [
+        (ManualSummaryOperation.TOPICS, "get_topic_list", [Topic(name="Intro")]),
+        (
+            ManualSummaryOperation.DETAIL_ONE,
+            "get_topic_details",
+            {"topic_name": "Intro", "detail": "Details"},
+        ),
+        (
+            ManualSummaryOperation.DETAIL_ALL,
+            "get_topic_details_all",
+            [{"topic_name": "Intro", "detail": "Details"}],
+        ),
+    ],
+)
+async def test_manual_audio_fallback_resumes_each_operation(
+    monkeypatch, operation, name, result
+):
+    cog, job = make_manual_fallback_job(operation=operation, retry_count=2)
+    job.youtube_audio_fallback = True
+    job = ManualSummaryJob.model_construct(**job.model_dump())
+    summary = AsyncMock(return_value=result)
+    monkeypatch.setattr(manualsummary_module, name, summary)
+
+    await cog._generate(job)
+
+    assert job.status is JobStatus.DELIVERING
+    assert summary.await_args.kwargs == {"use_youtube_audio": True}
+    assert summary.await_args.args[1].source == "youtube"
+    assert job.title == "Title"
+    assert job.channel_name == "Channel"
+    assert job.delivery_chunks
+    cog._save.assert_awaited_once_with(job)
+
+    saved_chunks = list(job.delivery_chunks)
+    target = SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("discord down")))
+    cog.bot.get_channel = lambda _: target
+    await cog._deliver(job)
+    assert job.status is JobStatus.READY_TO_DELIVER
+    target.send = AsyncMock()
+    job.status = JobStatus.DELIVERING  # The next lease claim selects delivery.
+    await cog._process(job)
+    assert job.status is JobStatus.COMPLETED
+    assert job.delivery_chunks == saved_chunks
+    summary.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", list(ManualSummaryOperation))
+async def test_manual_audio_fallback_does_not_retry_invalid_responses(
+    monkeypatch, operation
+):
+    cog, job = make_manual_fallback_job(operation=operation, retry_count=2)
+    job.youtube_audio_fallback = True
+    name = {
+        ManualSummaryOperation.TOPICS: "get_topic_list",
+        ManualSummaryOperation.DETAIL_ONE: "get_topic_details",
+        ManualSummaryOperation.DETAIL_ALL: "get_topic_details_all",
+    }[operation]
+    summary = AsyncMock(side_effect=InvalidSummaryResponse("bad JSON"))
+    monkeypatch.setattr(manualsummary_module, name, summary)
+
+    await cog._generate(job)
+
+    assert job.status is JobStatus.FAILED
+    assert job.retry_count == 3
+    summary.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_manual_pending_audio_fallback_stops_when_setting_is_disabled(
+    monkeypatch,
+):
+    cog, job = make_manual_fallback_job(enabled=False, retry_count=2)
+    job.youtube_audio_fallback = True
+    summary = AsyncMock()
+    monkeypatch.setattr(manualsummary_module, "get_topic_list", summary)
+
+    await cog._generate(job)
+
+    assert job.status is JobStatus.FAILED
+    assert job.retry_count == 2
+    summary.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_enabling_audio_fallback_does_not_revive_failed_manual_jobs():
+    cog, job = make_manual_fallback_job(retry_count=2)
+    job.status = JobStatus.FAILED
+    cog._generate = AsyncMock()
+
+    await cog._process(job)
+
+    assert job.status is JobStatus.FAILED
+    cog._generate.assert_not_awaited()
+    cog._save.assert_not_awaited()
 
 
 @pytest.mark.asyncio

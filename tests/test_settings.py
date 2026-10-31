@@ -22,6 +22,7 @@ def test_env_example_lists_every_runtime_configuration_variable():
         "DISCORD_SEND_INTERVAL_SECONDS",
         "POLL_INTERVAL_MINUTES",
         "SOURCE_RETRY_LIMIT",
+        "YOUTUBE_YT_DLP_FALLBACK_ENABLED",
         "DELIVERY_RETRY_LIMIT",
         "HTTP_TIMEOUT_SECONDS",
         "LOG_FILE_PATH",
@@ -56,6 +57,48 @@ def test_settings_loads_and_validates_runtime_configuration():
     assert settings.log_level == "DEBUG"
     assert settings.discord_log_channel_id == 456
     assert settings.discord_send_interval_seconds == 0.5
+
+
+@pytest.mark.parametrize(
+    ("value", "enabled"),
+    [
+        (None, False),
+        ("", False),
+        ("  ", False),
+        ("true", True),
+        (" TRUE ", True),
+        ("1", True),
+        ("yes", True),
+        ("On", True),
+        ("false", False),
+        (" FALSE ", False),
+        ("0", False),
+        ("no", False),
+        ("Off", False),
+    ],
+)
+def test_youtube_audio_fallback_boolean_configuration(value, enabled):
+    values = {"DISCORD_TOKEN": "token", "MONGODB_URI": "mongodb://localhost"}
+    if value is not None:
+        values["YOUTUBE_YT_DLP_FALLBACK_ENABLED"] = value
+    assert Settings.from_mapping(values).youtube_yt_dlp_fallback_enabled is enabled
+    assert (
+        Settings(
+            discord_token="token", mongodb_uri="mongodb://localhost"
+        ).youtube_yt_dlp_fallback_enabled
+        is False
+    )
+
+
+def test_youtube_audio_fallback_rejects_invalid_configuration():
+    with pytest.raises(SettingsError, match="YOUTUBE_YT_DLP_FALLBACK_ENABLED"):
+        Settings.from_mapping(
+            {
+                "DISCORD_TOKEN": "token",
+                "MONGODB_URI": "mongodb://localhost",
+                "YOUTUBE_YT_DLP_FALLBACK_ENABLED": "sometimes",
+            }
+        )
 
 
 def test_settings_uses_logging_defaults_and_rejects_invalid_logging_values():

@@ -198,6 +198,18 @@ class ManualSummary(commands.Cog):
 
     async def _generate(self, job):
         """Build and persist delivery chunks, retrying source failures durably."""
+        use_youtube_audio = job.source == "youtube" and getattr(
+            job, "youtube_audio_fallback", False
+        )
+        if use_youtube_audio and not getattr(
+            self.settings, "youtube_yt_dlp_fallback_enabled", False
+        ):
+            job.status = JobStatus.FAILED
+            job.last_error = "YouTube audio fallback is disabled."
+            self._release(job)
+            await self._save(job)
+            return
+        generation_options = {"use_youtube_audio": True} if use_youtube_audio else {}
         ref = VideoRef(
             source=job.source,
             video_id=job.video_id,
@@ -213,7 +225,9 @@ class ManualSummary(commands.Cog):
         async def generate_delivery_chunks():
             """Execute the requested NotebookLM operation without mutating job state."""
             if job.operation == ManualSummaryOperation.TOPICS:
-                topics = await get_topic_list(self.bot.notebook_client, ref)
+                topics = await get_topic_list(
+                    self.bot.notebook_client, ref, **generation_options
+                )
                 return split_message(
                     "\n".join(
                         f"{i + 1}: {topic.name}" for i, topic in enumerate(topics)
@@ -224,10 +238,13 @@ class ManualSummary(commands.Cog):
                     self.bot.notebook_client,
                     ref,
                     job.topic_index or 0,
+                    **generation_options,
                 )
                 return split_message(self._format_detail(detail, metadata))
 
-            details = await get_topic_details_all(self.bot.notebook_client, ref)
+            details = await get_topic_details_all(
+                self.bot.notebook_client, ref, **generation_options
+            )
             return [
                 chunk
                 for index, detail in enumerate(details)
@@ -238,8 +255,10 @@ class ManualSummary(commands.Cog):
 
         try:
             async with get_video_work_coordinator(self.bot).for_video(ref):
-                job.delivery_chunks = await retry_invalid_summary_response(
-                    generate_delivery_chunks
+                job.delivery_chunks = (
+                    await generate_delivery_chunks()
+                    if use_youtube_audio
+                    else await retry_invalid_summary_response(generate_delivery_chunks)
                 )
         except IndexError:
             job.delivery_chunks = [f"Invalid topic index: {(job.topic_index or 0) + 1}"]
@@ -256,13 +275,13 @@ class ManualSummary(commands.Cog):
             GenericMediaError,
             TransientSummaryError,
         ) as exc:
-            await self._fail(job, exc)
+            await self._fail(job, exc, allow_youtube_fallback=True)
             return
         except PermanentSummaryError as exc:
             await self._fail(job, exc, permanent=True)
             return
         except Exception as exc:  # noqa: BLE001 - source backends vary
-            await self._fail(job, exc)
+            await self._fail(job, exc, allow_youtube_fallback=True)
             return
         job.status = JobStatus.DELIVERING
         job.delivery_chunk_index = 0
@@ -300,7 +319,7 @@ class ManualSummary(commands.Cog):
         except Exception as exc:  # noqa: BLE001 - Discord channel delivery varies
             await self._delivery_failure(job, exc)
 
-    async def _fail(self, job, exc, *, permanent=False):
+    async def _fail(self, job, exc, *, permanent=False, allow_youtube_fallback=False):
         """Record a source failure and either fail or requeue the job with backoff."""
         logger.error(
             "Manual summary failed: %s",
@@ -315,9 +334,24 @@ class ManualSummary(commands.Cog):
         )
         job.retry_count += 1
         job.last_error = str(exc)
-        terminal = permanent or job.retry_count >= getattr(
-            self.settings, "source_retry_limit", MAX_RETRIES
-        )
+        retry_limit = getattr(self.settings, "source_retry_limit", MAX_RETRIES)
+        fallback_active = getattr(job, "youtube_audio_fallback", False)
+        if (
+            allow_youtube_fallback
+            and not permanent
+            and not fallback_active
+            and job.source == "youtube"
+            and job.retry_count >= retry_limit
+            and getattr(self.settings, "youtube_yt_dlp_fallback_enabled", False)
+        ):
+            job.youtube_audio_fallback = True
+            job.status = JobStatus.QUEUED
+            job.next_attempt_at = datetime.now(UTC)
+            self._release(job)
+            await self._save(job)
+            logger.info("Queued final YouTube audio fallback for %s.", job.video_id)
+            return
+        terminal = permanent or fallback_active or job.retry_count >= retry_limit
         if terminal:
             if job.source == "yt_dlp":
                 job.failure_notice = True

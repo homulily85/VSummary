@@ -103,6 +103,7 @@ class SummaryJob(Document):
     The payload is saved before Discord delivery so transient send failures do
     not regenerate NotebookLM output. ``claimed_*`` fields implement a worker
     lease and ``delivery_chunk_index`` checkpoints partial delivery.
+    ``youtube_audio_fallback`` selects the final audio attempt after native retries.
     """
 
     video_id: str
@@ -111,6 +112,7 @@ class SummaryJob(Document):
     title: str
     available_at: datetime
     retry_count: int = 0
+    youtube_audio_fallback: bool = False
     delivery_retry_count: int = 0
     next_attempt_at: datetime
     status: JobStatus = JobStatus.QUEUED
@@ -156,6 +158,7 @@ class ManualSummaryJob(Document):
 
     ``operation`` and ``topic_index`` describe the requested content, while
     retry, lease, and delivery fields mirror :class:`SummaryJob` semantics.
+    ``youtube_audio_fallback`` preserves the final audio phase across restarts.
     """
 
     source: str
@@ -170,6 +173,7 @@ class ManualSummaryJob(Document):
     next_attempt_at: datetime
     status: JobStatus = JobStatus.QUEUED
     retry_count: int = 0
+    youtube_audio_fallback: bool = False
     delivery_retry_count: int = 0
     delivery_chunks: list[str] = Field(default_factory=list)
     delivery_chunk_index: int = 0

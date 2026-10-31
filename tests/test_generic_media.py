@@ -4,6 +4,7 @@ import pytest
 import yt_dlp
 
 from vsummary.util import generic_media
+from vsummary.util.video import VideoRef
 
 
 def _downloader(monkeypatch, info):
@@ -82,3 +83,30 @@ def test_dns_resolving_to_private_network_is_rejected(monkeypatch):
 
     with pytest.raises(generic_media.GenericMediaUnavailableError, match="Private"):
         generic_media._ensure_public_host("https://media.example.org/item")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("consumer_fails", [False, True])
+async def test_youtube_audio_download_uses_canonical_url_and_cleans_up(
+    monkeypatch, consumer_fails
+):
+    def download(url, directory):
+        from pathlib import Path
+
+        assert url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        path = Path(directory) / "audio.m4a"
+        path.write_bytes(b"audio")
+        return path
+
+    monkeypatch.setattr(generic_media, "_download", download)
+    ref = VideoRef(source="youtube", video_id="dQw4w9WgXcQ")
+    prepared = []
+    try:
+        async with generic_media.download_generic_audio(ref) as audio:
+            prepared.append(audio)
+            assert audio.read_bytes() == b"audio"
+            if consumer_fails:
+                raise RuntimeError("upload failed")
+    except RuntimeError:
+        assert consumer_fails
+    assert not prepared[0].parent.exists()

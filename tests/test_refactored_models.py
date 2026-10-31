@@ -42,6 +42,15 @@ def test_manual_summary_jobs_can_store_video_metadata():
     assert fields["channel_name"].default is None
 
 
+@pytest.mark.parametrize("model", [SummaryJob, ManualSummaryJob])
+def test_youtube_audio_fallback_phase_is_backward_compatible_and_persistent(model):
+    job = model.model_construct()
+    assert job.youtube_audio_fallback is False
+    job.youtube_audio_fallback = True
+    restored = model.model_construct(**job.model_dump())
+    assert restored.youtube_audio_fallback is True
+
+
 def test_refactored_models_reject_naive_job_datetimes():
     with pytest.raises(ValidationError):
         SummaryJob(
