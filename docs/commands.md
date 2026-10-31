@@ -9,6 +9,7 @@ autocomplete and view Discord's parameter descriptions.
 | --- | --- | --- |
 | `/topics` | `video` (required) | Queues a topic-list request and posts the plain-text result to the invoking channel. |
 | `/detail` | `video` (required), `topic_index` (optional) | Generates detailed content. Omitting `topic_index` generates every topic; providing one generates only that topic. The request is always queued and the result is posted to the invoking channel. |
+| `/deletecache` | `video` (required) | Deletes one video's cached topics and details across all languages, including legacy entries. Replies are visible only to the requester. |
 | `/queue` | None | Lists active auto-summary and manual-summary jobs in processing order. |
 | `/ping` | None | Confirms that the bot is responding and displays gateway latency. |
 
@@ -36,6 +37,7 @@ Examples:
 /detail video:https://www.twitch.tv/videos/123456789
 /topics video:https://x.com/i/spaces/1OwxWwQOPlNxQ
 /topics video:https://vimeo.com/123456789
+/deletecache video:dQw4w9WgXcQ
 ```
 
 `topic_index` is one-based. For an invalid index, the bot posts an error after
@@ -50,6 +52,28 @@ brief topics to several paragraphs for substantial topics. Prompts request a
 maximum of 450 words per topic. Cached topics and details are reused separately
 for each language. After changing the language and restarting the bot, request
 `/topics` again before choosing a topic index, since the lists can differ.
+
+### Deleting cached summaries
+
+Use `/deletecache video:<URL-or-ID>` to clear every cached language for one
+video, including older entries without a language tag. The reply reports the
+number of cache records deleted, or that no cached summary was found. Each
+record contains a topic list and its generated details; the count is not the
+number of topics. Command access follows the existing topic-policy commands
+and can be managed through Discord server integration permissions.
+
+YouTube IDs/URLs, Twitch VOD URLs, direct X Space URLs, and other media URLs use
+the same normalized identities as summary requests. Direct references do not
+require the recording to remain available. X post URLs require metadata
+resolution to find a Space; if resolution fails, provide the direct Space URL.
+An X post that explicitly contains no Space uses the generic media URL cache.
+
+The command waits for local generation of that video to finish before deleting
+its cache. Queued jobs, saved delivery output and checkpoints, and posted
+Discord messages remain unchanged. Saved output can still be delivered, and
+pending generation can recreate the cache. The command itself does not generate
+a summary; a later `/topics` or `/detail` request creates fresh output when its
+language cache is absent.
 
 ## Automatic-summary channel tracking
 

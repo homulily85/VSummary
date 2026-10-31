@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from notebooklm import SourceAddError
+from pymongo.errors import OperationFailure
 
 import vsummary.cogs.autosummary.autosummary as autosummary_module
 import vsummary.cogs.manualsummary.manualsummary as manualsummary_module
@@ -27,7 +28,7 @@ from vsummary.model.channel import (
     ManualSummaryOperation,
     PendingVideoStatus,
 )
-from vsummary.model.video import Topic
+from vsummary.model.video import Topic, VideoSummary
 from vsummary.settings import RuntimeConfig, Settings
 from vsummary.util.holodex import (
     ChannelNotFoundError,
@@ -1048,6 +1049,287 @@ async def test_summarization_cleanup_failure_does_not_mask_source_error(monkeypa
     with pytest.raises(SourceAddError):
         await summarizer_util._create_notebook_with_source(client, VIDEO_REF)
     assert FakeVideoRecord.records == []
+
+
+@pytest.fixture
+def fake_cache_collection(monkeypatch):
+    async def delete_many(query):
+        before = len(FakeVideoRecord.records)
+        FakeVideoRecord.records[:] = [
+            record
+            for record in FakeVideoRecord.records
+            if not all(getattr(record, key) == value for key, value in query.items())
+        ]
+        return SimpleNamespace(deleted_count=before - len(FakeVideoRecord.records))
+
+    collection = SimpleNamespace(delete_many=AsyncMock(side_effect=delete_many))
+    monkeypatch.setattr(VideoSummary, "get_pymongo_collection", lambda: collection)
+    return collection
+
+
+def test_deletecache_command_has_one_required_argument_and_existing_access_model():
+    command = Summarizer.deletecache
+    assert command.name == "deletecache"
+    assert [
+        (parameter.name, parameter.required) for parameter in command.parameters
+    ] == [("video", True)]
+    assert (
+        command.default_permissions == Autosummary.addignoredtopic.default_permissions
+    )
+    assert command.checks == Autosummary.addignoredtopic.checks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "video",
+    [
+        VIDEO_ID,
+        f"https://youtu.be/{VIDEO_ID}?t=42",
+        f"https://www.youtube.com/watch?v={VIDEO_ID}&t=42",
+        "https://m.twitch.tv/videos/123456789",
+        "https://mobile.twitter.com/i/spaces/1OwxWwQOPlNxQ?foo=bar",
+        "https://VIMEO.com:443/123456789#fragment",
+    ],
+)
+async def test_deletecache_normalizes_direct_references_without_availability_checks(
+    monkeypatch, video
+):
+    delete = AsyncMock(return_value=3)
+    resolver = AsyncMock(
+        side_effect=AssertionError("direct references must not need remote resolution")
+    )
+    monkeypatch.setattr(
+        summarizer_module, "delete_cached_summary", delete, raising=False
+    )
+    monkeypatch.setattr(summarizer_module, "resolve_x_space", resolver)
+    bot = SimpleNamespace(notebook_client=FakeNotebookClient(), get_cog=AsyncMock())
+    interaction = FakeInteraction()
+
+    await Summarizer.deletecache.callback(Summarizer(bot), interaction, video)
+
+    delete.assert_awaited_once_with(parse_video_source(video))
+    resolver.assert_not_awaited()
+    bot.get_cog.assert_not_called()
+    assert bot.notebook_client.created == bot.notebook_client.prompts == []
+    assert interaction.response.deferred == [{"thinking": True, "ephemeral": True}]
+    assert interaction.followup.messages == [
+        (
+            "Deleted 3 cached summary records for this video across all languages.",
+            {"ephemeral": True},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [0, 1, 4])
+async def test_deletecache_reports_count_or_missing_cache_through_rate_limiter(
+    monkeypatch, count
+):
+    monkeypatch.setattr(
+        summarizer_module,
+        "delete_cached_summary",
+        AsyncMock(return_value=count),
+        raising=False,
+    )
+
+    async def send(sender, content, **kwargs):
+        return await sender(content, **kwargs)
+
+    limiter = SimpleNamespace(send=AsyncMock(side_effect=send))
+    bot = SimpleNamespace(message_rate_limiter=limiter)
+    interaction = FakeInteraction()
+    await Summarizer.deletecache.callback(Summarizer(bot), interaction, VIDEO_ID)
+
+    message = (
+        "No cached summary found for this video."
+        if count == 0
+        else f"Deleted {count} cached summary {'record' if count == 1 else 'records'} for this video across all languages."
+    )
+    limiter.send.assert_awaited_once_with(
+        interaction.followup.send, message, ephemeral=True
+    )
+    assert interaction.followup.messages == [(message, {"ephemeral": True})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("contains_space", [False, True])
+async def test_deletecache_resolves_x_posts_using_existing_media_fallback(
+    monkeypatch, contains_space
+):
+    value = "https://x.com/example/status/1234567890123456789"
+    space_ref = VideoRef(source="x_space", video_id="1OwxWwQOPlNxQ")
+    resolver = AsyncMock(return_value=space_ref)
+    if not contains_space:
+        from vsummary.util.x_space import XSpaceResolutionError
+
+        resolver.side_effect = XSpaceResolutionError(
+            "This X post does not contain an X Space."
+        )
+    delete = AsyncMock(return_value=1)
+    monkeypatch.setattr(summarizer_module, "resolve_x_space", resolver)
+    monkeypatch.setattr(
+        summarizer_module, "delete_cached_summary", delete, raising=False
+    )
+
+    await Summarizer.deletecache.callback(
+        Summarizer(SimpleNamespace()), FakeInteraction(), value
+    )
+
+    resolver.assert_awaited_once_with(value)
+    delete.assert_awaited_once_with(
+        space_ref if contains_space else parse_video_source(value)
+    )
+
+
+@pytest.mark.asyncio
+async def test_deletecache_requests_direct_space_url_when_post_cannot_be_resolved(
+    monkeypatch,
+):
+    from vsummary.util.x_space import XSpaceResolutionError
+
+    resolver = AsyncMock(
+        side_effect=XSpaceResolutionError("This X Space is unavailable.")
+    )
+    delete = AsyncMock()
+    monkeypatch.setattr(summarizer_module, "resolve_x_space", resolver)
+    monkeypatch.setattr(
+        summarizer_module, "delete_cached_summary", delete, raising=False
+    )
+    interaction = FakeInteraction()
+
+    await Summarizer.deletecache.callback(
+        Summarizer(SimpleNamespace()),
+        interaction,
+        "https://x.com/example/status/1234567890123456789",
+    )
+
+    delete.assert_not_awaited()
+    assert "direct X Space URL" in interaction.followup.messages[0][0]
+    assert interaction.followup.messages[0][1] == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "video",
+    [
+        "",
+        "not-a-url",
+        "ftp://example.com/video",
+        "http://127.0.0.1/video",
+        "https://[invalid",
+    ],
+)
+async def test_deletecache_rejects_invalid_references_without_deleting(
+    monkeypatch, video
+):
+    delete = AsyncMock()
+    monkeypatch.setattr(
+        summarizer_module, "delete_cached_summary", delete, raising=False
+    )
+    interaction = FakeInteraction()
+
+    await Summarizer.deletecache.callback(
+        Summarizer(SimpleNamespace()), interaction, video
+    )
+
+    delete.assert_not_awaited()
+    assert len(interaction.followup.messages) == 1
+    assert interaction.followup.messages[0][1] == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+async def test_deletecache_reports_database_failure_and_releases_lock(
+    fake_cache_collection, caplog
+):
+    fake_cache_collection.delete_many.side_effect = OperationFailure(
+        "database unavailable"
+    )
+    bot = SimpleNamespace(video_work=VideoWorkCoordinator())
+    interaction = FakeInteraction()
+
+    await Summarizer.deletecache.callback(Summarizer(bot), interaction, VIDEO_ID)
+
+    assert interaction.followup.messages == [
+        ("Could not delete the cached summary. Please try again.", {"ephemeral": True})
+    ]
+    assert "Could not delete cached summary" in caplog.text
+    assert bot.video_work.tracked_video_count == 0
+    async with asyncio.timeout(0.1):
+        async with bot.video_work.for_video(VIDEO_REF):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_deletecache_waits_for_generation_and_preserves_jobs_and_delivery(
+    monkeypatch, fake_cache_collection
+):
+    client = FakeNotebookClient(
+        answers=['[{"name": "Concert"}]'] * 2 + ["Concert details"]
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    ask = client.chat.ask
+
+    async def blocked_ask(notebook_id, prompt):
+        started.set()
+        await release.wait()
+        return await ask(notebook_id, prompt)
+
+    monkeypatch.setattr(client.chat, "ask", blocked_ask)
+    target = FakeChannelTarget()
+    bot = SimpleNamespace(
+        notebook_client=client,
+        video_work=VideoWorkCoordinator(),
+        get_channel=lambda _: target,
+    )
+    automatic = make_autosummary(bot)
+    automatic.settings = RuntimeConfig(auto_summary_channel_id=123)
+    automatic.summary_service = NotebookLMSummaryService(client)
+    automatic._save_item = AsyncMock(return_value=True)
+    job = FakePendingRecord(
+        video_id=VIDEO_ID,
+        channel_id="UC1",
+        channel_name="Channel",
+        title="Video",
+        available_at=datetime.now(UTC),
+        next_attempt_at=datetime.now(UTC),
+        status=JobStatus.QUEUED,
+    )
+    queued_job = make_manual_detail_job()
+    queued_before = queued_job.model_dump()
+    interaction = FakeInteraction()
+    generation = asyncio.create_task(automatic._generate_for_job(job))
+    await started.wait()
+    deletion = asyncio.create_task(
+        Summarizer.deletecache.callback(Summarizer(bot), interaction, VIDEO_ID)
+    )
+    await asyncio.sleep(0)
+
+    assert interaction.response.deferred == [{"thinking": True, "ephemeral": True}]
+    fake_cache_collection.delete_many.assert_not_awaited()
+    release.set()
+    assert await generation
+    await deletion
+
+    fake_cache_collection.delete_many.assert_awaited_once_with(
+        {"source": "youtube", "video_id": VIDEO_ID}
+    )
+    assert FakeVideoRecord.records == []
+    assert job.status is JobStatus.READY_TO_DELIVER
+    assert job.summary_details == [Topic(name="Concert", detail="Concert details")]
+    assert queued_job.model_dump() == queued_before
+    assert target.messages == []
+    assert len(client.prompts) == 3
+    assert bot.video_work.tracked_video_count == 0
+
+    assert await automatic._deliver_for_job(job)
+    assert job.status is JobStatus.COMPLETED
+    assert "Concert details" in "".join(target.messages)
+    assert len(client.prompts) == 3
+    fresh_client = FakeNotebookClient(answers=['[{"name": "Fresh concert topic"}]'] * 2)
+    topics = await summarizer_util.get_topic_list(fresh_client, VIDEO_REF)
+    assert topics == [Topic(name="Fresh concert topic")]
+    assert len(fresh_client.prompts) == 2
 
 
 @pytest.mark.asyncio

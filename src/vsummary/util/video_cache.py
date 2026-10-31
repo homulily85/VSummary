@@ -1,13 +1,26 @@
-"""Startup index migration for language-specific video summary caches."""
+"""Cached summary deletion and startup index migration."""
 
 import logging
 
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import OperationFailure
 
-from vsummary.model.video import VIDEO_LANGUAGE_CACHE_INDEX
+from vsummary.model.video import VIDEO_LANGUAGE_CACHE_INDEX, VideoSummary
+from vsummary.util.video import VideoRef
 
 logger = logging.getLogger(__name__)
+
+
+async def delete_cached_summary(ref: VideoRef) -> int:
+    """Delete all language and legacy caches for one exact source/video identity.
+
+    Callers coordinate with generation using the shared per-video lock. Durable
+    jobs and their saved delivery payloads are stored separately and retained.
+    """
+    result = await VideoSummary.get_pymongo_collection().delete_many(
+        {"source": ref.source, "video_id": ref.video_id}
+    )
+    return result.deleted_count
 
 
 async def migrate_video_cache_indexes(collection: AsyncCollection) -> None:

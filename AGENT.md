@@ -139,6 +139,13 @@ Notes for agents:
   preserve unrelated indexes and abort startup if migration fails.
   `SummaryJob` has a unique `(channel_id, video_id)` index plus status and `next_attempt_at`
   indexes. Do not bypass these constraints with check-then-insert logic.
+- `/deletecache video:<URL-or-ID>` clears all language caches and untagged legacy
+  records for exactly one `(source, video_id)`. Keep database deletion in
+  `util/video_cache.py` and acquire the bot's shared per-video coordinator in the
+  command before deleting. Preserve durable jobs, delivery payloads/checkpoints,
+  and Discord messages. Parse direct references offline; only X post URLs need
+  existing Space resolution and generic-media fallback. Replies are ephemeral
+  and use the shared Discord rate limiter; access follows topic-policy commands.
 - `SummaryJob` uses `JobStatus` values `queued`, `generating`,
   `ready_to_deliver`, `delivering`, `completed`, and `failed`. Generation
   output is persisted before Discord delivery so delivery retries do not
@@ -285,7 +292,7 @@ Key points an agent should know before touching `util/summarizer.py`:
 - `bot.py` owns the `Bot` instance, intents configuration, dependency
   injection, cog/extension loading, and shutdown. `main.py` owns MongoDB and
   the NotebookLM context manager.
-- Keep the user-facing slash-command names stable: `/topics`, `/detail`,
+- Keep the user-facing slash-command names stable: `/topics`, `/detail`, `/deletecache`,
   `/addchannel`, `/removechannel`, and `/listchannels`. Python method and
   model names may be made more descriptive without changing those command
   names.
