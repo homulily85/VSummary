@@ -229,12 +229,17 @@ async def _create_notebook_with_source(
     return notebook
 
 
-def _topic_prompt(topics: list[Topic], topic_index: int) -> str:
+def _topic_prompt(
+    topics: list[Topic],
+    topic_index: int,
+    *,
+    output_language: str = DEFAULT_CONFIG.output_language,
+) -> str:
     """Build the prompt that asks for a detailed single-topic explanation."""
     return (
         f"This video has a list of topics in order: "
         f"{', '.join(t.name for t in topics)}. "
-        f"Write a detailed, coherent explanation in English of only the topic "
+        f"Write a detailed, coherent explanation in {output_language.strip()} of only the topic "
         f"'{topics[topic_index].name}'. "
         f"Start after the previous topic "
         f"'{_topic_boundaries(topics, topic_index)['prev']}' ends and stop before "
@@ -255,8 +260,13 @@ def _topic_prompt(topics: list[Topic], topic_index: int) -> str:
     )
 
 
-def _topic_list_prompt(candidates: Sequence[Topic] | None = None) -> str:
+def _topic_list_prompt(
+    candidates: Sequence[Topic] | None = None,
+    *,
+    output_language: str = DEFAULT_CONFIG.output_language,
+) -> str:
     """Build extraction or coverage-review instructions with the same output rules."""
+    output_language = output_language.strip()
     requirements = (
         "Include every substantive discussion in chronological order, including "
         "brief discussions, secondary topics, audience questions, announcements, "
@@ -265,9 +275,9 @@ def _topic_list_prompt(candidates: Sequence[Topic] | None = None) -> str:
         "when they contain new information, using specific names. Exclude filler "
         "and incidental mentions. Do not target a fixed topic count. "
         "Use only information supported by the video and do not invent topics. "
-        "Write every topic name in English, regardless of the language spoken in "
-        "the video or used in its transcript. Translate non-English descriptive "
-        "topic names into English. Keep each name within 100 characters. "
+        f"Write every topic name in {output_language}, regardless of the language spoken in "
+        "the video or used in its transcript. Translate descriptive topic names "
+        f"from other languages into {output_language}. Keep each name within 100 characters. "
         'Return a JSON list using this structure: [{"name": "topic name"}]. '
         "Return JSON only, do not include any other text in your response."
     )
@@ -301,10 +311,14 @@ async def _get_or_create_topic_list(
              it (or None when the topics were already cached and no notebook was needed)
     """
     video_link = build_video_url(ref)
+    output_language = runtime_config(config).output_language.strip()
+    language_key = output_language.casefold()
 
     logger.info(f"Checking if video {video_link} is already in database...")
     video = await Video.find_one(
-        Video.source == ref.source, Video.video_id == ref.video_id
+        Video.source == ref.source,
+        Video.video_id == ref.video_id,
+        Video.output_language == language_key,
     )
     if video and video.topics:
         video.topics = _validated_topics(video.topics)
@@ -319,11 +333,15 @@ async def _get_or_create_topic_list(
     )
     try:
         logger.info(f"Asking notebook {notebook.id} for topics...")
-        response = await client.chat.ask(notebook.id, _topic_list_prompt())
+        response = await client.chat.ask(
+            notebook.id, _topic_list_prompt(output_language=output_language)
+        )
         candidates = _parse_topics(response.answer)
 
         logger.info(f"Reviewing topic coverage in notebook {notebook.id}...")
-        response = await client.chat.ask(notebook.id, _topic_list_prompt(candidates))
+        response = await client.chat.ask(
+            notebook.id, _topic_list_prompt(candidates, output_language=output_language)
+        )
         topics_objects = _parse_topics(response.answer)
 
         logger.info("Saving reviewed topics to database...")
@@ -333,6 +351,7 @@ async def _get_or_create_topic_list(
             video = Video(
                 source=ref.source,
                 video_id=ref.video_id,
+                output_language=language_key,
                 topics=topics_objects,
             )
 
@@ -394,7 +413,9 @@ async def get_topic_details(
             notebook = await _create_notebook_with_source(
                 client, ref, use_youtube_audio=use_youtube_audio, config=config
             )
-        prompt = _topic_prompt(topics, topic_index)
+        prompt = _topic_prompt(
+            topics, topic_index, output_language=runtime_config(config).output_language
+        )
         logger.info("Asking notebook for topic details...")
         response = await client.chat.ask(notebook.id, prompt)
 
@@ -437,7 +458,9 @@ async def get_topic_details_all(
             if topic.detail:
                 results.append({"topic_name": topic.name, "detail": topic.detail})
             else:
-                prompt = _topic_prompt(topics, i)
+                prompt = _topic_prompt(
+                    topics, i, output_language=runtime_config(config).output_language
+                )
                 logger.info(f"Asking notebook for details on topic: '{topic.name}'...")
 
                 response = await client.chat.ask(notebook.id, prompt)

@@ -24,9 +24,9 @@ Discord command or Holodex poll
 ```
 
 `main.py` owns application lifetime: it loads validated settings, configures
-logging, opens MongoDB, registers Beanie documents, opens the authenticated
-NotebookLM client, and starts `Bot`. `Bot` loads the ping, manual-summary,
-slash-command, and auto-summary cogs. It also holds shared services that cogs
+logging, opens MongoDB, registers Beanie documents, migrates the video cache
+index, opens the authenticated NotebookLM client, and starts `Bot`. `Bot` loads
+the ping, manual-summary, slash-command, and auto-summary cogs. It also holds shared services that cogs
 use: the NotebookLM client, settings, per-video coordinator, and Discord send
 rate limiter.
 
@@ -72,17 +72,29 @@ without cached topics, NotebookLM first extracts substantive discussions in
 chronological order, including brief discussions and secondary topics. A second
 request in the same temporary notebook checks the candidate list against the
 entire source for omissions, overly broad entries, and merged recurring
-discussions. Both passes require English names and the existing topic JSON
-format. This adds one coverage-review request per newly generated topic list.
+discussions. Both passes require names in `summary.output_language` (English by
+default) and the existing topic JSON format. This adds one coverage-review
+request per newly generated topic list.
 
 Only the validated, reviewed list is cached and used for detail generation. A
 failure in either pass leaves no draft in the cache and follows the existing
 generation retry policy. The final YouTube audio fallback also uses both passes,
-with no additional generation attempt. Existing cached topics and completed
-details are reused unchanged.
+with no additional generation attempt. Topics and details are cached separately
+for each trimmed, case-folded language name; aliases are not combined. Existing
+untagged records are retained but excluded from all language-specific lookups.
+Startup ensures the new unique three-field cache index exists before removing
+only the obsolete two-field unique index. Other indexes are preserved, and a
+migration failure prevents workers from starting. Stop older bot processes
+before deploying this change.
 
-Detail prompts match length and paragraph count to the source material: brief
-topics can use a short paragraph, while substantial discussions can use several
+Language changes take effect after a restart. Pending generation uses the
+current setting, reusing that language's cache while leaving other languages
+intact. Jobs with already saved output resume delivery unchanged. No language
+is pinned to a job, and completed or failed jobs are not requeued.
+
+Detail prompts use the same configured language and match length and paragraph
+count to the source material: brief topics can use a short paragraph, while
+substantial discussions can use several
 paragraphs, up to 450 words per topic. There is no minimum word count or fixed
 paragraph count. These are generation instructions; responses are not
 automatically truncated, and coverage and length compliance depend on NotebookLM.
@@ -95,7 +107,7 @@ automatically truncated, and coverage and length compliance depend on NotebookLM
 | `AutoSummaryTopicPolicy` | Effective-dated global topic decisions. | The latest decision before a video's publication controls whether it is queued. |
 | `PendingVideo` / `SummaryJob` | Automatic generation and delivery jobs. | Unique `(channel_id, video_id)`; all scheduling and lease timestamps are UTC. |
 | `ManualSummaryJob` | User-requested topic/detail jobs. | Separate source, operation, requester, retry, lease, and delivery checkpoint data. |
-| `Video` / `VideoSummary` | Cached NotebookLM topics and details. | Unique `(source, video_id)` cache key. |
+| `Video` / `VideoSummary` | Cached NotebookLM topics and details. | Unique `(source, video_id, output_language)` cache key; untagged legacy records are preserved. |
 
 Automatic jobs normally move through:
 

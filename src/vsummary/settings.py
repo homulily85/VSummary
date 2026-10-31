@@ -35,6 +35,7 @@ class RuntimeConfig:
     retry_multiplier: float = 2.0
     invalid_summary_retries: int = 1
     transcript_delay_seconds: float = 7200.0
+    output_language: str = "English"
     youtube_yt_dlp_fallback_enabled: bool = False
     max_audio_mib: float = 190.0
     audio_bitrate_kbps: int = 64
@@ -95,6 +96,7 @@ _CONFIG_SECTIONS = {
         "invalid_response_retries": "invalid_summary_retries",
     },
     "autosummary": {"transcript_delay_seconds": "transcript_delay_seconds"},
+    "summary": {"output_language": "output_language"},
     "youtube": {"yt_dlp_fallback_enabled": "youtube_yt_dlp_fallback_enabled"},
     "media": {
         "max_audio_mib": "max_audio_mib",

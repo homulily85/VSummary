@@ -42,11 +42,14 @@ Examples:
 the worker processes the job. `/topics` does not provide an interactive topic
 picker; use `/detail` with `topic_index` to request a specific topic.
 
-New topic lists are generated in English and checked against the source in a
-second NotebookLM request for missing or overly broad topics before being cached.
+New topic lists use `summary.output_language` from `config.toml` (English by
+default) and are checked against the source in a second NotebookLM request for
+missing or overly broad topics before being cached.
 Detail summaries adapt to the amount of discussion, from a short paragraph for
 brief topics to several paragraphs for substantial topics. Prompts request a
-maximum of 450 words per topic. Existing cached topics and details are reused.
+maximum of 450 words per topic. Cached topics and details are reused separately
+for each language. After changing the language and restarting the bot, request
+`/topics` again before choosing a topic index, since the lists can differ.
 
 ## Automatic-summary channel tracking
 

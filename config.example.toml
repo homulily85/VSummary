@@ -19,6 +19,9 @@ invalid_response_retries = 1
 [autosummary]
 transcript_delay_seconds = 7200
 
+[summary]
+output_language = "English"
+
 [youtube]
 yt_dlp_fallback_enabled = false
 

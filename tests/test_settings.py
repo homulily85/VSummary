@@ -1,3 +1,4 @@
+import json
 import tomllib
 from pathlib import Path
 
@@ -26,6 +27,31 @@ def test_config_example_matches_builtin_defaults():
     )
     assert "database" not in parsed
     assert "holodex" not in parsed
+    assert parsed["summary"]["output_language"] == "English"
+
+
+def test_output_language_defaults_to_english():
+    assert settings_module.RuntimeConfig().output_language == "English"
+    assert Settings.from_mapping(SECRETS).output_language == "English"
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        ("Vietnamese", "Vietnamese"),
+        (" Japanese ", "Japanese"),
+        ("Traditional Chinese", "Traditional Chinese"),
+        ("日本語", "日本語"),
+    ],
+)
+def test_output_language_loads_from_toml(tmp_path, language, expected):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[summary]\noutput_language = " + json.dumps(language), encoding="utf-8"
+    )
+    settings = load_settings(SECRETS, config_path=path, load_dotenv_file=False)
+    assert settings.output_language == expected
+    assert settings_module.runtime_config(settings).output_language == expected
 
 
 def test_settings_loads_typed_toml_options_and_keeps_database_fixed():
@@ -105,6 +131,8 @@ def test_nonsecret_environment_values_are_ignored():
         "DISCORD_LOG_CHANNEL_ID": "456",
         "YOUTUBE_YT_DLP_FALLBACK_ENABLED": "true",
         "TWITCH_MAX_DURATION_SECONDS": "1",
+        "OUTPUT_LANGUAGE": "Japanese",
+        "SUMMARY_OUTPUT_LANGUAGE": "Vietnamese",
     }
     assert Settings.from_mapping(values) == Settings.from_mapping(SECRETS)
     assert settings_module.configured_auto_summary_channel_id() is None
@@ -198,6 +226,14 @@ def test_invalid_or_unsupported_config_is_rejected(tmp_path, text):
         ("logging", "discord_min_level", "bad"),
         ("logging", "discord_queue_size", 0),
         ("logging", "path", ""),
+        ("summary", "output_language", ""),
+        ("summary", "output_language", " \t "),
+        ("summary", "output_language", "Japanese\x00"),
+        ("summary", "output_language", False),
+        ("summary", "output_language", 3),
+        ("summary", "output_language", []),
+        ("summary", "output_language", {}),
+        ("summary", "output_language", None),
     ],
 )
 def test_invalid_typed_config_values_are_rejected(section, key, value):

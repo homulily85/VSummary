@@ -132,8 +132,12 @@ Notes for agents:
 - `FollowedChannel` and `SummaryJob` preserve the existing `Channel` and
   `PendingVideo` collection names. `Channel`, `PendingVideo`, and `Video` are
   compatibility models/aliases; prefer the current names in new code.
-- `VideoSummary` has a unique `(source, video_id)` index. `SummaryJob` has a
-  unique `(channel_id, video_id)` index plus status and `next_attempt_at`
+- `VideoSummary` has a unique `(source, video_id, output_language)` index. Its
+  language key is stripped and case-folded; legacy untagged records remain
+  separate and are never selected for new generation. Startup ensures the new
+  index exists before removing only the old unique `(source, video_id)` index;
+  preserve unrelated indexes and abort startup if migration fails.
+  `SummaryJob` has a unique `(channel_id, video_id)` index plus status and `next_attempt_at`
   indexes. Do not bypass these constraints with check-then-insert logic.
 - `SummaryJob` uses `JobStatus` values `queued`, `generating`,
   `ready_to_deliver`, `delivering`, `completed`, and `failed`. Generation
@@ -217,6 +221,12 @@ locked virtual environment is used.
   Database name (`VSummary`) and Holodex settings remain fixed in code. Old
   non-secret environment options are ignored. Preserve injected configuration
   through workers, retries, all audio downloaders, NotebookLM uploads, and logging.
+- `summary.output_language` defaults to `"English"` and controls generated topic
+  names and details through both topic-list passes and detail prompts. Use the
+  injected setting, not a fixed language or an environment override. Pending
+  generation follows current configuration after a restart; saved delivery
+  payloads retain their original text. Keep per-video coordination shared across
+  languages and do not add a language field to durable jobs.
 - NotebookLM access via `notebooklm-py` requires **Google session
   cookies**, not an API key. In practice this means an authenticated
   session/profile must be set up out-of-band via the `notebooklm` CLI
@@ -250,8 +260,9 @@ Key points an agent should know before touching `util/summarizer.py`:
   1. Create a temporary notebook with `client.notebooks.create(...)`.
   2. Attach the normalized video URL with
      `client.sources.add_url(notebook_id, url)`.
-  3. Ask `client.chat.ask(...)` for JSON topic names and then topic details;
-     parse and persist them as `Topic` values in `VideoSummary`.
+  3. Ask `client.chat.ask(...)` for JSON topic names, review coverage in a second
+     request, then generate topic details in the configured output language.
+     Persist only validated, reviewed topics in the matching language cache.
   4. Persist autosummary topic details in `SummaryJob` before posting them to
      Discord. Respect Discord's 2,000-character message limit when posting.
 - `RPCError` is the library's exception type for API failures (auth

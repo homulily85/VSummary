@@ -121,6 +121,7 @@ without brackets or quotation marks.
 | `retries.multiplier` | `2` | Multiplier for each subsequent retry delay; at least 1. |
 | `retries.invalid_response_retries` | `1` | Immediate malformed-response retries per native generation attempt. |
 | `autosummary.transcript_delay_seconds` | `7200` | Delay after stream completion before first generation. |
+| `summary.output_language` | `"English"` | Language for generated topic names and details. |
 | `youtube.yt_dlp_fallback_enabled` | `false` | One final audio attempt after native retries. Requires `ffmpeg`. |
 | `media.max_audio_mib` | `190` | Maximum prepared audio size in MiB. |
 | `media.bitrate_kbps` | `64` | Converted M4A bitrate. |
@@ -140,6 +141,39 @@ durable retries after the initial failure. Logging levels accept `DEBUG`,
 `INFO`, `WARNING`, `ERROR`, or `CRITICAL`, ignoring case. Booleans use TOML
 `true`/`false`, without quotes. Shared media settings apply to Twitch, archived
 X Spaces, generic media, and the YouTube audio fallback.
+
+### Summary output language and cache upgrade
+
+To generate topics and details in another language, add this to `config.toml`
+and restart the bot:
+
+```toml
+[summary]
+output_language = "Vietnamese"
+```
+
+The default is `"English"`. Use a nonblank language name, such as `"Japanese"`
+or `"Traditional Chinese"`. Surrounding whitespace is removed. Language names
+are user-supplied labels rather than a fixed registry; aliases such as `"en"`
+and `"English"` have separate caches. Language selection is available only in
+TOML and controls generated content; Discord commands, status text, and logs
+keep their existing language.
+
+Each video has a separate topic/detail cache per language. Cache keys ignore
+case, so `"Japanese"` and `"JAPANESE"` reuse the same output. Switching back to
+a previous language reuses its completed topics and details. Pending generation
+uses the current setting after a restart, including generation retries and the
+YouTube audio fallback. Already saved job output is delivered unchanged, even
+if the setting changes before delivery succeeds. Completed and failed jobs are
+not requeued by a language change.
+
+Stop older bot processes before upgrading to language-specific caching. Startup
+creates the unique `(source, video_id, output_language)` cache index before
+removing the obsolete unique `(source, video_id)` index, preserving other
+indexes. This transition can run repeatedly and must succeed before workers
+start. Existing cache records without a language tag are preserved but not
+reused, including for English; the first request creates a new language-tagged
+cache without guessing the language of older content.
 
 ### Migrating an existing `.env`
 

@@ -20,6 +20,7 @@ from vsummary.model.channel import (
 )
 from vsummary.model.video import VideoSummary
 from vsummary.settings import Settings, SettingsError, load_settings
+from vsummary.util.video_cache import migrate_video_cache_indexes
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ async def async_main(settings: Settings | None = None):
                 VideoSummary,
             ],
         )
+        await migrate_video_cache_indexes(VideoSummary.get_pymongo_collection())
         logger.info("Connected to MongoDB!")
 
         async with NotebookLMClient.from_storage() as notebook_client:

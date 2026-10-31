@@ -20,6 +20,7 @@ def test_refactored_models_use_non_optional_topics_and_explicit_states():
     )
 
     assert summary.topics == []
+    assert summary.output_language is None
     assert job.status is JobStatus.QUEUED
     assert job.delivery_chunks == []
     assert job.delivery_chunk_index == 0
@@ -33,6 +34,20 @@ def test_refactored_models_use_non_optional_topics_and_explicit_states():
         "failed",
         "cancelled",
     ]
+
+
+def test_video_summary_cache_has_a_unique_key_per_language():
+    summary = VideoSummary.model_construct(
+        source="youtube", video_id="video", output_language="japanese"
+    )
+    assert summary.output_language == "japanese"
+    index = VideoSummary.Settings.indexes[0].document
+    assert list(index["key"].items()) == [
+        ("source", 1),
+        ("video_id", 1),
+        ("output_language", 1),
+    ]
+    assert index["unique"] is True
 
 
 def test_manual_summary_jobs_can_store_video_metadata():

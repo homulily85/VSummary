@@ -47,6 +47,9 @@ VIDEO_REF = VideoRef(source="youtube", id=VIDEO_ID)
 
 
 class QueryField:
+    def __init__(self, name=None):
+        self.name = name
+
     def __eq__(self, other):
         return (self, other)
 
@@ -135,19 +138,21 @@ class FakeNotebookClient:
 
 
 class FakeVideoRecord:
-    source = QueryField()
-    video_id = QueryField()
+    source = QueryField("source")
+    video_id = QueryField("video_id")
+    output_language = QueryField("output_language")
     records: ClassVar[list] = []
 
-    def __init__(self, source, video_id, topics=None):
+    def __init__(self, source, video_id, topics=None, *, output_language=None):
         self.source = source
         self.video_id = video_id
         self.topics = topics
+        self.output_language = output_language
 
     @classmethod
     async def find_one(cls, *args):
         for record in cls.records:
-            if record.source == VIDEO_REF.source and record.video_id == VIDEO_REF.id:
+            if all(getattr(record, field.name) == value for field, value in args):
                 return record
         return None
 
@@ -302,7 +307,10 @@ async def test_topic_list_requests_english_names_and_caches_them_in_order():
             "regardless of the language spoken in the video or used in its transcript"
             in prompt
         )
-        assert "Translate non-English descriptive topic names into English" in prompt
+        assert (
+            "Translate descriptive topic names from other languages into English"
+            in prompt
+        )
         assert "100 characters" in prompt
         assert '[{"name": "topic name"}]' in prompt
         assert "JSON only" in prompt
@@ -452,7 +460,9 @@ async def test_workers_preserve_retry_policy_for_topic_review(
 
     monkeypatch.setattr(summarizer_util, "download_generic_audio", fake_download)
     bot = SimpleNamespace(notebook_client=client, video_work=VideoWorkCoordinator())
-    config = RuntimeConfig(youtube_yt_dlp_fallback_enabled=True)
+    config = RuntimeConfig(
+        youtube_yt_dlp_fallback_enabled=True, output_language="Japanese"
+    )
     if operation == "automatic":
         cog = make_autosummary(bot)
         cog.summary_service = NotebookLMSummaryService(client, config=config)
@@ -497,6 +507,7 @@ async def test_workers_preserve_retry_policy_for_topic_review(
         assert [topic.name for topic in FakeVideoRecord.records[0].topics] == [
             "Audience questions"
         ]
+        assert FakeVideoRecord.records[0].output_language == "japanese"
         if operation == "automatic":
             assert job.summary_details == [
                 Topic(
@@ -520,6 +531,9 @@ async def test_workers_preserve_retry_policy_for_topic_review(
     notebook_ids = [notebook.id for notebook in client.created]
     assert client.deleted == notebook_ids
     assert len(notebook_ids) == (1 if outcome == "audio_failure" else 2)
+    for _, prompt in client.prompts:
+        assert "in Japanese" in prompt
+        assert "in English" not in prompt
     if outcome == "audio_failure":
         assert downloads == cleaned == [VIDEO_REF]
         client.sources.add_file.assert_awaited_once()
@@ -529,21 +543,197 @@ async def test_workers_preserve_retry_policy_for_topic_review(
 
 
 @pytest.mark.asyncio
-async def test_topic_list_preserves_existing_cached_non_english_names():
+async def test_topic_list_reuses_cached_names_in_the_selected_language():
     topics = [Topic(name="今後の予定", detail="The speaker discusses future plans.")]
     video = FakeVideoRecord(
-        source=VIDEO_REF.source, video_id=VIDEO_REF.video_id, topics=topics
+        source=VIDEO_REF.source,
+        video_id=VIDEO_REF.video_id,
+        topics=topics,
+        output_language="japanese",
     )
     await video.save()
     client = FakeNotebookClient()
 
-    cached_topics = await summarizer_util.get_topic_list(client, VIDEO_REF)
+    cached_topics = await summarizer_util.get_topic_list(
+        client, VIDEO_REF, config=RuntimeConfig(output_language="Japanese")
+    )
 
     assert cached_topics == topics
     assert cached_topics[0].name == "今後の予定"
     assert cached_topics[0].detail == "The speaker discusses future plans."
     assert client.created == []
     assert client.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_topic_cache_separates_languages_and_preserves_untagged_legacy_data():
+    legacy = FakeVideoRecord(
+        source="youtube",
+        video_id=VIDEO_ID,
+        topics=[Topic(name="Legacy topic", detail="Legacy details")],
+    )
+    await legacy.save()
+    records = {}
+    for language, name, detail in [
+        ("English", "Concert", "The speaker discusses the concert."),
+        ("Japanese", "コンサート", "話者はコンサートについて話します。"),
+    ]:
+        topics_json = json.dumps([{"name": name}])
+        client = FakeNotebookClient(answers=[topics_json, topics_json, detail])
+        result = await NotebookLMSummaryService(
+            client, config=RuntimeConfig(output_language=language)
+        ).summarize(VIDEO_REF)
+        assert result == [Topic(name=name, detail=detail)]
+        assert len(client.prompts) == 3
+        for _, prompt in client.prompts:
+            assert f"in {language}" in prompt
+        records[language] = result
+    assert [record.output_language for record in FakeVideoRecord.records] == [
+        None,
+        "english",
+        "japanese",
+    ]
+    for language, key in [(" eNgLiSh ", "English"), ("JAPANESE", "Japanese")]:
+        cached_client = FakeNotebookClient()
+        config = RuntimeConfig(output_language=language)
+        assert (
+            await NotebookLMSummaryService(cached_client, config=config).summarize(
+                VIDEO_REF
+            )
+            == records[key]
+        )
+        assert [
+            topic.name
+            for topic in await summarizer_util.get_topic_list(
+                cached_client, VIDEO_REF, config=config
+            )
+        ] == [records[key][0].name]
+        assert await summarizer_util.get_topic_details(
+            cached_client, VIDEO_REF, 0, config=config
+        ) == {"topic_name": records[key][0].name, "detail": records[key][0].detail}
+        assert cached_client.prompts == cached_client.created == []
+    assert legacy.output_language is None
+    assert legacy.topics == [Topic(name="Legacy topic", detail="Legacy details")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("all_details", [False, True])
+async def test_missing_details_use_only_the_selected_language_cache(all_details):
+    english = FakeVideoRecord(
+        source="youtube",
+        video_id=VIDEO_ID,
+        output_language="english",
+        topics=[
+            Topic(name="Concert", detail="English details"),
+            Topic(name="Questions"),
+        ],
+    )
+    japanese = FakeVideoRecord(
+        source="youtube",
+        video_id=VIDEO_ID,
+        output_language="japanese",
+        topics=[Topic(name="コンサート", detail="保存された詳細"), Topic(name="質問")],
+    )
+    await english.save()
+    await japanese.save()
+    client = FakeNotebookClient(answers=["新しい詳細"])
+    config = RuntimeConfig(output_language="Japanese")
+    if all_details:
+        result = await summarizer_util.get_topic_details_all(
+            client, VIDEO_REF, config=config
+        )
+        assert result == [
+            {"topic_name": "コンサート", "detail": "保存された詳細"},
+            {"topic_name": "質問", "detail": "新しい詳細"},
+        ]
+    else:
+        assert await summarizer_util.get_topic_details(
+            client, VIDEO_REF, 1, config=config
+        ) == {"topic_name": "質問", "detail": "新しい詳細"}
+    assert english.topics == [
+        Topic(name="Concert", detail="English details"),
+        Topic(name="Questions"),
+    ]
+    assert japanese.topics[1].detail == "新しい詳細"
+    assert len(client.prompts) == 1
+    assert "explanation in Japanese" in client.prompts[0][1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_current_language_applies_to_generation_but_not_saved_delivery(automatic):
+    english = FakeVideoRecord(
+        source="youtube",
+        video_id=VIDEO_ID,
+        output_language="english",
+        topics=[Topic(name="Concert", detail="English details")],
+    )
+    await english.save()
+    topics = json.dumps([{"name": "コンサート"}])
+    client = FakeNotebookClient(answers=[topics, topics, "日本語の詳細"])
+    target = SimpleNamespace(
+        send=AsyncMock(side_effect=RuntimeError("Discord offline"))
+    )
+
+    def make_worker(language):
+        bot = SimpleNamespace(
+            notebook_client=client,
+            video_work=VideoWorkCoordinator(),
+            get_channel=lambda _: target,
+        )
+        config = RuntimeConfig(output_language=language, auto_summary_channel_id=123)
+        if automatic:
+            cog = make_autosummary(bot)
+            cog.summary_service = NotebookLMSummaryService(client, config=config)
+            cog._save_item = AsyncMock(return_value=True)
+        else:
+            cog = make_manual_summary(bot)
+        cog.settings = config
+        return cog
+
+    if automatic:
+        job = FakePendingRecord(
+            video_id=VIDEO_ID,
+            channel_id="UC1",
+            channel_name="Channel",
+            title="Video",
+            available_at=datetime.now(UTC),
+            next_attempt_at=datetime.now(UTC),
+            status=JobStatus.QUEUED,
+        )
+    else:
+        job = make_manual_detail_job()
+        job.title = "Video"
+        job.channel_name = "Channel"
+
+    # The job already exists when a restart changes the configured language.
+    cog = make_worker("Japanese")
+    if automatic:
+        await cog._generate_for_job(job)
+        await cog._deliver_for_job(job)
+    else:
+        await cog._generate(job)
+        await cog._deliver(job)
+    assert job.status is JobStatus.READY_TO_DELIVER
+    assert "日本語の詳細" in "\n".join(job.delivery_chunks)
+    saved_chunks = list(job.delivery_chunks)
+    assert len(client.prompts) == 3
+
+    # A later restart changes the setting again before a delivery retry.
+    target.send = AsyncMock()
+    restarted_worker = make_worker("English")
+    if automatic:
+        await restarted_worker._process_pending_video(job)
+    else:
+        job.status = JobStatus.DELIVERING
+        await restarted_worker._process(job)
+    assert job.status is JobStatus.COMPLETED
+    assert job.delivery_chunks == saved_chunks
+    assert len(client.prompts) == 3
+    assert "日本語の詳細" in "".join(
+        call.args[0] for call in target.send.await_args_list
+    )
+    assert english.topics == [Topic(name="Concert", detail="English details")]
 
 
 @pytest.mark.asyncio
@@ -702,6 +892,7 @@ async def test_youtube_audio_fallback_uploads_audio_and_keeps_the_youtube_cache(
     tmp_path,
     operation,
 ):
+    config = RuntimeConfig(output_language="Japanese")
     answers = ['[{"name": "Intro"}]'] * 2
     if operation != "topics":
         answers.append("Details")
@@ -713,8 +904,9 @@ async def test_youtube_audio_fallback_uploads_audio_and_keeps_the_youtube_cache(
     cleaned = []
 
     @asynccontextmanager
-    async def fake_download(ref):
+    async def fake_download(ref, *, config):
         assert ref == VIDEO_REF
+        assert config.output_language == "Japanese"
         downloads.append(ref)
         try:
             yield audio
@@ -724,21 +916,21 @@ async def test_youtube_audio_fallback_uploads_audio_and_keeps_the_youtube_cache(
     monkeypatch.setattr(summarizer_util, "download_generic_audio", fake_download)
     if operation == "topics":
         result = await summarizer_util.get_topic_list(
-            client, VIDEO_REF, use_youtube_audio=True
+            client, VIDEO_REF, use_youtube_audio=True, config=config
         )
         assert result == [Topic(name="Intro")]
     elif operation == "detail":
         result = await summarizer_util.get_topic_details(
-            client, VIDEO_REF, 0, use_youtube_audio=True
+            client, VIDEO_REF, 0, use_youtube_audio=True, config=config
         )
         assert result == {"topic_name": "Intro", "detail": "Details"}
     elif operation == "all":
         result = await summarizer_util.get_topic_details_all(
-            client, VIDEO_REF, use_youtube_audio=True
+            client, VIDEO_REF, use_youtube_audio=True, config=config
         )
         assert result == [{"topic_name": "Intro", "detail": "Details"}]
     else:
-        result = await NotebookLMSummaryService(client).summarize(
+        result = await NotebookLMSummaryService(client, config=config).summarize(
             VIDEO_REF, use_youtube_audio=True
         )
         assert result == [Topic(name="Intro", detail="Details")]
@@ -755,10 +947,11 @@ async def test_youtube_audio_fallback_uploads_audio_and_keeps_the_youtube_cache(
     assert client.added_urls == []
     assert client.deleted == ["notebook-1"]
     assert len(client.prompts) == (2 if operation == "topics" else 3)
+    assert all("in Japanese" in prompt for _, prompt in client.prompts)
     assert len(FakeVideoRecord.records) == 1
     assert FakeVideoRecord.records[0].source == "youtube"
     assert FakeVideoRecord.records[0].video_id == VIDEO_ID
-    assert await summarizer_util.get_topic_list(client, VIDEO_REF) == [
+    assert await summarizer_util.get_topic_list(client, VIDEO_REF, config=config) == [
         Topic(name="Intro", detail=None if operation == "topics" else "Details")
     ]
     assert len(downloads) == 1
@@ -778,6 +971,7 @@ async def test_youtube_audio_fallback_preserves_cached_topics_and_completed_deta
             Topic(name="Intro", detail="Cached details"),
             Topic(name="Outro"),
         ],
+        output_language="english",
     )
     await video.save()
     client = FakeNotebookClient(answers=["New details"], source_error=True)
@@ -1131,6 +1325,21 @@ def test_topic_prompt_requests_detailed_english_prose_without_lists():
     assert "'Introduction' ends" in prompt
     assert "'Conclusion' begins" in prompt
     assert "do not invent missing details" in prompt
+
+
+@pytest.mark.parametrize("language", ["Vietnamese", "Japanese", "Traditional Chinese"])
+def test_detail_prompt_uses_selected_language_and_keeps_length_and_boundaries(language):
+    prompt = summarizer_util._topic_prompt(
+        [Topic(name="First"), Topic(name="Middle"), Topic(name="Last")],
+        1,
+        output_language=language,
+    )
+    assert f"explanation in {language}" in prompt
+    assert "in English" not in prompt
+    assert "450 words" in prompt
+    assert "no minimum word count or fixed paragraph count" in prompt
+    assert "'First' ends" in prompt
+    assert "'Last' begins" in prompt
 
 
 @pytest.mark.asyncio
@@ -1999,3 +2208,68 @@ async def test_startup_configures_timezone_aware_mongodb_datetimes(monkeypatch):
         main_module.AutoSummaryTopicPolicy
         in (main_module.init_beanie.await_args.kwargs["document_models"])
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("migration_fails", [False, True])
+async def test_startup_migrates_language_cache_before_external_workers(
+    monkeypatch, migration_fails
+):
+    events = []
+    collection = object()
+    database = object()
+
+    class FakeMongoClient:
+        close = AsyncMock()
+
+        def __getitem__(self, name):
+            return database
+
+    mongo_client = FakeMongoClient()
+
+    async def initialize(**kwargs):
+        assert kwargs["database"] is database
+        assert not kwargs.get("allow_index_dropping", False)
+        events.append("initialize")
+
+    async def migrate(value):
+        assert value is collection
+        events.append("migrate")
+        if migration_fails:
+            raise RuntimeError("index migration failed")
+
+    @asynccontextmanager
+    async def notebook_session():
+        events.append("notebook")
+        yield object()
+
+    bot = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
+    monkeypatch.setattr(main_module, "load_dotenv", lambda: None)
+    monkeypatch.setattr(main_module, "configure_logging", lambda _: None)
+    monkeypatch.setattr(
+        main_module, "AsyncMongoClient", lambda *args, **kwargs: mongo_client
+    )
+    monkeypatch.setattr(main_module, "init_beanie", initialize)
+    monkeypatch.setattr(
+        main_module, "migrate_video_cache_indexes", migrate, raising=False
+    )
+    monkeypatch.setattr(
+        main_module.VideoSummary, "get_pymongo_collection", lambda: collection
+    )
+    monkeypatch.setattr(
+        main_module, "NotebookLMClient", SimpleNamespace(from_storage=notebook_session)
+    )
+    monkeypatch.setattr(main_module, "Bot", lambda **kwargs: bot)
+    settings = Settings(discord_token="token", mongodb_uri="mongodb://localhost")
+
+    if migration_fails:
+        with pytest.raises(RuntimeError, match="index migration failed"):
+            await main_module.async_main(settings)
+        assert events == ["initialize", "migrate"]
+        bot.start.assert_not_awaited()
+    else:
+        await main_module.async_main(settings)
+        assert events == ["initialize", "migrate", "notebook"]
+        bot.start.assert_awaited_once_with("token")
+        bot.close.assert_awaited_once()
+    mongo_client.close.assert_awaited_once()
