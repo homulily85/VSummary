@@ -42,6 +42,12 @@ Examples:
 the worker processes the job. `/topics` does not provide an interactive topic
 picker; use `/detail` with `topic_index` to request a specific topic.
 
+New topic lists are generated in English and checked against the source in a
+second NotebookLM request for missing or overly broad topics before being cached.
+Detail summaries adapt to the amount of discussion, from a short paragraph for
+brief topics to several paragraphs for substantial topics. Prompts request a
+maximum of 450 words per topic. Existing cached topics and details are reused.
+
 ## Automatic-summary channel tracking
 
 | Command | Parameters | Description |

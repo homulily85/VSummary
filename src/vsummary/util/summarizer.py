@@ -239,7 +239,11 @@ def _topic_prompt(topics: list[Topic], topic_index: int) -> str:
         f"Start after the previous topic "
         f"'{_topic_boundaries(topics, topic_index)['prev']}' ends and stop before "
         f"the next topic '{_topic_boundaries(topics, topic_index)['next']}' begins. "
-        f"Write 150-200 words in 2-3 connected prose paragraphs. Explain the flow "
+        f"Match the length and paragraph count to the amount of substantive source "
+        f"material, with no minimum word count or fixed paragraph count. For brief "
+        f"topics, a short paragraph may be enough; give longer or more complex "
+        f"discussions additional words and paragraphs as needed. Write no more than "
+        f"450 words for this topic. Avoid padding and repetition. Explain the flow "
         f"of the discussion and preserve the important claims, reasoning, examples, "
         f"events, distinctions, and conclusions that the speaker makes when they are "
         f"present in the video. Integrate related subtopics into a readable narrative; "
@@ -248,6 +252,37 @@ def _topic_prompt(topics: list[Topic], topic_index: int) -> str:
         f"a title, or meta-commentary. Do not discuss adjacent topics. Use only "
         f"information supported by the video and do not invent missing details. "
         f"Return only the prose summary."
+    )
+
+
+def _topic_list_prompt(candidates: Sequence[Topic] | None = None) -> str:
+    """Build extraction or coverage-review instructions with the same output rules."""
+    requirements = (
+        "Include every substantive discussion in chronological order, including "
+        "brief discussions, secondary topics, audience questions, announcements, "
+        "and anecdotes. Separate distinct discussions rather than combining them "
+        "under broad categories. Represent later returns to a topic separately "
+        "when they contain new information, using specific names. Exclude filler "
+        "and incidental mentions. Do not target a fixed topic count. "
+        "Use only information supported by the video and do not invent topics. "
+        "Write every topic name in English, regardless of the language spoken in "
+        "the video or used in its transcript. Translate non-English descriptive "
+        "topic names into English. Keep each name within 100 characters. "
+        'Return a JSON list using this structure: [{"name": "topic name"}]. '
+        "Return JSON only, do not include any other text in your response."
+    )
+    if candidates is None:
+        return "Create a comprehensive topic list for this video. " + requirements
+    return (
+        "Compare the candidate topic list against the entire source from beginning "
+        "to end. Identify omitted discussions, overly broad entries, and incorrectly "
+        "merged recurring discussions. Return the complete corrected list. "
+        "Retain supported discussions from the candidate list and add only "
+        "source-supported omissions. Correct grouping and chronological order "
+        "where needed. "
+        + requirements
+        + "\nCandidate topic list:\n"
+        + json.dumps([{"name": topic.name} for topic in candidates], ensure_ascii=False)
     )
 
 
@@ -282,29 +317,16 @@ async def _get_or_create_topic_list(
     notebook = await _create_notebook_with_source(
         client, ref, use_youtube_audio=use_youtube_audio, config=config
     )
-    prompt = """
-       What are the topics mentioned in the video?
-       Write every topic name in English, regardless of the language spoken in
-       the video or used in its transcript. Translate non-English descriptive
-       topic names into English.
-       Return a json containing all topics mentioned in the order they appear in the video using 
-       following structure:
-       [
-           {
-                "name": "topic name"
-           }
-       ]
-       
-       Return json only, do not include any other text in your response.
-       """
-
     try:
         logger.info(f"Asking notebook {notebook.id} for topics...")
-        response = await client.chat.ask(notebook.id, prompt)
+        response = await client.chat.ask(notebook.id, _topic_list_prompt())
+        candidates = _parse_topics(response.answer)
 
-        logger.info("Parsing response and saving topics to database...")
+        logger.info(f"Reviewing topic coverage in notebook {notebook.id}...")
+        response = await client.chat.ask(notebook.id, _topic_list_prompt(candidates))
         topics_objects = _parse_topics(response.answer)
 
+        logger.info("Saving reviewed topics to database...")
         if video:
             video.topics = topics_objects
         else:

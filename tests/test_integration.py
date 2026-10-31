@@ -1,10 +1,12 @@
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from notebooklm import SourceAddError
 
@@ -32,7 +34,11 @@ from vsummary.util.holodex import (
     HolodexChannel,
     HolodexVideo,
 )
-from vsummary.util.summarizer import InvalidSummaryResponse, NotebookLMSummaryService
+from vsummary.util.summarizer import (
+    InvalidSummaryResponse,
+    NotebookLMSummaryService,
+    TransientSummaryError,
+)
 from vsummary.util.video import VideoRef, parse_video_source
 from vsummary.util.video_work import VideoWorkCoordinator
 
@@ -123,6 +129,8 @@ class FakeNotebookClient:
     async def ask(self, notebook_id, prompt):
         self.prompts.append((notebook_id, prompt))
         answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
         return SimpleNamespace(answer=answer)
 
 
@@ -280,17 +288,51 @@ def reset_fake_storage(monkeypatch):
 async def test_topic_list_requests_english_names_and_caches_them_in_order():
     client = FakeNotebookClient(
         answers=['[{"name": "Preparing for the concert"}, {"name": "Future plans"}]']
+        * 2
     )
 
     topics = await summarizer_util.get_topic_list(client, VIDEO_REF)
 
-    prompt = " ".join(client.prompts[0][1].split())
-    assert "Write every topic name in English" in prompt
-    assert (
-        "regardless of the language spoken in the video or used in its transcript"
-        in prompt
-    )
-    assert "Translate non-English descriptive topic names into English" in prompt
+    assert len(client.prompts) == 2
+    for notebook_id, text in client.prompts:
+        prompt = " ".join(text.split())
+        assert notebook_id == "notebook-1"
+        assert "Write every topic name in English" in prompt
+        assert (
+            "regardless of the language spoken in the video or used in its transcript"
+            in prompt
+        )
+        assert "Translate non-English descriptive topic names into English" in prompt
+        assert "100 characters" in prompt
+        assert '[{"name": "topic name"}]' in prompt
+        assert "JSON only" in prompt
+    extraction = " ".join(client.prompts[0][1].split())
+    for instruction in (
+        "every substantive discussion",
+        "chronological order",
+        "brief discussions",
+        "secondary topics",
+        "audience questions",
+        "announcements",
+        "anecdotes",
+        "later returns",
+        "new information",
+        "filler",
+        "incidental mentions",
+        "Do not target a fixed topic count",
+    ):
+        assert instruction in extraction
+    review = " ".join(client.prompts[1][1].split())
+    for instruction in (
+        "beginning to end",
+        "omitted discussions",
+        "overly broad entries",
+        "merged recurring discussions",
+        "complete corrected list",
+        "Retain supported discussions",
+        "chronological order",
+    ):
+        assert instruction in review
     assert [topic.name for topic in topics] == [
         "Preparing for the concert",
         "Future plans",
@@ -303,6 +345,187 @@ async def test_topic_list_requests_english_names_and_caches_them_in_order():
     assert await summarizer_util.get_topic_list(cached_client, VIDEO_REF) == topics
     assert cached_client.created == []
     assert cached_client.prompts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("draft", "reviewed"),
+    [
+        (["Concert", "Travel"], ["Concert", "Audience questions", "Travel"]),
+        (["Concert and travel"], ["Concert rehearsal", "Travel plans"]),
+        (["Concert", "Travel"], ["Concert", "Travel", "Concert"]),
+        (["Concert", "Unsupported entry"], ["Concert"]),
+        (['Travel "plans"'], ['Travel "plans"']),
+    ],
+    ids=["omission", "split", "recurring", "corrected", "unchanged"],
+)
+async def test_topic_review_saves_only_the_corrected_list(monkeypatch, draft, reviewed):
+    draft_json = json.dumps([{"name": name} for name in draft])
+    client = FakeNotebookClient(
+        answers=[draft_json, json.dumps([{"name": name} for name in reviewed])]
+    )
+    ask = client.chat.ask
+
+    async def ask_before_save(notebook_id, prompt):
+        assert FakeVideoRecord.records == []
+        return await ask(notebook_id, prompt)
+
+    monkeypatch.setattr(client.chat, "ask", ask_before_save)
+
+    topics = await summarizer_util.get_topic_list(client, VIDEO_REF)
+
+    assert [topic.name for topic in topics] == reviewed
+    assert len(client.prompts) == 2
+    assert draft_json in client.prompts[1][1]
+    assert len(FakeVideoRecord.records) == 1
+    assert FakeVideoRecord.records[0].topics == topics
+    assert client.deleted == ["notebook-1"]
+    cached_client = FakeNotebookClient()
+    assert await summarizer_util.get_topic_list(cached_client, VIDEO_REF) == topics
+    assert cached_client.prompts == cached_client.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing_record", [False, True])
+@pytest.mark.parametrize(
+    ("answer", "error_type"),
+    [
+        ("not JSON", InvalidSummaryResponse),
+        ("[]", InvalidSummaryResponse),
+        ('{"name": "Concert"}', InvalidSummaryResponse),
+        ('[{"name": " "}]', InvalidSummaryResponse),
+        (json.dumps([{"name": "x" * 101}]), InvalidSummaryResponse),
+        (httpx.ReadTimeout("review timed out"), TransientSummaryError),
+        (RuntimeError("review failed"), RuntimeError),
+    ],
+    ids=["json", "empty", "shape", "blank", "long", "timeout", "request"],
+)
+async def test_topic_review_failure_leaves_no_draft_cache(
+    existing_record, answer, error_type
+):
+    if existing_record:
+        video = FakeVideoRecord(source="youtube", video_id=VIDEO_ID, topics=[])
+        await video.save()
+    client = FakeNotebookClient(answers=['[{"name": "Concert"}]', answer])
+
+    with pytest.raises(error_type):
+        await NotebookLMSummaryService(client).summarize(VIDEO_REF)
+
+    assert len(client.prompts) == 2
+    assert client.deleted == ["notebook-1"]
+    if existing_record:
+        assert FakeVideoRecord.records == [video]
+        assert video.topics == []
+    else:
+        assert FakeVideoRecord.records == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["automatic", "topics", "detail", "all"])
+@pytest.mark.parametrize("outcome", ["recovered", "exhausted", "audio_failure"])
+async def test_workers_preserve_retry_policy_for_topic_review(
+    monkeypatch, tmp_path, operation, outcome
+):
+    draft = '[{"name": "Concert"}]'
+    reviewed = '[{"name": "Audience questions"}]'
+    answers = [draft, "not JSON"]
+    if outcome == "recovered":
+        answers += [draft, reviewed]
+        if operation != "topics":
+            answers.append("The speaker answers questions.")
+    elif outcome == "exhausted":
+        answers += [draft, "not JSON"]
+    client = FakeNotebookClient(answers=answers)
+    client.sources.add_file = AsyncMock()
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"audio")
+    downloads = []
+    cleaned = []
+
+    @asynccontextmanager
+    async def fake_download(ref, *, config):
+        downloads.append(ref)
+        try:
+            yield audio
+        finally:
+            cleaned.append(ref)
+
+    monkeypatch.setattr(summarizer_util, "download_generic_audio", fake_download)
+    bot = SimpleNamespace(notebook_client=client, video_work=VideoWorkCoordinator())
+    config = RuntimeConfig(youtube_yt_dlp_fallback_enabled=True)
+    if operation == "automatic":
+        cog = make_autosummary(bot)
+        cog.summary_service = NotebookLMSummaryService(client, config=config)
+        cog._save_item = AsyncMock(return_value=True)
+        cog._post_failure = AsyncMock()
+        job = FakePendingRecord(
+            video_id=VIDEO_ID,
+            channel_id="UC1",
+            channel_name="Channel",
+            title="A stream",
+            available_at=datetime.now(UTC),
+            next_attempt_at=datetime.now(UTC),
+            status=JobStatus.QUEUED,
+        )
+    else:
+        cog = make_manual_summary(bot)
+        job = make_manual_detail_job()
+        job.operation = {
+            "topics": ManualSummaryOperation.TOPICS,
+            "detail": ManualSummaryOperation.DETAIL_ONE,
+            "all": ManualSummaryOperation.DETAIL_ALL,
+        }[operation]
+        job.title = "A stream"
+        job.channel_name = "Channel"
+    cog.settings = config
+    if outcome == "audio_failure":
+        job.youtube_audio_fallback = True
+        job.retry_count = config.source_retry_limit
+
+    if operation == "automatic":
+        await cog._generate_for_job(job)
+    else:
+        await cog._generate(job)
+
+    if outcome == "recovered":
+        assert job.status is (
+            JobStatus.READY_TO_DELIVER
+            if operation == "automatic"
+            else JobStatus.DELIVERING
+        )
+        assert job.retry_count == 0
+        assert [topic.name for topic in FakeVideoRecord.records[0].topics] == [
+            "Audience questions"
+        ]
+        if operation == "automatic":
+            assert job.summary_details == [
+                Topic(
+                    name="Audience questions", detail="The speaker answers questions."
+                )
+            ]
+        else:
+            assert "Audience questions" in "\n".join(job.delivery_chunks)
+        assert len(client.prompts) == (4 if operation == "topics" else 5)
+    else:
+        assert FakeVideoRecord.records == []
+        if outcome == "exhausted":
+            assert job.status is JobStatus.QUEUED
+            assert job.retry_count == 1
+            assert job.next_attempt_at > datetime.now(UTC)
+            assert len(client.prompts) == 4
+        else:
+            assert job.status is JobStatus.FAILED
+            assert job.retry_count == config.source_retry_limit + 1
+            assert len(client.prompts) == 2
+    notebook_ids = [notebook.id for notebook in client.created]
+    assert client.deleted == notebook_ids
+    assert len(notebook_ids) == (1 if outcome == "audio_failure" else 2)
+    if outcome == "audio_failure":
+        assert downloads == cleaned == [VIDEO_REF]
+        client.sources.add_file.assert_awaited_once()
+    else:
+        assert downloads == cleaned == []
+        client.sources.add_file.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -328,7 +551,9 @@ async def test_summarization_pipeline_generates_caches_and_reuses_all_topic_deta
     client = FakeNotebookClient(
         answers=[
             '[{"name": "Introduction"}, {"name": "Conclusion"}]',
+            '[{"name": "Introduction"}, {"name": "Audience questions"}, {"name": "Conclusion"}]',
             "The speaker introduces the subject.",
+            "The speaker answers questions.",
             "The speaker closes the discussion.",
         ]
     )
@@ -337,13 +562,21 @@ async def test_summarization_pipeline_generates_caches_and_reuses_all_topic_deta
 
     assert details == [
         {"topic_name": "Introduction", "detail": "The speaker introduces the subject."},
+        {
+            "topic_name": "Audience questions",
+            "detail": "The speaker answers questions.",
+        },
         {"topic_name": "Conclusion", "detail": "The speaker closes the discussion."},
     ]
     assert len(FakeVideoRecord.records) == 1
     assert [topic.detail for topic in FakeVideoRecord.records[0].topics] == [
         "The speaker introduces the subject.",
+        "The speaker answers questions.",
         "The speaker closes the discussion.",
     ]
+    assert len(client.prompts) == 5
+    assert all(notebook_id == "notebook-1" for notebook_id, _ in client.prompts)
+    assert "'Audience questions'" in client.prompts[3][1]
     assert client.deleted == ["notebook-1"]
 
     second_client = FakeNotebookClient()
@@ -469,7 +702,7 @@ async def test_youtube_audio_fallback_uploads_audio_and_keeps_the_youtube_cache(
     tmp_path,
     operation,
 ):
-    answers = ['[{"name": "Intro"}]']
+    answers = ['[{"name": "Intro"}]'] * 2
     if operation != "topics":
         answers.append("Details")
     client = FakeNotebookClient(answers=answers, source_error=True)
@@ -521,6 +754,7 @@ async def test_youtube_audio_fallback_uploads_audio_and_keeps_the_youtube_cache(
     )
     assert client.added_urls == []
     assert client.deleted == ["notebook-1"]
+    assert len(client.prompts) == (2 if operation == "topics" else 3)
     assert len(FakeVideoRecord.records) == 1
     assert FakeVideoRecord.records[0].source == "youtube"
     assert FakeVideoRecord.records[0].video_id == VIDEO_ID
@@ -857,13 +1091,19 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
 
 
 @pytest.mark.asyncio
-async def test_topic_pipeline_rejects_an_empty_notebooklm_topic_list():
-    client = FakeNotebookClient(answers=["[]"])
+@pytest.mark.parametrize(
+    "answer",
+    ["[]", "not JSON", "{}", '[{"name": " "}]', json.dumps([{"name": "x" * 101}])],
+)
+async def test_topic_pipeline_rejects_invalid_drafts_before_review(answer):
+    client = FakeNotebookClient(answers=[answer])
 
-    with pytest.raises(InvalidSummaryResponse, match="empty topic list"):
+    with pytest.raises(InvalidSummaryResponse):
         await summarizer_util.get_topic_list(client, VIDEO_REF)
 
     assert client.deleted == ["notebook-1"]
+    assert len(client.prompts) == 1
+    assert FakeVideoRecord.records == []
 
 
 def test_topic_prompt_requests_detailed_english_prose_without_lists():
@@ -873,8 +1113,16 @@ def test_topic_prompt_requests_detailed_english_prose_without_lists():
     )
 
     assert "English" in prompt
-    assert "150-200 words" in prompt
-    assert "2-3 connected prose paragraphs" in prompt
+    assert "450 words" in prompt
+    assert "no minimum word count or fixed paragraph count" in prompt
+    assert "brief topics" in prompt
+    assert "short paragraph" in prompt
+    assert "longer or more complex discussions" in prompt
+    assert "additional words and paragraphs" in prompt
+    assert "padding" in prompt
+    assert "repetition" in prompt
+    assert "150-200" not in prompt
+    assert "2-3" not in prompt
     assert (
         "important claims, reasoning, examples, events, distinctions, and conclusions"
         in prompt
@@ -882,6 +1130,7 @@ def test_topic_prompt_requests_detailed_english_prose_without_lists():
     assert "Do not use bullets, numbered lists, headings" in prompt
     assert "'Introduction' ends" in prompt
     assert "'Conclusion' begins" in prompt
+    assert "do not invent missing details" in prompt
 
 
 @pytest.mark.asyncio
@@ -971,6 +1220,7 @@ async def test_manual_detail_waits_for_auto_summary_and_reuses_cached_details(
             super().__init__(
                 answers=[
                     '[{"name": "Introduction"}, {"name": "Conclusion"}]',
+                    '[{"name": "Introduction"}, {"name": "Conclusion"}]',
                     "The speaker introduces the subject.",
                     "The speaker closes the discussion.",
                 ]
@@ -1027,7 +1277,7 @@ async def test_manual_detail_waits_for_auto_summary_and_reuses_cached_details(
         )
     ]
     assert len(client.created) == 1
-    assert len(client.prompts) == 3
+    assert len(client.prompts) == 4
 
 
 @pytest.mark.asyncio
@@ -1341,7 +1591,7 @@ def test_manual_poll_and_lease_interval_come_from_config():
 @pytest.mark.asyncio
 async def test_summary_service_passes_media_config_to_uploads(monkeypatch, tmp_path):
     config = RuntimeConfig(source_upload_timeout_seconds=11, audio_bitrate_kbps=32)
-    client = FakeNotebookClient(answers=['[{"name":"Intro"}]', "Details"])
+    client = FakeNotebookClient(answers=['[{"name":"Intro"}]'] * 2 + ["Details"])
     client.sources.add_file = AsyncMock()
     audio = tmp_path / "audio.m4a"
     audio.write_bytes(b"audio")

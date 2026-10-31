@@ -65,6 +65,28 @@ Other jobs generate and persist topics, then deliver the saved chunks to
 `discord.auto_summary_channel_id`. An expired lease can be reclaimed by another worker
 after a restart or interrupted process.
 
+### Topic extraction and details
+
+Manual and automatic requests share a two-pass topic workflow. For a video
+without cached topics, NotebookLM first extracts substantive discussions in
+chronological order, including brief discussions and secondary topics. A second
+request in the same temporary notebook checks the candidate list against the
+entire source for omissions, overly broad entries, and merged recurring
+discussions. Both passes require English names and the existing topic JSON
+format. This adds one coverage-review request per newly generated topic list.
+
+Only the validated, reviewed list is cached and used for detail generation. A
+failure in either pass leaves no draft in the cache and follows the existing
+generation retry policy. The final YouTube audio fallback also uses both passes,
+with no additional generation attempt. Existing cached topics and completed
+details are reused unchanged.
+
+Detail prompts match length and paragraph count to the source material: brief
+topics can use a short paragraph, while substantial discussions can use several
+paragraphs, up to 450 words per topic. There is no minimum word count or fixed
+paragraph count. These are generation instructions; responses are not
+automatically truncated, and coverage and length compliance depend on NotebookLM.
+
 ## Persistent data and state
 
 | Collection/model | Purpose | Important invariants |
