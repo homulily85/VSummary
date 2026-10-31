@@ -36,7 +36,7 @@ for a video shared in your server.
    was made.
 
 For automatic recaps, add a Vtuber's YouTube channel with `/addchannel` and set
-the destination channel with `AUTO_SUMMARY_CHANNEL_ID`.
+the destination with `discord.auto_summary_channel_id` in `config.toml`.
 
 ## Documentation
 

@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 import pytest
 import yt_dlp
 
+from vsummary.settings import RuntimeConfig
 from vsummary.util import generic_media
 from vsummary.util.video import VideoRef
 
@@ -29,6 +30,40 @@ def test_inspect_accepts_single_public_media(monkeypatch):
     downloader.extract_info.assert_called_once_with(
         "https://vimeo.com/123", download=False
     )
+
+
+@pytest.mark.parametrize("source", ["generic_media", "twitch", "x_space"])
+def test_all_audio_backends_use_configured_format_bitrate_and_size(
+    monkeypatch, tmp_path, source
+):
+    from importlib import import_module
+
+    module = import_module(f"vsummary.util.{source}")
+    monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/ffmpeg")
+    if source == "generic_media":
+        monkeypatch.setattr(module, "_ensure_public_host", lambda _: None)
+    downloader = MagicMock()
+    downloader.__enter__.return_value = downloader
+    downloader.extract_info.return_value = {
+        "id": "1OwxWwQOPlNxQ",
+        "extractor_key": "TwitterSpaces",
+        "live_status": "was_live",
+        "formats": [{"url": "https://example.test/audio"}],
+    }
+    options = []
+    monkeypatch.setattr(
+        module.yt_dlp, "YoutubeDL", lambda value: options.append(value) or downloader
+    )
+    (tmp_path / "audio.m4a").write_bytes(b"audio")
+    config = RuntimeConfig(
+        max_audio_mib=1 / 1024**2,
+        audio_bitrate_kbps=32,
+        audio_download_format="worstaudio",
+    )
+    with pytest.raises(RuntimeError, match="upload limit"):
+        module._download("https://example.test/media", str(tmp_path), config=config)
+    assert options[0]["format"] == "worstaudio"
+    assert options[0]["postprocessors"][0]["preferredquality"] == "32"
 
 
 @pytest.mark.parametrize(

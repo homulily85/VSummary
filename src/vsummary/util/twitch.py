@@ -10,9 +10,9 @@ from pathlib import Path
 
 import yt_dlp
 
+from vsummary.settings import RuntimeConfig, runtime_config
 from vsummary.util.video import VideoRef, build_video_url
 
-MAX_AUDIO_BYTES = 190 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
@@ -24,21 +24,22 @@ class TwitchAudioUnavailableError(TwitchAudioError):
     """A VOD is private, restricted, or otherwise unsupported."""
 
 
-def _download(url: str, directory: str) -> Path:
+def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) -> Path:
     """Download, transcode, size-check, and return one temporary Twitch M4A file."""
+    config = runtime_config(config)
     if shutil.which("ffmpeg") is None:
         raise TwitchAudioUnavailableError("ffmpeg is required to process Twitch audio")
     options = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "format": "bestaudio/best",
+        "format": config.audio_download_format,
         "outtmpl": str(Path(directory) / "%(id)s.%(ext)s"),
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "m4a",
-                "preferredquality": "64",
+                "preferredquality": str(config.audio_bitrate_kbps),
             }
         ],
     }
@@ -63,7 +64,7 @@ def _download(url: str, directory: str) -> Path:
     paths = list(Path(directory).glob("*.m4a"))
     if len(paths) != 1:
         raise TwitchAudioError("Twitch audio download did not produce an M4A file")
-    if paths[0].stat().st_size > MAX_AUDIO_BYTES:
+    if paths[0].stat().st_size > config.max_audio_mib * 1024 * 1024:
         raise TwitchAudioUnavailableError(
             "Twitch VOD audio exceeds NotebookLM's upload limit"
         )
@@ -72,10 +73,15 @@ def _download(url: str, directory: str) -> Path:
 
 
 @asynccontextmanager
-async def download_twitch_audio(ref: VideoRef) -> AsyncIterator[Path]:
+async def download_twitch_audio(
+    ref: VideoRef, *, config: RuntimeConfig | None = None
+) -> AsyncIterator[Path]:
     """Download a public Twitch VOD to a temporary M4A audio file."""
     if ref.source != "twitch":
         raise ValueError("Twitch audio can only be downloaded for Twitch references")
     with tempfile.TemporaryDirectory(prefix="vsummary-twitch-") as directory:
-        path = await asyncio.to_thread(_download, build_video_url(ref), directory)
+        options = {"config": config} if config is not None else {}
+        path = await asyncio.to_thread(
+            _download, build_video_url(ref), directory, **options
+        )
         yield path

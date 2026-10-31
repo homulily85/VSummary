@@ -14,12 +14,11 @@ from typing import Any
 
 from rich.logging import RichHandler
 
-from vsummary.settings import Settings
+from vsummary.settings import DEFAULT_CONFIG, Settings, runtime_config
 from vsummary.util.discord import send_limited
 from vsummary.util.video import UnsupportedVideoSource, VideoRef, build_video_url
 
 DISCORD_MESSAGE_LIMIT = 2_000
-DISCORD_QUEUE_SIZE = 1_000
 _HANDLER_MARKER = "_vsummary_logging_handler"
 _SENSITIVE_CONTEXT_KEYS = {
     "api_key",
@@ -54,11 +53,17 @@ class ContextFormatter(logging.Formatter):
 
 
 class DiscordLogHandler(logging.Handler):
-    """A non-blocking, warning-only logging sink delivered by a Discord bot."""
+    """A non-blocking logging sink with a configured Discord severity threshold."""
 
-    def __init__(self, channel_id: int, *, queue_size: int = DISCORD_QUEUE_SIZE):
-        """Create a bounded warning-only queue for one configured Discord channel."""
-        super().__init__(logging.WARNING)
+    def __init__(
+        self,
+        channel_id: int,
+        *,
+        queue_size: int = DEFAULT_CONFIG.discord_log_queue_size,
+        min_level: str = DEFAULT_CONFIG.discord_log_min_level,
+    ):
+        """Create a bounded severity-filtered queue for one Discord channel."""
+        super().__init__(min_level)
         self.channel_id = channel_id
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_size)
         self.disabled = False
@@ -69,7 +74,7 @@ class DiscordLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         """Queue a pre-rendered event without ever blocking an application task."""
-        if self.disabled or record.levelno < logging.WARNING:
+        if self.disabled or record.levelno < self.level:
             return
         try:
             message = self.format_record(record)
@@ -191,11 +196,14 @@ class DiscordLogHandler(logging.Handler):
 
 def configure_logging(settings: Settings | None = None) -> DiscordLogHandler | None:
     """Configure the required console/file sinks and optional Discord sink."""
-    log_path = Path(getattr(settings, "log_file_path", Path("logs/vsummary.log")))
-    level_name = getattr(settings, "log_level", "INFO")
+    config = runtime_config(settings)
+    log_path = Path(config.log_file_path)
+    level_name = config.log_level
     level = logging.getLevelName(level_name)
     if not isinstance(level, int):
-        raise LoggingConfigurationError(f"invalid configured LOG_LEVEL: {level_name}")
+        raise LoggingConfigurationError(
+            f"invalid configured logging.level: {level_name}"
+        )
 
     formatter = ContextFormatter(
         "%(asctime)s %(levelname)-8s %(name)s %(message)s%(context_text)s"
@@ -210,8 +218,8 @@ def configure_logging(settings: Settings | None = None) -> DiscordLogHandler | N
         file_handler = TimedRotatingFileHandler(
             log_path,
             when="midnight",
-            interval=1,
-            backupCount=14,
+            interval=config.log_rotation_interval_days,
+            backupCount=config.log_backup_count,
             encoding="utf-8",
             utc=True,
         )
@@ -224,9 +232,13 @@ def configure_logging(settings: Settings | None = None) -> DiscordLogHandler | N
     file_handler.setFormatter(formatter)
 
     discord_handler = None
-    discord_channel_id = getattr(settings, "discord_log_channel_id", None)
+    discord_channel_id = config.discord_log_channel_id
     if discord_channel_id is not None:
-        discord_handler = DiscordLogHandler(discord_channel_id)
+        discord_handler = DiscordLogHandler(
+            discord_channel_id,
+            queue_size=config.discord_log_queue_size,
+            min_level=config.discord_log_min_level,
+        )
         discord_handler.setFormatter(formatter)
 
     root = logging.getLogger()

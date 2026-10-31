@@ -81,6 +81,46 @@ def test_configure_logging_fails_fast_when_log_file_cannot_be_opened(
         configure_logging(settings)
 
 
+def test_configured_logging_rotation_queue_and_discord_threshold(
+    tmp_path, isolated_root_logger
+):
+    settings = Settings.from_mapping(
+        {"DISCORD_TOKEN": "token", "MONGODB_URI": "mongodb://localhost"},
+        config={
+            "logging": {
+                "path": str(tmp_path / "bot.log"),
+                "rotation_interval_days": 3,
+                "backup_count": 2,
+                "discord_channel_id": 123,
+                "discord_queue_size": 7,
+                "discord_min_level": "ERROR",
+            }
+        },
+    )
+    handler = configure_logging(settings)
+    file_handler = next(
+        h
+        for h in isolated_root_logger.handlers
+        if isinstance(h, TimedRotatingFileHandler)
+    )
+    assert file_handler.interval == 3 * 86400
+    assert file_handler.backupCount == 2
+    assert handler.queue.maxsize == 7
+    logger = logging.getLogger("vsummary.test.threshold")
+    handler.handle(
+        logger.makeRecord(logger.name, logging.WARNING, __file__, 0, "ignore", (), None)
+    )
+    assert handler.queue.empty()
+    handler.handle(
+        logger.makeRecord(
+            logger.name, logging.ERROR, __file__, 0, "token=secret-value", (), None
+        )
+    )
+    message = handler.queue.get_nowait()
+    assert "secret-value" not in message
+    assert "<redacted>" in message
+
+
 @pytest.mark.asyncio
 async def test_discord_sink_queues_warning_after_ready_and_redacts_and_truncates():
     handler = DiscordLogHandler(channel_id=123, queue_size=2)

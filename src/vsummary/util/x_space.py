@@ -17,11 +17,12 @@ from urllib.parse import urlparse
 
 import yt_dlp
 
+from vsummary.settings import RuntimeConfig, runtime_config
+
 if TYPE_CHECKING:
     from vsummary.util.video import VideoRef
 
 
-MAX_AUDIO_BYTES = 190 * 1024 * 1024
 logger = logging.getLogger(__name__)
 _X_HOSTS = {
     "x.com",
@@ -198,21 +199,22 @@ def _resolution_error_from_exception(
     return XSpaceResolutionError("This X Space is unavailable or cannot be accessed.")
 
 
-def _download(url: str, directory: str) -> Path:
+def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) -> Path:
     """Download, transcode, size-check, and return one archived Space M4A file."""
+    config = runtime_config(config)
     if shutil.which("ffmpeg") is None:
         raise XSpaceAudioUnavailableError("ffmpeg is required to process X Space audio")
     options = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "format": "bestaudio/best",
+        "format": config.audio_download_format,
         "outtmpl": str(Path(directory) / "%(id)s.%(ext)s"),
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "m4a",
-                "preferredquality": "64",
+                "preferredquality": str(config.audio_bitrate_kbps),
             }
         ],
     }
@@ -236,7 +238,7 @@ def _download(url: str, directory: str) -> Path:
     paths = list(Path(directory).glob("*.m4a"))
     if len(paths) != 1:
         raise XSpaceAudioError("X Space audio download did not produce an M4A file")
-    if paths[0].stat().st_size > MAX_AUDIO_BYTES:
+    if paths[0].stat().st_size > config.max_audio_mib * 1024 * 1024:
         raise XSpaceAudioUnavailableError(
             "X Space audio exceeds NotebookLM's upload limit"
         )
@@ -245,12 +247,17 @@ def _download(url: str, directory: str) -> Path:
 
 
 @asynccontextmanager
-async def download_x_space_audio(ref: VideoRef) -> AsyncIterator[Path]:
+async def download_x_space_audio(
+    ref: VideoRef, *, config: RuntimeConfig | None = None
+) -> AsyncIterator[Path]:
     """Download an archived X Space as a temporary M4A audio file."""
     if ref.source != "x_space":
         raise ValueError("X Space audio can only be downloaded for X Space references")
     with tempfile.TemporaryDirectory(prefix="vsummary-x-space-") as directory:
         path = await asyncio.to_thread(
-            _download, f"https://x.com/i/spaces/{ref.video_id}", directory
+            _download,
+            f"https://x.com/i/spaces/{ref.video_id}",
+            directory,
+            **({"config": config} if config is not None else {}),
         )
         yield path

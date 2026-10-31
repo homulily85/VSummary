@@ -23,9 +23,11 @@ from vsummary.model.channel import (
 )
 from vsummary.model.video import Topic
 from vsummary.settings import (
+    RuntimeConfig,
     Settings,
     SettingsError,
     configured_auto_summary_channel_id,
+    runtime_config,
 )
 from vsummary.util.auto_summary_topics import (
     current_topic_policies,
@@ -36,13 +38,11 @@ from vsummary.util.auto_summary_topics import (
 )
 from vsummary.util.discord import send_limited, split_message
 from vsummary.util.holodex import (
-    MAX_RETRIES,
     ChannelNotFoundError,
     HolodexClient,
     HolodexVideo,
     PermanentHolodexError,
     TransientHolodexError,
-    exponential_backoff_hours,
 )
 from vsummary.util.summarizer import (
     NotebookLMSummaryService,
@@ -57,7 +57,6 @@ from vsummary.util.video_work import get_video_work_coordinator
 logger = logging.getLogger(__name__)
 
 HOLODEX_PAGE_SIZE = 50
-JOB_LEASE_DURATION = timedelta(minutes=15)
 
 # These names remain module-level for existing integrations and test doubles.
 Channel = FollowedChannel
@@ -87,19 +86,22 @@ class Autosummary(commands.Cog):
         self.holodex = holodex or getattr(bot, "holodex", None)
         self._owns_holodex = self.holodex is None
         if self.holodex is None:
-            timeout = getattr(self.settings, "http_timeout_seconds", 15.0)
-            self.holodex = HolodexClient(timeout=timeout)
+            self.holodex = HolodexClient()
         self.notebook = getattr(bot, "notebook_client", None)
         self.summary_service = summary_service or (
-            NotebookLMSummaryService(self.notebook)
+            NotebookLMSummaryService(self.notebook, config=self.config)
             if self.notebook is not None
             else None
         )
         self.worker_id = uuid.uuid4().hex
-        poll_interval = getattr(self.settings, "poll_interval_minutes", 30)
-        self.poll_loop.change_interval(minutes=poll_interval)
+        self.poll_loop.change_interval(minutes=self.config.poll_interval_minutes)
         if start_polling:
             self.poll_loop.start()
+
+    @property
+    def config(self) -> RuntimeConfig:
+        """Return injected operational settings or the centralized defaults."""
+        return runtime_config(getattr(self, "settings", None))
 
     def cog_unload(self):
         """Cancel polling and schedule closure of a cog-owned Holodex client."""
@@ -120,10 +122,12 @@ class Autosummary(commands.Cog):
         """Refresh the NotebookLM dependency after the bot completes cog loading."""
         self.notebook = self.bot.notebook_client
         if self.summary_service is None:
-            self.summary_service = NotebookLMSummaryService(self.notebook)
+            self.summary_service = NotebookLMSummaryService(
+                self.notebook, config=self.config
+            )
         await ensure_default_auto_summary_topic_policies()
 
-    @tasks.loop(minutes=30)
+    @tasks.loop()
     async def poll_loop(self):
         """Poll followed channels, then claim and process every due summary job."""
         await self.check_new_videos()
@@ -221,7 +225,8 @@ class Autosummary(commands.Cog):
 
         next_attempt = max(
             datetime.now(UTC),
-            video.available_at + timedelta(seconds=video.duration, hours=2),
+            video.available_at
+            + timedelta(seconds=video.duration + self.config.transcript_delay_seconds),
         )
         pending = PendingVideo(
             video_id=video.video_id,
@@ -388,11 +393,7 @@ class Autosummary(commands.Cog):
         if not getattr(item, "summary_details", None):
             ref = VideoRef(source="youtube", video_id=item.video_id)
             use_youtube_audio = getattr(item, "youtube_audio_fallback", False)
-            if use_youtube_audio and not getattr(
-                getattr(self, "settings", None),
-                "youtube_yt_dlp_fallback_enabled",
-                False,
-            ):
+            if use_youtube_audio and not self.config.youtube_yt_dlp_fallback_enabled:
                 self._set_status(item, JobStatus.FAILED)
                 item.last_error = "YouTube audio fallback is disabled."
                 self._release_lease(item)
@@ -410,7 +411,10 @@ class Autosummary(commands.Cog):
                 if summary_service is not None:
                     return await summary_service.summarize(ref, **generation_options)
                 return await get_topic_details_all(
-                    getattr(self, "notebook", None), ref, **generation_options
+                    getattr(self, "notebook", None),
+                    ref,
+                    config=self.config,
+                    **generation_options,
                 )
 
             try:
@@ -439,7 +443,10 @@ class Autosummary(commands.Cog):
                     details = (
                         await generate_summary()
                         if use_youtube_audio
-                        else await retry_invalid_summary_response(generate_summary)
+                        else await retry_invalid_summary_response(
+                            generate_summary,
+                            retries=self.config.invalid_summary_retries,
+                        )
                     )
                 item.summary_details = [self._as_topic(detail) for detail in details]
             except (PermanentSummaryError, PermanentHolodexError) as exc:
@@ -570,20 +577,14 @@ class Autosummary(commands.Cog):
         """Apply source retry policy, release the lease, and persist the next state."""
         exc = exc or RuntimeError("summary generation failed")
         item.retry_count = getattr(item, "retry_count", 0) + 1
-        max_retries = getattr(
-            getattr(self, "settings", None), "source_retry_limit", MAX_RETRIES
-        )
+        max_retries = self.config.source_retry_limit
         fallback_active = getattr(item, "youtube_audio_fallback", False)
         if (
             allow_youtube_fallback
             and not permanent
             and not fallback_active
             and item.retry_count >= max_retries
-            and getattr(
-                getattr(self, "settings", None),
-                "youtube_yt_dlp_fallback_enabled",
-                False,
-            )
+            and self.config.youtube_yt_dlp_fallback_enabled
         ):
             item.youtube_audio_fallback = True
             self._set_status(item, JobStatus.QUEUED)
@@ -620,8 +621,8 @@ class Autosummary(commands.Cog):
                 ),
             )
             return saved
-        backoff = exponential_backoff_hours(item.retry_count)
-        item.next_attempt_at = datetime.now(UTC) + timedelta(hours=backoff)
+        backoff = self.config.retry_delay_seconds(item.retry_count)
+        item.next_attempt_at = datetime.now(UTC) + timedelta(seconds=backoff)
         self._set_status(item, JobStatus.QUEUED)
         item.last_error = str(exc)
         self._release_lease(item)
@@ -629,14 +630,14 @@ class Autosummary(commands.Cog):
         log_event(
             logger,
             logging.WARNING,
-            "Summary generation failed for %s; retrying in %s hour(s)",
+            "Summary generation failed for %s; retrying in %s second(s)",
             item.video_id,
             backoff,
             **self._job_context(
                 item,
                 attempt=item.retry_count,
                 retry_limit=max_retries,
-                retry_in_hours=backoff,
+                retry_in_seconds=backoff,
             ),
         )
         return saved
@@ -644,15 +645,13 @@ class Autosummary(commands.Cog):
     async def _handle_delivery_error(self, item, exc: Exception):
         """Apply delivery retry policy without discarding persisted summary content."""
         item.delivery_retry_count = getattr(item, "delivery_retry_count", 0) + 1
-        max_retries = getattr(
-            getattr(self, "settings", None), "delivery_retry_limit", MAX_RETRIES
-        )
+        max_retries = self.config.delivery_retry_limit
         item.last_error = str(exc)
         if item.delivery_retry_count >= max_retries:
             self._set_status(item, JobStatus.FAILED)
         else:
-            backoff = exponential_backoff_hours(item.delivery_retry_count)
-            item.next_attempt_at = datetime.now(UTC) + timedelta(hours=backoff)
+            backoff = self.config.retry_delay_seconds(item.delivery_retry_count)
+            item.next_attempt_at = datetime.now(UTC) + timedelta(seconds=backoff)
             self._set_status(item, JobStatus.READY_TO_DELIVER)
         self._release_lease(item)
         saved = await self._save_item(item)
@@ -693,11 +692,7 @@ class Autosummary(commands.Cog):
         if channel is None:
             return
         if getattr(item, "youtube_audio_fallback", False):
-            if not getattr(
-                getattr(self, "settings", None),
-                "youtube_yt_dlp_fallback_enabled",
-                False,
-            ):
+            if not self.config.youtube_yt_dlp_fallback_enabled:
                 failure = (
                     f"Failed to generate a summary after {item.retry_count} normal attempts; "
                     "the yt-dlp audio fallback was disabled before it could run."
@@ -709,7 +704,7 @@ class Autosummary(commands.Cog):
                 )
         else:
             failure = (
-                f"Failed to generate a summary after {getattr(getattr(self, 'settings', None), 'source_retry_limit', MAX_RETRIES)} attempts; "
+                f"Failed to generate a summary after {item.retry_count} attempts; "
                 "no transcript could be fetched for this video."
             )
         message = (
@@ -724,11 +719,11 @@ class Autosummary(commands.Cog):
                 getattr(self, "settings", None)
             )
         except SettingsError:
-            logger.error("AUTO_SUMMARY_CHANNEL_ID is not a valid integer.")
+            logger.error("discord.auto_summary_channel_id is not a valid integer.")
             return None
         if channel_id is None:
             logger.error(
-                "AUTO_SUMMARY_CHANNEL_ID is not set; skipping auto-summary post."
+                "discord.auto_summary_channel_id is not set; skipping auto-summary post."
             )
             return None
         channel = self.bot.get_channel(channel_id)
@@ -748,11 +743,8 @@ class Autosummary(commands.Cog):
             await send_limited(self.bot, channel.send, chunk)
 
     def _lease_duration(self) -> timedelta:
-        """Return the configured lease duration, protecting against non-positive input."""
-        seconds = getattr(getattr(self, "settings", None), "job_lease_seconds", None)
-        if seconds is None:
-            return JOB_LEASE_DURATION
-        return timedelta(seconds=max(1, seconds))
+        """Return the validated operational lease duration."""
+        return timedelta(seconds=self.config.job_lease_seconds)
 
     @staticmethod
     def _uses_leases(item) -> bool:
@@ -804,7 +796,7 @@ class Autosummary(commands.Cog):
 
     async def _renew_lease_until_finished(self, item, stop: asyncio.Event) -> None:
         """Renew a job lease periodically until processing ends or ownership is lost."""
-        interval = max(1.0, self._lease_duration().total_seconds() / 3)
+        interval = self._lease_duration().total_seconds() / 3
         while True:
             try:
                 await asyncio.wait_for(stop.wait(), timeout=interval)

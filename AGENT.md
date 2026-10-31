@@ -205,15 +205,18 @@ locked virtual environment is used.
 
 ## Environment / configuration
 
-- Config/secrets are loaded once at startup via `python-dotenv`; a local
-  untracked `.env` file is expected. `settings.py` validates configuration
-  before the bot starts, so do not read environment variables directly from
-  cogs or utility modules.
+- Secrets are loaded once at startup via `python-dotenv`; non-secret options
+  come only from optional, ignored `config.toml` in the working directory.
+  `settings.py` validates TOML with the standard-library `tomllib` reader before
+  external services start. Do not read environment or configuration files from
+  cogs or utility modules; inject `RuntimeConfig` or `Settings` instead.
 - Required variables are `DISCORD_TOKEN` and `MONGODB_URI`.
-- Optional variables are `MONGODB_DATABASE` (default `VSummary`),
-  `AUTO_SUMMARY_CHANNEL_ID`, `POLL_INTERVAL_MINUTES` (default `30`),
-  `SOURCE_RETRY_LIMIT` (default `5`), `DELIVERY_RETRY_LIMIT` (default `5`),
-  and `HTTP_TIMEOUT_SECONDS` (default `15.0`).
+- `config.example.toml` lists every operational option. Missing options and an
+  absent default file use the centralized `RuntimeConfig` defaults; explicit
+  missing files, unknown options, invalid types, and malformed TOML fail startup.
+  Database name (`VSummary`) and Holodex settings remain fixed in code. Old
+  non-secret environment options are ignored. Preserve injected configuration
+  through workers, retries, all audio downloaders, NotebookLM uploads, and logging.
 - NotebookLM access via `notebooklm-py` requires **Google session
   cookies**, not an API key. In practice this means an authenticated
   session/profile must be set up out-of-band via the `notebooklm` CLI

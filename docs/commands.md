@@ -62,9 +62,9 @@ streamer's display name. For example:
 /removechannel channel_id:UCQ0UDLQCjY0rmuxCDE38FGg
 ```
 
-The bot checks for new videos according to `POLL_INTERVAL_MINUTES`. Automatic
-summaries are sent to `AUTO_SUMMARY_CHANNEL_ID`, not the channel where
-`/addchannel` was invoked. Set this variable to a Discord channel where the bot
+The bot checks for new videos according to `workers.poll_interval_minutes` in
+`config.toml`. Automatic summaries are sent to `discord.auto_summary_channel_id`,
+not the channel where `/addchannel` was invoked. Set this option to a Discord channel where the bot
 has **View Channel** and **Send Messages**.
 
 Topic-policy commands apply globally to this bot instance. Configure which
@@ -91,4 +91,4 @@ topic, the bot retries the lookup once and then continues with auto-summary.
 | A Twitch VOD cannot be processed | Use a full public VOD URL, install `ffmpeg`, and ensure its converted audio fits NotebookLM's upload limit. |
 | An X Space cannot be processed | Use a public archived Space (or a post that resolves to one), install `ffmpeg`, and ensure its converted audio fits NotebookLM's upload limit. |
 | Another media URL cannot be processed | Use a public URL for one completed recording supported by `yt-dlp`, install `ffmpeg`, and ensure its audio fits NotebookLM's upload limit. |
-| NotebookLM is temporarily unavailable | The worker retries up to `SOURCE_RETRY_LIMIT`; inspect the log file or `DISCORD_LOG_CHANNEL_ID` for details. |
+| NotebookLM is temporarily unavailable | Check `retries.source_limit`; inspect `logging.path` or the channel configured by `logging.discord_channel_id` for details. |

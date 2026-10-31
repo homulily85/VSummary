@@ -26,7 +26,7 @@ from vsummary.model.channel import (
     PendingVideoStatus,
 )
 from vsummary.model.video import Topic
-from vsummary.settings import Settings
+from vsummary.settings import RuntimeConfig, Settings
 from vsummary.util.holodex import (
     ChannelNotFoundError,
     HolodexChannel,
@@ -1331,6 +1331,55 @@ def test_autosummary_poll_interval_comes_from_settings():
     assert cog.poll_loop.minutes == 7
 
 
+def test_manual_poll_and_lease_interval_come_from_config():
+    config = RuntimeConfig(manual_poll_interval_seconds=3, job_lease_seconds=120)
+    cog = ManualSummary(SimpleNamespace(), settings=config, start_worker=False)
+    assert cog.worker_loop.seconds == 3
+    assert cog._lease_duration().total_seconds() == 120
+
+
+@pytest.mark.asyncio
+async def test_summary_service_passes_media_config_to_uploads(monkeypatch, tmp_path):
+    config = RuntimeConfig(source_upload_timeout_seconds=11, audio_bitrate_kbps=32)
+    client = FakeNotebookClient(answers=['[{"name":"Intro"}]', "Details"])
+    client.sources.add_file = AsyncMock()
+    audio = tmp_path / "audio.m4a"
+    audio.write_bytes(b"audio")
+
+    @asynccontextmanager
+    async def fake_download(ref, *, config):
+        assert config.audio_bitrate_kbps == 32
+        yield audio
+
+    monkeypatch.setattr(summarizer_util, "download_generic_audio", fake_download)
+    await NotebookLMSummaryService(client, config=config).summarize(
+        VIDEO_REF, use_youtube_audio=True
+    )
+    assert client.sources.add_file.await_args.kwargs["wait_timeout"] == 11
+
+
+@pytest.mark.asyncio
+async def test_auto_transcript_delay_uses_operational_config():
+    cog = make_autosummary()
+    cog.settings = RuntimeConfig(transcript_delay_seconds=60)
+    published = datetime.now(UTC)
+    channel = FakeFollowedChannel(
+        "UC1", "Channel", added_at=published - timedelta(seconds=1)
+    )
+    video = HolodexVideo(
+        id=VIDEO_ID,
+        title="Title",
+        topic_id=None,
+        available_at=published,
+        channel_name="Channel",
+        duration=30,
+    )
+    await cog._enqueue_new_video(video, channel)
+    assert FakePendingRecord.records[0].next_attempt_at == published + timedelta(
+        seconds=90
+    )
+
+
 @pytest.mark.asyncio
 async def test_autosummary_poll_only_enqueues_videos_released_after_channel_was_added():
     cog = make_autosummary()
@@ -1551,7 +1600,7 @@ async def test_autosummary_processes_success_and_posts_summary(monkeypatch):
         available_at=datetime.now(UTC),
         next_attempt_at=datetime.now(UTC),
     )
-    monkeypatch.setenv("AUTO_SUMMARY_CHANNEL_ID", "123")
+    cog.settings = RuntimeConfig(auto_summary_channel_id=123)
     monkeypatch.setattr(
         autosummary_module,
         "get_topic_details_all",
@@ -1578,7 +1627,7 @@ async def test_autosummary_retries_then_marks_video_failed_and_posts_failure(
     target = FakeChannelTarget()
     bot = SimpleNamespace(notebook_client=object(), get_channel=lambda _: target)
     cog = make_autosummary(bot)
-    monkeypatch.setenv("AUTO_SUMMARY_CHANNEL_ID", "123")
+    cog.settings = RuntimeConfig(auto_summary_channel_id=123)
 
     retry_item = FakePendingRecord(
         video_id="retry",
@@ -1626,7 +1675,7 @@ async def test_autosummary_channel_lookup_skips_missing_or_invalid_configuration
     monkeypatch.setenv("AUTO_SUMMARY_CHANNEL_ID", "not-an-integer")
     assert await cog._get_auto_summary_channel() is None
 
-    monkeypatch.setenv("AUTO_SUMMARY_CHANNEL_ID", "123")
+    cog.settings = RuntimeConfig(auto_summary_channel_id=123)
     assert await cog._get_auto_summary_channel() is None
 
 

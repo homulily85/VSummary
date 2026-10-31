@@ -10,6 +10,7 @@ from notebooklm.types import Notebook
 
 from vsummary.logging import log_event
 from vsummary.model.video import Topic, VideoSummary
+from vsummary.settings import DEFAULT_CONFIG, RuntimeConfig, runtime_config
 from vsummary.util.generic_media import download_generic_audio
 from vsummary.util.twitch import download_twitch_audio
 from vsummary.util.video import VideoRef, build_video_url
@@ -37,20 +38,27 @@ class InvalidSummaryResponse(TransientSummaryError):
 
 async def retry_invalid_summary_response[SummaryResult](
     operation: Callable[[], Awaitable[SummaryResult]],
+    *,
+    retries: int = DEFAULT_CONFIG.invalid_summary_retries,
 ) -> SummaryResult:
-    """Retry a malformed NotebookLM response once without consuming a job retry."""
-    try:
-        return await operation()
-    except InvalidSummaryResponse:
-        return await operation()
+    """Apply the configured immediate retry budget to malformed responses."""
+    for _ in range(retries):
+        try:
+            return await operation()
+        except InvalidSummaryResponse:
+            pass
+    return await operation()
 
 
 class NotebookLMSummaryService:
     """NotebookLM-backed summary generation with durable cache reuse."""
 
-    def __init__(self, client: NotebookLMClient):
+    def __init__(
+        self, client: NotebookLMClient, *, config: RuntimeConfig | None = None
+    ):
         """Retain the authenticated NotebookLM client owned by the application."""
         self.client = client
+        self.config = config
 
     async def close(self) -> None:
         """Close the client when it exposes the optional asynchronous close hook."""
@@ -64,7 +72,10 @@ class NotebookLMSummaryService:
         """Generate all topic details and map backend failures to workflow errors."""
         try:
             details = await get_topic_details_all(
-                self.client, ref, use_youtube_audio=use_youtube_audio
+                self.client,
+                ref,
+                use_youtube_audio=use_youtube_audio,
+                config=self.config,
             )
         except SourceAddError as exc:
             log_event(
@@ -162,6 +173,7 @@ async def _create_notebook_with_source(
     ref: VideoRef,
     *,
     use_youtube_audio: bool = False,
+    config: RuntimeConfig | None = None,
 ) -> "Notebook":
     """Create a temporary notebook with the video source attached.
 
@@ -173,36 +185,38 @@ async def _create_notebook_with_source(
     retaining the original reference for cache and concurrency coordination.
     """
     video_link = build_video_url(ref)
+    options = {"config": config} if config is not None else {}
+    upload_timeout = runtime_config(config).source_upload_timeout_seconds
     notebook = await client.notebooks.create(video_link)
     try:
         if ref.source == "twitch":
-            async with download_twitch_audio(ref) as audio:
+            async with download_twitch_audio(ref, **options) as audio:
                 await client.sources.add_file(
                     notebook.id,
                     audio,
                     mime_type="audio/mp4",
                     wait=True,
-                    wait_timeout=600,
+                    wait_timeout=upload_timeout,
                     title=f"Twitch VOD {ref.video_id}",
                 )
         elif ref.source == "x_space":
-            async with download_x_space_audio(ref) as audio:
+            async with download_x_space_audio(ref, **options) as audio:
                 await client.sources.add_file(
                     notebook.id,
                     audio,
                     mime_type="audio/mp4",
                     wait=True,
-                    wait_timeout=600,
+                    wait_timeout=upload_timeout,
                     title=f"X Space {ref.video_id}",
                 )
         elif ref.source == "yt_dlp" or (ref.source == "youtube" and use_youtube_audio):
-            async with download_generic_audio(ref) as audio:
+            async with download_generic_audio(ref, **options) as audio:
                 await client.sources.add_file(
                     notebook.id,
                     audio,
                     mime_type="audio/mp4",
                     wait=True,
-                    wait_timeout=600,
+                    wait_timeout=upload_timeout,
                     title=f"YouTube video {ref.video_id}"
                     if ref.source == "youtube"
                     else "Media",
@@ -242,6 +256,7 @@ async def _get_or_create_topic_list(
     ref: VideoRef,
     *,
     use_youtube_audio: bool = False,
+    config: RuntimeConfig | None = None,
 ) -> tuple[Video, "Notebook | None"]:
     """
     Get the topic list for a video, creating it if it doesn't exist.
@@ -265,7 +280,7 @@ async def _get_or_create_topic_list(
     )
 
     notebook = await _create_notebook_with_source(
-        client, ref, use_youtube_audio=use_youtube_audio
+        client, ref, use_youtube_audio=use_youtube_audio, config=config
     )
     prompt = """
        What are the topics mentioned in the video?
@@ -312,11 +327,12 @@ async def get_topic_list(
     ref: VideoRef,
     *,
     use_youtube_audio: bool = False,
+    config: RuntimeConfig | None = None,
 ):
     """Return cached topics or create them from a temporary NotebookLM notebook."""
     logger.info(f"Getting topics from {ref}")
     video, notebook = await _get_or_create_topic_list(
-        client, ref, use_youtube_audio=use_youtube_audio
+        client, ref, use_youtube_audio=use_youtube_audio, config=config
     )
     if notebook is None:
         return video.topics
@@ -333,10 +349,11 @@ async def get_topic_details(
     topic_index: int,
     *,
     use_youtube_audio: bool = False,
+    config: RuntimeConfig | None = None,
 ):
     """Return one topic's cached or newly generated detail for ``ref``."""
     video, notebook = await _get_or_create_topic_list(
-        client, ref, use_youtube_audio=use_youtube_audio
+        client, ref, use_youtube_audio=use_youtube_audio, config=config
     )
     topics = _validated_topics(video.topics or [])
 
@@ -353,7 +370,7 @@ async def get_topic_details(
 
         if notebook is None:
             notebook = await _create_notebook_with_source(
-                client, ref, use_youtube_audio=use_youtube_audio
+                client, ref, use_youtube_audio=use_youtube_audio, config=config
             )
         prompt = _topic_prompt(topics, topic_index)
         logger.info("Asking notebook for topic details...")
@@ -378,16 +395,17 @@ async def get_topic_details_all(
     ref: VideoRef,
     *,
     use_youtube_audio: bool = False,
+    config: RuntimeConfig | None = None,
 ):
     """Return every topic detail, generating and saving only missing details."""
     video, notebook = await _get_or_create_topic_list(
-        client, ref, use_youtube_audio=use_youtube_audio
+        client, ref, use_youtube_audio=use_youtube_audio, config=config
     )
     topics = _validated_topics(video.topics or [])
 
     if notebook is None and any(t.detail is None for t in topics):
         notebook = await _create_notebook_with_source(
-            client, ref, use_youtube_audio=use_youtube_audio
+            client, ref, use_youtube_audio=use_youtube_audio, config=config
         )
 
     results = []

@@ -12,14 +12,13 @@ from discord.ext import commands, tasks
 from pymongo import ReturnDocument
 
 from vsummary.model.channel import JobStatus, ManualSummaryJob, ManualSummaryOperation
-from vsummary.settings import Settings
+from vsummary.settings import RuntimeConfig, Settings, runtime_config
 from vsummary.util.discord import send_limited, split_message
 from vsummary.util.generic_media import (
     GenericMediaError,
     GenericMediaUnavailableError,
     inspect_generic_media,
 )
-from vsummary.util.holodex import MAX_RETRIES, exponential_backoff_hours
 from vsummary.util.summarizer import (
     PermanentSummaryError,
     TransientSummaryError,
@@ -39,7 +38,6 @@ from vsummary.util.video_work import get_video_work_coordinator
 from vsummary.util.x_space import XSpaceAudioError, XSpaceAudioUnavailableError
 
 logger = logging.getLogger(__name__)
-LEASE_DURATION = timedelta(minutes=15)
 
 
 class ManualSummary(commands.Cog):
@@ -48,12 +46,23 @@ class ManualSummary(commands.Cog):
     def __init__(
         self, bot, *, settings: Settings | None = None, start_worker: bool = True
     ):
-        """Bind shared services and optionally begin the ten-second worker loop."""
+        """Bind shared services and optionally begin the configured worker loop."""
         self.bot = bot
         self.settings = settings or getattr(bot, "settings", None)
         self.worker_id = uuid.uuid4().hex
+        self.worker_loop.change_interval(
+            seconds=self.config.manual_poll_interval_seconds
+        )
         if start_worker:
             self.worker_loop.start()
+
+    @property
+    def config(self) -> RuntimeConfig:
+        """Return injected operational settings or the centralized defaults."""
+        return runtime_config(getattr(self, "settings", None))
+
+    def _lease_duration(self) -> timedelta:
+        return timedelta(seconds=self.config.job_lease_seconds)
 
     def cog_unload(self):
         """Stop future worker-loop iterations when Discord unloads this cog."""
@@ -63,7 +72,7 @@ class ManualSummary(commands.Cog):
         """Stop the worker during the application's explicit shutdown sequence."""
         self.worker_loop.cancel()
 
-    @tasks.loop(seconds=10)
+    @tasks.loop()
     async def worker_loop(self):
         """Claim and process all manual jobs that are due in this polling interval."""
         await self.process_due_jobs()
@@ -153,7 +162,7 @@ class ManualSummary(commands.Cog):
                         "status": status.value,
                         "claimed_by": self.worker_id,
                         "claimed_at": now,
-                        "lease_expires_at": now + LEASE_DURATION,
+                        "lease_expires_at": now + self._lease_duration(),
                     }
                 },
                 return_document=ReturnDocument.AFTER,
@@ -175,13 +184,14 @@ class ManualSummary(commands.Cog):
 
         async def renew():
             while True:
-                await asyncio.sleep(LEASE_DURATION.total_seconds() / 3)
+                await asyncio.sleep(self._lease_duration().total_seconds() / 3)
                 try:
                     await ManualSummaryJob.get_pymongo_collection().update_one(
                         {"_id": job.id, "claimed_by": self.worker_id},
                         {
                             "$set": {
-                                "lease_expires_at": datetime.now(UTC) + LEASE_DURATION
+                                "lease_expires_at": datetime.now(UTC)
+                                + self._lease_duration()
                             }
                         },
                     )
@@ -201,15 +211,15 @@ class ManualSummary(commands.Cog):
         use_youtube_audio = job.source == "youtube" and getattr(
             job, "youtube_audio_fallback", False
         )
-        if use_youtube_audio and not getattr(
-            self.settings, "youtube_yt_dlp_fallback_enabled", False
-        ):
+        if use_youtube_audio and not self.config.youtube_yt_dlp_fallback_enabled:
             job.status = JobStatus.FAILED
             job.last_error = "YouTube audio fallback is disabled."
             self._release(job)
             await self._save(job)
             return
-        generation_options = {"use_youtube_audio": True} if use_youtube_audio else {}
+        generation_options = {"config": self.config}
+        if use_youtube_audio:
+            generation_options["use_youtube_audio"] = True
         ref = VideoRef(
             source=job.source,
             video_id=job.video_id,
@@ -258,7 +268,10 @@ class ManualSummary(commands.Cog):
                 job.delivery_chunks = (
                     await generate_delivery_chunks()
                     if use_youtube_audio
-                    else await retry_invalid_summary_response(generate_delivery_chunks)
+                    else await retry_invalid_summary_response(
+                        generate_delivery_chunks,
+                        retries=self.config.invalid_summary_retries,
+                    )
                 )
         except IndexError:
             job.delivery_chunks = [f"Invalid topic index: {(job.topic_index or 0) + 1}"]
@@ -334,7 +347,7 @@ class ManualSummary(commands.Cog):
         )
         job.retry_count += 1
         job.last_error = str(exc)
-        retry_limit = getattr(self.settings, "source_retry_limit", MAX_RETRIES)
+        retry_limit = self.config.source_retry_limit
         fallback_active = getattr(job, "youtube_audio_fallback", False)
         if (
             allow_youtube_fallback
@@ -342,7 +355,7 @@ class ManualSummary(commands.Cog):
             and not fallback_active
             and job.source == "youtube"
             and job.retry_count >= retry_limit
-            and getattr(self.settings, "youtube_yt_dlp_fallback_enabled", False)
+            and self.config.youtube_yt_dlp_fallback_enabled
         ):
             job.youtube_audio_fallback = True
             job.status = JobStatus.QUEUED
@@ -366,7 +379,7 @@ class ManualSummary(commands.Cog):
         else:
             job.status = JobStatus.QUEUED
             job.next_attempt_at = datetime.now(UTC) + timedelta(
-                hours=exponential_backoff_hours(job.retry_count)
+                seconds=self.config.retry_delay_seconds(job.retry_count)
             )
         self._release(job)
         await self._save(job)
@@ -375,14 +388,12 @@ class ManualSummary(commands.Cog):
         """Record a Discord failure while preserving generated chunks for redelivery."""
         job.delivery_retry_count += 1
         job.last_error = str(exc)
-        if job.delivery_retry_count >= getattr(
-            self.settings, "delivery_retry_limit", MAX_RETRIES
-        ):
+        if job.delivery_retry_count >= self.config.delivery_retry_limit:
             job.status = JobStatus.FAILED
         else:
             job.status = JobStatus.READY_TO_DELIVER
             job.next_attempt_at = datetime.now(UTC) + timedelta(
-                hours=exponential_backoff_hours(job.delivery_retry_count)
+                seconds=self.config.retry_delay_seconds(job.delivery_retry_count)
             )
         self._release(job)
         await self._save(job)

@@ -50,10 +50,11 @@ resumes instead of generating content again.
 ### Automatic requests
 
 `/addchannel` stores a Holodex channel in `FollowedChannel`. The auto-summary
-poller runs at `POLL_INTERVAL_MINUTES`, obtains streams published after the
+poller runs at `workers.poll_interval_minutes`, obtains streams published after the
 channel was added, ignores configured unwanted Holodex topic types, and creates
 a `SummaryJob` for each eligible stream. Generation is delayed until at least
-two hours after the stream ends to give a transcript time to become available.
+`autosummary.transcript_delay_seconds` after the stream ends (two hours by
+default) to give a transcript time to become available.
 
 The poller claims automatic jobs atomically, renews their lease while working,
 refreshes each video's Holodex topic before generation, and cancels the job
@@ -61,7 +62,7 @@ without posting when the topic is ignored under the policy effective at the
 video's publication time. If the lookup fails or Holodex has no topic, the bot
 tries once more and then proceeds with generation if the topic is still unknown.
 Other jobs generate and persist topics, then deliver the saved chunks to
-`AUTO_SUMMARY_CHANNEL_ID`. An expired lease can be reclaimed by another worker
+`discord.auto_summary_channel_id`. An expired lease can be reclaimed by another worker
 after a restart or interrupted process.
 
 ## Persistent data and state
@@ -99,13 +100,14 @@ notebooks in one bot process. MongoDB job claims and leases provide durability
 across processes and restarts.
 
 Transient source and Discord delivery failures use exponential delays of 1, 2,
-4, 8, and so on hours, bounded by `SOURCE_RETRY_LIMIT` and
-`DELIVERY_RETRY_LIMIT`. A malformed NotebookLM topic response
-(`InvalidSummaryResponse`) gets one immediate retry while the job remains
+4, 8, and so on hours by default. The `retries` configuration section controls
+source/delivery limits, initial delay, and multiplier. A malformed NotebookLM topic response
+(`InvalidSummaryResponse`) gets `retries.invalid_response_retries` immediate
+retries (one by default) while the job remains
 claimed; only a subsequent failure enters the durable retry queue and consumes
 one source retry. Permanent source failures bypass the source retry queue.
 
-With `YOUTUBE_YT_DLP_FALLBACK_ENABLED=true` (default `false`), a retryable
+With `youtube.yt_dlp_fallback_enabled = true` (default `false`), a retryable
 NotebookLM generation failure that exhausts normal YouTube retries queues one
 final audio-based attempt. Both automatic and manual jobs persist the
 `youtube_audio_fallback` flag before returning to the queue, so restart recovery
@@ -148,11 +150,20 @@ the relevant command and never rewrites queued jobs.
 ## Observability and operations
 
 Logging is configured before external services are opened. The application
-writes UTC console logs and a required daily rotating file log, retaining 14
-days. Optional Discord logging queues warning-and-higher events without
+writes UTC console logs and a required rotating file log. The `logging`
+configuration section controls its path, level, rotation, and retained backups
+(daily rotation and 14 backups by default). Optional Discord logging queues
+events at its configured severity (WARNING by default) without
 blocking the application; it redacts common credential formats and reports
 dropped events when its bounded queue recovers. Each Discord log shows an
 explicit UTC timestamp and a Discord-rendered local timestamp for the viewer.
+
+Secrets come from `.env` or process environment. Non-secret options come only
+from optional `config.toml` in the working directory, with native TOML types
+and centralized defaults for omitted values. Configuration is validated once
+before opening external services, then injected into workers, upload helpers,
+audio downloaders, and logging. Environment options do not override TOML.
+Database name and Holodex behavior remain fixed in code.
 
 Use the command guide for normal bot actions and the installation guide for
 settings. Manage persistent schema changes through the deployment process and

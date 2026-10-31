@@ -8,6 +8,7 @@ import vsummary.cogs.autosummary.autosummary as autosummary_module
 from vsummary.cogs.autosummary.autosummary import Autosummary
 from vsummary.model.channel import AutoSummaryTopicPolicy, JobStatus, SummaryJob
 from vsummary.model.video import Topic
+from vsummary.settings import RuntimeConfig
 from vsummary.util.holodex import TransientHolodexError
 from vsummary.util.summarizer import (
     InvalidSummaryResponse,
@@ -61,6 +62,37 @@ def make_youtube_fallback_job(*, enabled=True, retry_count=1):
         retry_count=retry_count,
     )
     return cog, job
+
+
+@pytest.mark.asyncio
+async def test_auto_job_backoff_and_lease_use_operational_config():
+    cog, job = make_youtube_fallback_job(enabled=False, retry_count=0)
+    cog.settings = RuntimeConfig(
+        source_retry_limit=5,
+        retry_initial_delay_seconds=7,
+        retry_multiplier=3,
+        job_lease_seconds=123,
+    )
+    assert cog._lease_duration().total_seconds() == 123
+    for delay in (7, 21):
+        before = datetime.now(UTC)
+        await cog._handle_source_error(job, RuntimeError("offline"))
+        assert delay <= (job.next_attempt_at - before).total_seconds() < delay + 1
+
+
+@pytest.mark.asyncio
+async def test_auto_invalid_response_retry_budget_comes_from_config():
+    cog, job = make_youtube_fallback_job(retry_count=0)
+    cog.settings = RuntimeConfig(invalid_summary_retries=2)
+    error = InvalidSummaryResponse("bad JSON")
+    cog.summary_service.summarize.side_effect = [
+        error,
+        error,
+        [Topic(name="Intro", detail="Details")],
+    ]
+    assert await cog._generate_for_job(job)
+    assert cog.summary_service.summarize.await_count == 3
+    assert job.retry_count == 0
 
 
 @pytest.mark.asyncio

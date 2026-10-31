@@ -62,7 +62,7 @@ requests to other hosts.
    - **Send Messages in Threads**, when threads are used
 
 
-## 4. Configure environment variables
+## 4. Configure secrets and operational settings
 
 Create `.env` from the sample file:
 
@@ -70,58 +70,115 @@ Create `.env` from the sample file:
 cp .env.example .env
 ```
 
-Example local configuration:
+Only application secrets belong in `.env` (or the process environment, which
+takes precedence):
 
 ```dotenv
 DISCORD_TOKEN=replace-with-a-bot-token
 MONGODB_URI=mongodb://localhost:27017
-MONGODB_DATABASE=VSummary
-
-# Channel for automatic summaries. Leave empty to disable this feature.
-AUTO_SUMMARY_CHANNEL_ID=
-
-# Channel for WARNING/ERROR logs. Leave empty for console and file logging only.
-DISCORD_LOG_CHANNEL_ID=
-
-# One message per second across the bot.
-DISCORD_SEND_INTERVAL_SECONDS=1.0
 ```
+
+Operational options are read only from `config.toml` in the working directory.
+The file is optional and ignored by Git. To customize the defaults:
+
+```bash
+cp config.example.toml config.toml
+```
+
+For example:
+
+```toml
+[discord]
+auto_summary_channel_id = 123456789012345678
+send_interval_seconds = 1.0
+
+[logging]
+discord_channel_id = 234567890123456789
+level = "INFO"
+```
+
+Omitted settings use the defaults below. Omit either channel ID to disable that
+destination; TOML has no `null` value. Relative paths remain relative to the
+working directory. Restart the bot after editing configuration. Unknown keys,
+invalid types, and malformed TOML stop startup before external services open.
+Programmatic callers may pass `config_path` to `load_settings`; an explicitly
+selected missing file is an error, while an absent default file uses defaults.
 
 To get a channel ID, enable **Developer Mode** in Discord, right-click the
 channel, and choose **Copy Channel ID**. The value must be a positive integer,
 without brackets or quotation marks.
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `DISCORD_TOKEN` | Yes | — | Discord bot token. |
-| `MONGODB_URI` | Yes | — | MongoDB connection string. |
-| `MONGODB_DATABASE` | No | `VSummary` | Database name. |
-| `AUTO_SUMMARY_CHANNEL_ID` | No | — | Channel that receives automatic summaries. |
-| `DISCORD_LOG_CHANNEL_ID` | No | — | Channel that receives WARNING-and-higher logs. |
-| `DISCORD_SEND_INTERVAL_SECONDS` | No | `1.0` | Minimum gap between bot messages; must be greater than 0. |
-| `POLL_INTERVAL_MINUTES` | No | `30` | Holodex polling interval for new videos. |
-| `SOURCE_RETRY_LIMIT` | No | `5` | Maximum attempts to generate a summary. |
-| `YOUTUBE_YT_DLP_FALLBACK_ENABLED` | No | `false` | Allow one final YouTube audio-based attempt after normal generation retries are exhausted. Requires `ffmpeg`. |
-| `DELIVERY_RETRY_LIMIT` | No | `5` | Maximum attempts to deliver an already generated summary to Discord. |
-| `HTTP_TIMEOUT_SECONDS` | No | `15.0` | Holodex HTTP timeout. |
-| `LOG_FILE_PATH` | No | `logs/vsummary.log` | Daily rotating log-file path. |
-| `LOG_LEVEL` | No | `INFO` | One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
+| TOML option | Default | Purpose |
+| --- | --- | --- |
+| `discord.auto_summary_channel_id` | Omitted | Destination for automatic summaries. |
+| `discord.send_interval_seconds` | `1.0` | Minimum gap between outbound messages. |
+| `workers.poll_interval_minutes` | `30` | Automatic-summary polling interval. |
+| `workers.manual_poll_interval_seconds` | `10` | Manual worker interval. |
+| `workers.lease_seconds` | `900` | Shared job lease duration; renewed every third of the duration. |
+| `retries.source_limit` | `5` | Native generation failure threshold. |
+| `retries.delivery_limit` | `5` | Discord delivery failure threshold. |
+| `retries.initial_delay_seconds` | `3600` | First durable retry delay. |
+| `retries.multiplier` | `2` | Multiplier for each subsequent retry delay; at least 1. |
+| `retries.invalid_response_retries` | `1` | Immediate malformed-response retries per native generation attempt. |
+| `autosummary.transcript_delay_seconds` | `7200` | Delay after stream completion before first generation. |
+| `youtube.yt_dlp_fallback_enabled` | `false` | One final audio attempt after native retries. Requires `ffmpeg`. |
+| `media.max_audio_mib` | `190` | Maximum prepared audio size in MiB. |
+| `media.bitrate_kbps` | `64` | Converted M4A bitrate. |
+| `media.download_format` | `"bestaudio/best"` | yt-dlp source format selector. |
+| `media.upload_timeout_seconds` | `600` | Wait for uploaded audio processing. |
+| `logging.path` | `"logs/vsummary.log"` | Rotating file-log destination. |
+| `logging.level` | `"INFO"` | Global minimum severity. |
+| `logging.rotation_interval_days` | `1` | File rotation interval in UTC days. |
+| `logging.backup_count` | `14` | Retained rotated files; 0 disables deletion of backups. |
+| `logging.discord_channel_id` | Omitted | Optional Discord log destination. |
+| `logging.discord_queue_size` | `1000` | Maximum queued Discord log events. |
+| `logging.discord_min_level` | `"WARNING"` | Discord severity threshold, also subject to the global minimum. |
+
+Numbers must be finite and positive, except retry counts, transcript delay, and
+backup count may be zero. A source/delivery threshold of zero schedules no
+durable retries after the initial failure. Logging levels accept `DEBUG`,
+`INFO`, `WARNING`, `ERROR`, or `CRITICAL`, ignoring case. Booleans use TOML
+`true`/`false`, without quotes. Shared media settings apply to Twitch, archived
+X Spaces, generic media, and the YouTube audio fallback.
+
+### Migrating an existing `.env`
+
+Non-secret environment options are no longer read. Move their values using
+this mapping, then remove the old entries from `.env` and any service environment:
+
+| Old environment variable | TOML option |
+| --- | --- |
+| `AUTO_SUMMARY_CHANNEL_ID` | `discord.auto_summary_channel_id` |
+| `DISCORD_SEND_INTERVAL_SECONDS` | `discord.send_interval_seconds` |
+| `POLL_INTERVAL_MINUTES` | `workers.poll_interval_minutes` |
+| `SOURCE_RETRY_LIMIT` | `retries.source_limit` |
+| `DELIVERY_RETRY_LIMIT` | `retries.delivery_limit` |
+| `YOUTUBE_YT_DLP_FALLBACK_ENABLED` | `youtube.yt_dlp_fallback_enabled` |
+| `LOG_FILE_PATH` | `logging.path` |
+| `LOG_LEVEL` | `logging.level` |
+| `DISCORD_LOG_CHANNEL_ID` | `logging.discord_channel_id` |
+
+Convert quoted environment numbers to TOML numbers and legacy boolean strings
+to TOML booleans; omit empty channel IDs. `MONGODB_DATABASE` and
+`HTTP_TIMEOUT_SECONDS` are unsupported: the database is fixed to `VSummary`,
+and Holodex retains its existing endpoint, headers, 15-second timeout, retries,
+pagination, and topic-refresh policy. `APP_ID`, `PUBLIC_KEY`, and
+`TWITCH_MAX_DURATION_SECONDS` are unused legacy entries and do not need TOML options.
 
 ### Optional YouTube audio fallback
 
 To try downloaded audio when NotebookLM cannot generate a YouTube summary, add
-this to `.env` and restart the bot:
+this to `config.toml` and restart the bot:
 
-```dotenv
-YOUTUBE_YT_DLP_FALLBACK_ENABLED=true
+```toml
+[youtube]
+yt_dlp_fallback_enabled = true
 ```
 
-The option is disabled by default. It accepts `true`/`false`, `1`/`0`,
-`yes`/`no`, or `on`/`off`, ignoring case and surrounding whitespace. Missing or
-blank values disable it; other values prevent startup with a configuration error.
+The option is disabled by default. Use a native TOML boolean.
 
 Manual `/topics` and `/detail` requests and automatic summaries first use the
-normal YouTube path, including `SOURCE_RETRY_LIMIT` and its backoff. If a
+normal YouTube path, including `retries.source_limit` and its backoff. If a
 retryable NotebookLM generation failure exhausts that budget, the job queues
 one final attempt for the next worker pass. That attempt uses the existing
 `yt-dlp` downloader and `ffmpeg` to prepare M4A audio, uploads it to NotebookLM,

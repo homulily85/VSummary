@@ -181,10 +181,14 @@ def test_download_x_space_audio_has_no_duration_limit_but_rejects_oversized_audi
     output = Path(tmp_path) / f"{SPACE_ID}.m4a"
     output.write_bytes(b"audio")
     monkeypatch.setattr(x_space.yt_dlp, "YoutubeDL", lambda _: downloader)
-    monkeypatch.setattr(x_space, "MAX_AUDIO_BYTES", 0)
+    from vsummary.settings import RuntimeConfig
 
     with pytest.raises(x_space.XSpaceAudioUnavailableError, match="upload limit"):
-        x_space._download(f"https://x.com/i/spaces/{SPACE_ID}", str(tmp_path))
+        x_space._download(
+            f"https://x.com/i/spaces/{SPACE_ID}",
+            str(tmp_path),
+            config=RuntimeConfig(max_audio_mib=1 / 1024**2),
+        )
 
     downloader.download.assert_called_once_with([f"https://x.com/i/spaces/{SPACE_ID}"])
 

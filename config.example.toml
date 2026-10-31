@@ -1,0 +1,38 @@
+# Copy to config.toml to override operational defaults. Secrets stay in .env.
+# Optional channel IDs must be positive integers. Omit them to disable delivery.
+[discord]
+# auto_summary_channel_id = 123456789012345678
+send_interval_seconds = 1.0
+
+[workers]
+poll_interval_minutes = 30
+manual_poll_interval_seconds = 10
+lease_seconds = 900
+
+[retries]
+source_limit = 5
+delivery_limit = 5
+initial_delay_seconds = 3600
+multiplier = 2
+invalid_response_retries = 1
+
+[autosummary]
+transcript_delay_seconds = 7200
+
+[youtube]
+yt_dlp_fallback_enabled = false
+
+[media]
+max_audio_mib = 190
+bitrate_kbps = 64
+download_format = "bestaudio/best"
+upload_timeout_seconds = 600
+
+[logging]
+path = "logs/vsummary.log"
+level = "INFO"
+rotation_interval_days = 1
+backup_count = 14
+# discord_channel_id = 123456789012345678
+discord_queue_size = 1000
+discord_min_level = "WARNING"

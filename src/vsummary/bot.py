@@ -5,7 +5,7 @@ from discord.ext import commands
 from notebooklm import NotebookLMClient
 
 from vsummary.logging import DiscordLogHandler
-from vsummary.settings import Settings
+from vsummary.settings import Settings, runtime_config
 from vsummary.util.discord import DiscordMessageRateLimiter
 from vsummary.util.video_work import VideoWorkCoordinator
 
@@ -38,7 +38,7 @@ class Bot(commands.Bot):
         self.discord_log_handler = discord_log_handler
         self.video_work = VideoWorkCoordinator()
         self.message_rate_limiter = DiscordMessageRateLimiter(
-            getattr(settings, "discord_send_interval_seconds", 1.0)
+            runtime_config(settings).discord_send_interval_seconds
         )
 
     async def close(self):

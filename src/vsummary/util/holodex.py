@@ -11,6 +11,7 @@ from email.utils import parsedate_to_datetime
 import httpx
 
 from vsummary.logging import log_event
+from vsummary.settings import DEFAULT_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +28,13 @@ DEFAULT_IGNORED_TOPICS = {
     "shorts",
     "Music_Cover",
 }
-TRANSCRIPT_READY_DELAY = timedelta(hours=2)
-MAX_RETRIES = 5
+TRANSCRIPT_READY_DELAY = timedelta(seconds=DEFAULT_CONFIG.transcript_delay_seconds)
+MAX_RETRIES = DEFAULT_CONFIG.source_retry_limit
 
 
-def exponential_backoff_hours(retry_count: int) -> int:
+def exponential_backoff_hours(retry_count: int) -> float:
     """Return the one-based exponential source-job retry delay in hours."""
-    return 2 ** (retry_count - 1)
+    return DEFAULT_CONFIG.retry_delay_seconds(retry_count) / 3600
 
 
 def is_transcript_ready(available_at: datetime) -> bool:

@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,6 +10,7 @@ import vsummary.cogs.manualsummary.manualsummary as manualsummary_module
 from vsummary.cogs.manualsummary.manualsummary import ManualSummary
 from vsummary.model.channel import JobStatus, ManualSummaryJob, ManualSummaryOperation
 from vsummary.model.video import Topic
+from vsummary.settings import RuntimeConfig
 from vsummary.util.generic_media import GenericMediaUnavailableError
 from vsummary.util.summarizer import InvalidSummaryResponse, PermanentSummaryError
 from vsummary.util.twitch import TwitchAudioUnavailableError
@@ -43,6 +44,33 @@ def make_manual_fallback_job(
         retry_count=retry_count,
     )
     return cog, job
+
+
+@pytest.mark.asyncio
+async def test_manual_invalid_response_retry_budget_and_config_propagation(monkeypatch):
+    cog, job = make_manual_fallback_job(retry_count=0)
+    cog.settings = RuntimeConfig(
+        invalid_summary_retries=2, source_upload_timeout_seconds=11
+    )
+    error = InvalidSummaryResponse("bad JSON")
+    summary = AsyncMock(side_effect=[error, error, [Topic(name="Intro")]])
+    monkeypatch.setattr(manualsummary_module, "get_topic_list", summary)
+    await cog._generate(job)
+    assert job.status is JobStatus.DELIVERING
+    assert summary.await_count == 3
+    assert summary.await_args.kwargs["config"].source_upload_timeout_seconds == 11
+
+
+@pytest.mark.asyncio
+async def test_manual_job_backoff_uses_operational_config():
+    cog, job = make_manual_fallback_job(retry_count=0, enabled=False)
+    cog.settings = RuntimeConfig(
+        source_retry_limit=5, retry_initial_delay_seconds=7, retry_multiplier=3
+    )
+    for delay in (7, 21):
+        before = datetime.now(UTC)
+        await cog._fail(job, RuntimeError("offline"))
+        assert delay <= (job.next_attempt_at - before).total_seconds() < delay + 1
 
 
 @pytest.mark.asyncio
@@ -127,7 +155,10 @@ async def test_manual_audio_fallback_resumes_each_operation(
     await cog._generate(job)
 
     assert job.status is JobStatus.DELIVERING
-    assert summary.await_args.kwargs == {"use_youtube_audio": True}
+    assert summary.await_args.kwargs == {
+        "use_youtube_audio": True,
+        "config": cog.config,
+    }
     assert summary.await_args.args[1].source == "youtube"
     assert job.title == "Title"
     assert job.channel_name == "Channel"
@@ -387,15 +418,14 @@ async def test_manual_generation_renews_owned_lease(monkeypatch):
             renewed.set()
 
     monkeypatch.setattr(
-        manualsummary_module, "LEASE_DURATION", timedelta(milliseconds=30)
-    )
-    monkeypatch.setattr(
         manualsummary_module.ManualSummaryJob,
         "get_pymongo_collection",
         lambda: Collection(),
     )
     cog = ManualSummary.__new__(ManualSummary)
     cog.worker_id = "worker"
+
+    cog.settings = RuntimeConfig(job_lease_seconds=0.03)
 
     async with cog._renew_generation_lease(SimpleNamespace(id="job")):
         await asyncio.wait_for(renewed.wait(), timeout=1)

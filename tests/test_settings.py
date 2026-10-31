@@ -1,171 +1,247 @@
+import tomllib
 from pathlib import Path
 
 import pytest
 
+from vsummary import settings as settings_module
 from vsummary.settings import Settings, SettingsError, load_settings
 
+SECRETS = {"DISCORD_TOKEN": "token", "MONGODB_URI": "mongodb://localhost"}
 
-def test_env_example_lists_every_runtime_configuration_variable():
-    example = Path(".env.example").read_text(encoding="utf-8")
+
+def test_env_example_contains_only_supported_application_secrets():
     names = {
         line.partition("=")[0]
-        for line in example.splitlines()
+        for line in Path(".env.example").read_text().splitlines()
         if line and not line.startswith("#") and "=" in line
     }
-
-    assert names == {
-        "DISCORD_TOKEN",
-        "MONGODB_URI",
-        "MONGODB_DATABASE",
-        "AUTO_SUMMARY_CHANNEL_ID",
-        "DISCORD_LOG_CHANNEL_ID",
-        "DISCORD_SEND_INTERVAL_SECONDS",
-        "POLL_INTERVAL_MINUTES",
-        "SOURCE_RETRY_LIMIT",
-        "YOUTUBE_YT_DLP_FALLBACK_ENABLED",
-        "DELIVERY_RETRY_LIMIT",
-        "HTTP_TIMEOUT_SECONDS",
-        "LOG_FILE_PATH",
-        "LOG_LEVEL",
-    }
+    assert names == set(SECRETS)
 
 
-def test_settings_loads_and_validates_runtime_configuration():
+def test_config_example_matches_builtin_defaults():
+    parsed = tomllib.loads(Path("config.example.toml").read_text())
+    assert (
+        settings_module.RuntimeConfig.from_mapping(parsed)
+        == settings_module.DEFAULT_CONFIG
+    )
+    assert "database" not in parsed
+    assert "holodex" not in parsed
+
+
+def test_settings_loads_typed_toml_options_and_keeps_database_fixed():
     settings = Settings.from_mapping(
-        {
-            "DISCORD_TOKEN": "token",
-            "MONGODB_URI": "mongodb://localhost:27017",
-            "MONGODB_DATABASE": "summaries",
-            "AUTO_SUMMARY_CHANNEL_ID": "123",
-            "POLL_INTERVAL_MINUTES": "15",
-            "SOURCE_RETRY_LIMIT": "4",
-            "DELIVERY_RETRY_LIMIT": "3",
-            "HTTP_TIMEOUT_SECONDS": "8.5",
-            "LOG_FILE_PATH": "var/log/vsummary.log",
-            "LOG_LEVEL": "debug",
-            "DISCORD_LOG_CHANNEL_ID": "456",
-            "DISCORD_SEND_INTERVAL_SECONDS": "0.5",
-        }
+        SECRETS,
+        config={
+            "discord": {"auto_summary_channel_id": 123, "send_interval_seconds": 0.5},
+            "workers": {
+                "poll_interval_minutes": 15,
+                "manual_poll_interval_seconds": 3,
+                "lease_seconds": 120,
+            },
+            "retries": {
+                "source_limit": 4,
+                "delivery_limit": 3,
+                "initial_delay_seconds": 7,
+                "multiplier": 3,
+                "invalid_response_retries": 0,
+            },
+            "autosummary": {"transcript_delay_seconds": 60},
+            "youtube": {"yt_dlp_fallback_enabled": True},
+            "media": {
+                "max_audio_mib": 20,
+                "bitrate_kbps": 32,
+                "download_format": "worstaudio",
+                "upload_timeout_seconds": 9,
+            },
+            "logging": {
+                "path": "var/log/bot.log",
+                "level": "debug",
+                "rotation_interval_days": 2,
+                "backup_count": 3,
+                "discord_channel_id": 456,
+                "discord_queue_size": 4,
+                "discord_min_level": "error",
+            },
+        },
+    )
+    assert settings.discord_token == "token"
+    assert settings.mongodb_database == "VSummary"
+    assert settings.auto_summary_channel_id == 123
+    assert settings.discord_send_interval_seconds == 0.5
+    assert settings.poll_interval_minutes == 15
+    assert settings.manual_poll_interval_seconds == 3
+    assert settings.job_lease_seconds == 120
+    assert settings.source_retry_limit == 4
+    assert settings.delivery_retry_limit == 3
+    assert settings.retry_initial_delay_seconds == 7
+    assert settings.retry_multiplier == 3
+    assert settings.invalid_summary_retries == 0
+    assert settings.transcript_delay_seconds == 60
+    assert settings.youtube_yt_dlp_fallback_enabled is True
+    assert settings.max_audio_mib == 20
+    assert settings.audio_bitrate_kbps == 32
+    assert settings.audio_download_format == "worstaudio"
+    assert settings.source_upload_timeout_seconds == 9
+    assert settings.log_file_path == Path("var/log/bot.log")
+    assert settings.log_level == "DEBUG"
+    assert settings.log_rotation_interval_days == 2
+    assert settings.log_backup_count == 3
+    assert settings.discord_log_channel_id == 456
+    assert settings.discord_log_queue_size == 4
+    assert settings.discord_log_min_level == "ERROR"
+
+
+def test_nonsecret_environment_values_are_ignored():
+    values = SECRETS | {
+        "AUTO_SUMMARY_CHANNEL_ID": "123",
+        "DISCORD_SEND_INTERVAL_SECONDS": "0.1",
+        "POLL_INTERVAL_MINUTES": "2",
+        "SOURCE_RETRY_LIMIT": "2",
+        "DELIVERY_RETRY_LIMIT": "2",
+        "MONGODB_DATABASE": "other",
+        "HTTP_TIMEOUT_SECONDS": "0.1",
+        "LOG_FILE_PATH": "other.log",
+        "LOG_LEVEL": "DEBUG",
+        "DISCORD_LOG_CHANNEL_ID": "456",
+        "YOUTUBE_YT_DLP_FALLBACK_ENABLED": "true",
+        "TWITCH_MAX_DURATION_SECONDS": "1",
+    }
+    assert Settings.from_mapping(values) == Settings.from_mapping(SECRETS)
+    assert settings_module.configured_auto_summary_channel_id() is None
+
+
+def test_default_config_is_optional_but_explicit_missing_path_fails(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    assert load_settings(SECRETS, load_dotenv_file=False) == Settings.from_mapping(
+        SECRETS
+    )
+    with pytest.raises(SettingsError, match="missing.toml"):
+        load_settings(SECRETS, config_path="missing.toml", load_dotenv_file=False)
+
+
+def test_default_and_explicit_config_paths_are_loaded(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    Path("config.toml").write_text("[youtube]\nyt_dlp_fallback_enabled = true\n")
+    assert (
+        load_settings(SECRETS, load_dotenv_file=False).youtube_yt_dlp_fallback_enabled
+        is True
+    )
+    Path("other.toml").write_text("[discord]\nsend_interval_seconds = 2.5\n")
+    assert (
+        load_settings(
+            SECRETS, config_path="other.toml", load_dotenv_file=False
+        ).discord_send_interval_seconds
+        == 2.5
     )
 
-    assert settings.discord_token == "token"
-    assert settings.mongodb_database == "summaries"
-    assert settings.auto_summary_channel_id == 123
-    assert settings.poll_interval_minutes == 15
-    assert settings.http_timeout_seconds == 8.5
-    assert settings.log_file_path == Path("var/log/vsummary.log")
-    assert settings.log_level == "DEBUG"
-    assert settings.discord_log_channel_id == 456
-    assert settings.discord_send_interval_seconds == 0.5
+
+def test_dotenv_secrets_preserve_environment_precedence_and_notebooklm_auth(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DISCORD_TOKEN", "environment-token")
+    monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.delenv("NOTEBOOKLM_PROFILE", raising=False)
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "DISCORD_TOKEN=file-token\nMONGODB_URI=mongodb://file\nNOTEBOOKLM_PROFILE=bot\nLOG_LEVEL=DEBUG\n"
+    )
+    settings = load_settings(dotenv_path=dotenv)
+    assert settings.discord_token == "environment-token"
+    assert settings.mongodb_uri == "mongodb://file"
+    assert settings.log_level == "INFO"
+    import os
+
+    assert os.environ["NOTEBOOKLM_PROFILE"] == "bot"
+    monkeypatch.delenv("MONGODB_URI")
+    monkeypatch.delenv("NOTEBOOKLM_PROFILE")
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
 
 
 @pytest.mark.parametrize(
-    ("value", "enabled"),
+    "text",
     [
-        (None, False),
-        ("", False),
-        ("  ", False),
-        ("true", True),
-        (" TRUE ", True),
-        ("1", True),
-        ("yes", True),
-        ("On", True),
-        ("false", False),
-        (" FALSE ", False),
-        ("0", False),
-        ("no", False),
-        ("Off", False),
+        "[broken",
+        "[database]\nname='other'",
+        "[holodex]\ntimeout_seconds=1",
+        "[discord]\nunknown=1",
+        "discord=1",
     ],
 )
-def test_youtube_audio_fallback_boolean_configuration(value, enabled):
-    values = {"DISCORD_TOKEN": "token", "MONGODB_URI": "mongodb://localhost"}
-    if value is not None:
-        values["YOUTUBE_YT_DLP_FALLBACK_ENABLED"] = value
-    assert Settings.from_mapping(values).youtube_yt_dlp_fallback_enabled is enabled
-    assert (
-        Settings(
-            discord_token="token", mongodb_uri="mongodb://localhost"
-        ).youtube_yt_dlp_fallback_enabled
-        is False
-    )
-
-
-def test_youtube_audio_fallback_rejects_invalid_configuration():
-    with pytest.raises(SettingsError, match="YOUTUBE_YT_DLP_FALLBACK_ENABLED"):
-        Settings.from_mapping(
-            {
-                "DISCORD_TOKEN": "token",
-                "MONGODB_URI": "mongodb://localhost",
-                "YOUTUBE_YT_DLP_FALLBACK_ENABLED": "sometimes",
-            }
-        )
-
-
-def test_settings_uses_logging_defaults_and_rejects_invalid_logging_values():
-    defaults = Settings.from_mapping(
-        {"DISCORD_TOKEN": "token", "MONGODB_URI": "mongodb://localhost"}
-    )
-
-    assert defaults.log_file_path == Path("logs/vsummary.log")
-    assert defaults.log_level == "INFO"
-    assert defaults.discord_log_channel_id is None
-    assert defaults.discord_send_interval_seconds == 1.0
-
-    for name, value in (
-        ("LOG_LEVEL", "verbose"),
-        ("DISCORD_LOG_CHANNEL_ID", "not-an-integer"),
-        ("DISCORD_LOG_CHANNEL_ID", "0"),
-        ("DISCORD_SEND_INTERVAL_SECONDS", "0"),
-    ):
-        values = {
-            "DISCORD_TOKEN": "token",
-            "MONGODB_URI": "mongodb://localhost",
-            name: value,
-        }
-        with pytest.raises(SettingsError):
-            Settings.from_mapping(values)
-
-
-def test_settings_rejects_missing_and_invalid_values():
+def test_invalid_or_unsupported_config_is_rejected(tmp_path, text):
+    path = tmp_path / "config.toml"
+    path.write_text(text)
     with pytest.raises(SettingsError):
+        load_settings(SECRETS, config_path=path, load_dotenv_file=False)
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("youtube", "yt_dlp_fallback_enabled", "true"),
+        ("workers", "lease_seconds", 0),
+        ("workers", "manual_poll_interval_seconds", float("nan")),
+        pytest.param("workers", "lease_seconds", 10**400, id="oversized-number"),
+        ("workers", "poll_interval_minutes", float("inf")),
+        ("discord", "auto_summary_channel_id", True),
+        ("discord", "send_interval_seconds", -1),
+        ("retries", "invalid_response_retries", -1),
+        ("retries", "source_limit", True),
+        ("retries", "multiplier", 0.5),
+        ("autosummary", "transcript_delay_seconds", -1),
+        ("media", "bitrate_kbps", 1.5),
+        ("media", "max_audio_mib", 0),
+        ("media", "download_format", ""),
+        ("logging", "level", "verbose"),
+        ("logging", "discord_min_level", "bad"),
+        ("logging", "discord_queue_size", 0),
+        ("logging", "path", ""),
+    ],
+)
+def test_invalid_typed_config_values_are_rejected(section, key, value):
+    with pytest.raises(SettingsError, match=key):
+        Settings.from_mapping(SECRETS, config={section: {key: value}})
+
+
+def test_zero_retry_counts_and_optional_channels():
+    settings = Settings.from_mapping(
+        SECRETS,
+        config={
+            "retries": {
+                "source_limit": 0,
+                "delivery_limit": 0,
+                "invalid_response_retries": 0,
+            },
+            "autosummary": {"transcript_delay_seconds": 0},
+        },
+    )
+    assert (
+        settings.source_retry_limit
+        == settings.delivery_retry_limit
+        == settings.invalid_summary_retries
+        == 0
+    )
+    assert settings.auto_summary_channel_id is settings.discord_log_channel_id is None
+
+
+def test_missing_required_secrets_still_fail():
+    with pytest.raises(SettingsError, match="DISCORD_TOKEN"):
+        Settings.from_mapping({})
+    with pytest.raises(SettingsError, match="MONGODB_URI"):
         Settings.from_mapping({"DISCORD_TOKEN": "token"})
 
-    with pytest.raises(SettingsError):
-        Settings.from_mapping(
-            {
-                "DISCORD_TOKEN": "token",
-                "MONGODB_URI": "mongodb://localhost",
-                "AUTO_SUMMARY_CHANNEL_ID": "not-an-integer",
-            }
-        )
 
-
-def test_settings_ignores_the_removed_twitch_duration_limit():
-    settings = Settings.from_mapping(
-        {
-            "DISCORD_TOKEN": "token",
-            "MONGODB_URI": "mongodb://localhost",
-            "TWITCH_MAX_DURATION_SECONDS": "not-a-number",
-        }
-    )
-
-    assert not hasattr(settings, "twitch_max_duration_seconds")
-
-
-def test_load_settings_can_read_a_mapping_without_import_side_effects():
-    settings = load_settings(
-        {
-            "DISCORD_TOKEN": "token",
-            "MONGODB_URI": "mongodb://localhost",
-            "AUTO_SUMMARY_CHANNEL_ID": "9",
-        },
-        load_dotenv_file=False,
-    )
-
-    assert settings == Settings.from_mapping(
-        {
-            "DISCORD_TOKEN": "token",
-            "MONGODB_URI": "mongodb://localhost",
-            "AUTO_SUMMARY_CHANNEL_ID": "9",
-        }
-    )
+def test_operational_injection_does_not_forward_or_represent_secrets():
+    values = {
+        "DISCORD_TOKEN": "discord-secret-value",
+        "MONGODB_URI": "mongodb://user:secret-value@localhost",
+    }
+    settings = Settings.from_mapping(values, config={"media": {"bitrate_kbps": 32}})
+    config = settings_module.runtime_config(settings)
+    assert type(config) is settings_module.RuntimeConfig
+    assert not hasattr(config, "discord_token")
+    assert not hasattr(config, "mongodb_uri")
+    assert config.audio_bitrate_kbps == 32
+    assert all(value not in repr(settings) for value in values.values())
