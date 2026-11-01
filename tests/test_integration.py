@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from notebooklm import SourceAddError
+from notebooklm import ChatError, SourceAddError
 from pymongo.errors import OperationFailure
 
 import vsummary.cogs.autosummary.autosummary as autosummary_module
@@ -38,6 +38,7 @@ from vsummary.util.holodex import (
 from vsummary.util.summarizer import (
     InvalidSummaryResponse,
     NotebookLMSummaryService,
+    PermanentSummaryError,
     TransientSummaryError,
 )
 from vsummary.util.video import VideoRef, parse_video_source
@@ -385,13 +386,151 @@ async def test_topic_review_saves_only_the_corrected_list(monkeypatch, draft, re
 
     assert [topic.name for topic in topics] == reviewed
     assert len(client.prompts) == 2
-    assert draft_json in client.prompts[1][1]
+    assert draft_json not in client.prompts[1][1]
+    assert (
+        "complete candidate topic list in your previous answer" in client.prompts[1][1]
+    )
     assert len(FakeVideoRecord.records) == 1
     assert FakeVideoRecord.records[0].topics == topics
     assert client.deleted == ["notebook-1"]
     cached_client = FakeNotebookClient()
     assert await summarizer_util.get_topic_list(cached_client, VIDEO_REF) == topics
     assert cached_client.prompts == cached_client.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["topics", "detail", "all", "service"])
+@pytest.mark.parametrize("text", ["a", "🎵"])
+async def test_large_topic_inventories_keep_every_topic_with_bounded_chat_requests(
+    monkeypatch, operation, text
+):
+    names = [f"Segment {i:04}: " + text * 86 for i in range(100)]
+    reviewed_names = names + ["Audience questions"]
+    draft = json.dumps([{"name": name} for name in names], ensure_ascii=False)
+    reviewed = json.dumps(
+        [{"name": name} for name in reviewed_names], ensure_ascii=False
+    )
+    answers = [draft, reviewed]
+    if operation == "detail":
+        answers.append("Selected details")
+    elif operation != "topics":
+        answers += [f"Details {index}" for index in range(len(reviewed_names))]
+    client = FakeNotebookClient(answers=answers)
+    ask = client.chat.ask
+
+    async def size_limited_ask(notebook_id, prompt):
+        if len(prompt.encode("utf-8")) > 4000:
+            raise ChatError(
+                "Chat request was rejected by the server (status 3). Question too large."
+            )
+        return await ask(notebook_id, prompt)
+
+    monkeypatch.setattr(client.chat, "ask", size_limited_ask)
+    config = RuntimeConfig(output_language="Japanese")
+    if operation == "topics":
+        result = await summarizer_util.get_topic_list(client, VIDEO_REF, config=config)
+        assert [topic.name for topic in result] == reviewed_names
+    elif operation == "detail":
+        result = await summarizer_util.get_topic_details(
+            client, VIDEO_REF, 50, config=config
+        )
+        assert result == {"topic_name": names[50], "detail": "Selected details"}
+    elif operation == "all":
+        result = await summarizer_util.get_topic_details_all(
+            client, VIDEO_REF, config=config
+        )
+        assert [item["topic_name"] for item in result] == reviewed_names
+    else:
+        result = await NotebookLMSummaryService(client, config=config).summarize(
+            VIDEO_REF
+        )
+        assert [topic.name for topic in result] == reviewed_names
+    assert [topic.name for topic in FakeVideoRecord.records[0].topics] == reviewed_names
+    assert client.deleted == ["notebook-1"]
+    assert all(notebook_id == "notebook-1" for notebook_id, _ in client.prompts)
+    assert all(len(prompt.encode("utf-8")) <= 4000 for _, prompt in client.prompts)
+    assert "previous answer" in client.prompts[1][1]
+    cached_client = FakeNotebookClient()
+    assert [
+        topic.name
+        for topic in await summarizer_util.get_topic_list(
+            cached_client, VIDEO_REF, config=config
+        )
+    ] == reviewed_names
+    assert cached_client.created == cached_client.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_oversized_language_never_dispatches_a_chat_request():
+    client = FakeNotebookClient()
+    with pytest.raises(PermanentSummaryError, match="4000"):
+        await summarizer_util.get_topic_list(
+            client, VIDEO_REF, config=RuntimeConfig(output_language="語" * 4000)
+        )
+    assert client.prompts == []
+    assert FakeVideoRecord.records == []
+    assert client.deleted == [notebook.id for notebook in client.created]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "stage"),
+    [
+        (operation, stage)
+        for operation in ("automatic", "topics", "detail", "all")
+        for stage in ("topic_extraction", "topic_review", "topic_detail")
+        if not (operation == "topics" and stage == "topic_detail")
+    ],
+)
+async def test_workers_do_not_retry_or_download_audio_for_status_3(operation, stage):
+    phase_index = {"topic_extraction": 0, "topic_review": 1, "topic_detail": 2}[stage]
+    client = FakeNotebookClient(
+        answers=['[{"name": "Concert"}]'] * phase_index
+        + [
+            ChatError(
+                "Chat request was rejected by the server (status 3). Question too large."
+            )
+        ]
+    )
+    bot = SimpleNamespace(notebook_client=client, video_work=VideoWorkCoordinator())
+    config = RuntimeConfig(source_retry_limit=1, youtube_yt_dlp_fallback_enabled=True)
+    if operation == "automatic":
+        cog = make_autosummary(bot)
+        cog.summary_service = NotebookLMSummaryService(client, config=config)
+        cog._save_item = AsyncMock(return_value=True)
+        cog._post_failure = AsyncMock()
+        job = FakePendingRecord(
+            video_id=VIDEO_ID,
+            channel_id="UC1",
+            channel_name="Channel",
+            title="Video",
+            available_at=datetime.now(UTC),
+            next_attempt_at=datetime.now(UTC),
+            status=JobStatus.QUEUED,
+        )
+    else:
+        cog = make_manual_summary(bot)
+        job = make_manual_detail_job()
+        job.operation = {
+            "topics": ManualSummaryOperation.TOPICS,
+            "detail": ManualSummaryOperation.DETAIL_ONE,
+            "all": ManualSummaryOperation.DETAIL_ALL,
+        }[operation]
+        job.title, job.channel_name = "Video", "Channel"
+    cog.settings = config
+    if operation == "automatic":
+        assert not await cog._generate_for_job(job)
+    else:
+        await cog._generate(job)
+    assert job.status is JobStatus.FAILED
+    assert job.retry_count == 1
+    assert not getattr(job, "youtube_audio_fallback", False)
+    assert len(client.prompts) == phase_index + 1
+    assert client.deleted == ["notebook-1"]
+    if stage == "topic_detail":
+        assert FakeVideoRecord.records[0].topics == [Topic(name="Concert")]
+    else:
+        assert FakeVideoRecord.records == []
 
 
 @pytest.mark.asyncio

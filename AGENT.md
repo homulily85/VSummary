@@ -234,6 +234,15 @@ locked virtual environment is used.
   generation follows current configuration after a restart; saved delivery
   payloads retain their original text. Keep per-video coordination shared across
   languages and do not add a language field to durable jobs.
+- Route every NotebookLM chat question through the shared guarded ask helper.
+  Its fixed 4,000-byte UTF-8 budget is an application safety margin, not a
+  configurable or officially guaranteed server limit. Preserve phase/size/topic
+  metrics without logging full questions. Treat status-3 invalid requests as
+  permanent so retries and audio fallback do not resend invalid requests.
+  Coverage review immediately follows extraction in the same notebook/current
+  conversation and refers to the previous answer rather than resending the
+  inventory. Detail questions include only the selected topic and its neighbors;
+  never truncate topic lists to satisfy request-size limits.
 - NotebookLM access via `notebooklm-py` requires **Google session
   cookies**, not an API key. In practice this means an authenticated
   session/profile must be set up out-of-band via the `notebooklm` CLI

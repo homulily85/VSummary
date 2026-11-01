@@ -76,10 +76,26 @@ discussions. Both passes require names in `summary.output_language` (English by
 default) and the existing topic JSON format. This adds one coverage-review
 request per newly generated topic list.
 
+The review refers to the complete draft in the immediately preceding answer
+instead of embedding the topic list in another question. These consecutive
+requests use the same temporary notebook and its current server-side
+conversation, following `notebooklm-py`'s default `chat.ask()` behavior. Detail
+questions contain only the selected topic, its chronological index, and the
+previous/next topic boundaries. Topic count is not capped or truncated to fit a
+question.
+
+Every chat question passes a fixed 4,000-byte UTF-8 safety budget before it is
+sent. This is a conservative application budget, not a documented Google limit.
+Oversized questions fail locally, and server `ChatError` rejections with
+`status 3` (`INVALID_ARGUMENT`) are treated as permanent request errors, avoiding
+unchanged generation retries and yt-dlp fallback. Other errors retain their
+existing retry policies. INFO logs record the phase, character count, UTF-8 byte
+count, and topic count without recording the full question.
+
 Only the validated, reviewed list is cached and used for detail generation. A
-failure in either pass leaves no draft in the cache and follows the existing
-generation retry policy. The final YouTube audio fallback also uses both passes,
-with no additional generation attempt. Topics and details are cached separately
+failure in either pass leaves no draft in the cache and follows the generation
+retry policy appropriate to the error. The final YouTube audio fallback also
+uses both passes, with no additional generation attempt. Topics and details are cached separately
 for each trimmed, case-folded language name; aliases are not combined. Existing
 untagged records are retained but excluded from all language-specific lookups.
 Startup ensures the new unique three-field cache index exists before removing

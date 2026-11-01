@@ -5,8 +5,8 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 
 import httpx
-from notebooklm import NotebookLMClient, SourceAddError
-from notebooklm.types import Notebook
+from notebooklm import ChatError, NotebookLMClient, SourceAddError
+from notebooklm.types import AskResult, Notebook
 
 from vsummary.logging import log_event
 from vsummary.model.video import Topic, VideoSummary
@@ -18,6 +18,9 @@ from vsummary.util.x_space import download_x_space_audio
 
 logger = logging.getLogger(__name__)
 Video = VideoSummary
+# Conservative application budget, not a claimed Google API limit. UTF-8 bytes
+# also bound character count and leave headroom for multilingual topic names.
+_MAX_CHAT_QUESTION_BYTES = 4000
 
 
 class SummaryServiceError(Exception):
@@ -29,11 +32,61 @@ class TransientSummaryError(SummaryServiceError):
 
 
 class PermanentSummaryError(SummaryServiceError):
-    """Raised when NotebookLM returned an unusable result."""
+    """Raised when a request is invalid or NotebookLM returned an unusable result."""
 
 
 class InvalidSummaryResponse(TransientSummaryError):
     """Raised when NotebookLM returns malformed topic data that may succeed on retry."""
+
+
+async def _ask_notebook(
+    client: NotebookLMClient,
+    notebook_id: str,
+    prompt: str,
+    *,
+    phase: str,
+    ref: VideoRef,
+    topic_count: int,
+) -> AskResult:
+    """Bound outgoing chat questions and classify invalid-argument rejections."""
+    character_count = len(prompt)
+    byte_count = len(prompt.encode("utf-8"))
+    log_event(
+        logger,
+        logging.INFO,
+        "NotebookLM %s request: %s characters, %s UTF-8 bytes, %s topics.",
+        phase,
+        character_count,
+        byte_count,
+        topic_count,
+        source=ref.source,
+        video_id=ref.video_id,
+        notebook_id=notebook_id,
+        phase=phase,
+        prompt_characters=character_count,
+        prompt_utf8_bytes=byte_count,
+        topic_count=topic_count,
+    )
+    if byte_count > _MAX_CHAT_QUESTION_BYTES:
+        raise PermanentSummaryError(
+            f"NotebookLM {phase} prompt exceeds the {_MAX_CHAT_QUESTION_BYTES}-byte "
+            f"UTF-8 safety limit ({byte_count} bytes). Shorten the prompt or "
+            "summary.output_language."
+        )
+    try:
+        # Omitted conversation_id continues the notebook's server-side thread.
+        # The review must follow extraction without resending its large answer.
+        return await client.chat.ask(notebook_id, prompt)
+    except ChatError as exc:
+        # notebooklm-py 0.8.0 exposes this rejection only in its message. Match
+        # the entire status marker, not rate-limit details or status 13 / 30.
+        if "(status 3)" in str(exc):
+            raise PermanentSummaryError(
+                f"NotebookLM rejected the {phase} request (status 3: "
+                f"INVALID_ARGUMENT; {character_count} characters, {byte_count} "
+                "UTF-8 bytes). The request must be changed before retrying."
+            ) from exc
+        raise
 
 
 async def retry_invalid_summary_response[SummaryResult](
@@ -236,14 +289,14 @@ def _topic_prompt(
     output_language: str = DEFAULT_CONFIG.output_language,
 ) -> str:
     """Build the prompt that asks for a detailed single-topic explanation."""
+    boundaries = _topic_boundaries(topics, topic_index)
     return (
-        f"This video has a list of topics in order: "
-        f"{', '.join(t.name for t in topics)}. "
+        f"Summarize topic {topic_index + 1} of {len(topics)} in chronological order. "
         f"Write a detailed, coherent explanation in {output_language.strip()} of only the topic "
         f"'{topics[topic_index].name}'. "
         f"Start after the previous topic "
-        f"'{_topic_boundaries(topics, topic_index)['prev']}' ends and stop before "
-        f"the next topic '{_topic_boundaries(topics, topic_index)['next']}' begins. "
+        f"'{boundaries['prev']}' ends and stop before "
+        f"the next topic '{boundaries['next']}' begins. "
         f"Match the length and paragraph count to the amount of substantive source "
         f"material, with no minimum word count or fixed paragraph count. For brief "
         f"topics, a short paragraph may be enough; give longer or more complex "
@@ -265,7 +318,7 @@ def _topic_list_prompt(
     *,
     output_language: str = DEFAULT_CONFIG.output_language,
 ) -> str:
-    """Build extraction or coverage-review instructions with the same output rules."""
+    """Build extraction or same-conversation coverage-review instructions."""
     output_language = output_language.strip()
     requirements = (
         "Include every substantive discussion in chronological order, including "
@@ -284,15 +337,13 @@ def _topic_list_prompt(
     if candidates is None:
         return "Create a comprehensive topic list for this video. " + requirements
     return (
-        "Compare the candidate topic list against the entire source from beginning "
+        "Compare the complete candidate topic list in your previous answer "
+        "against the entire source from beginning "
         "to end. Identify omitted discussions, overly broad entries, and incorrectly "
         "merged recurring discussions. Return the complete corrected list. "
         "Retain supported discussions from the candidate list and add only "
         "source-supported omissions. Correct grouping and chronological order "
-        "where needed. "
-        + requirements
-        + "\nCandidate topic list:\n"
-        + json.dumps([{"name": topic.name} for topic in candidates], ensure_ascii=False)
+        "where needed. " + requirements
     )
 
 
@@ -333,14 +384,24 @@ async def _get_or_create_topic_list(
     )
     try:
         logger.info(f"Asking notebook {notebook.id} for topics...")
-        response = await client.chat.ask(
-            notebook.id, _topic_list_prompt(output_language=output_language)
+        response = await _ask_notebook(
+            client,
+            notebook.id,
+            _topic_list_prompt(output_language=output_language),
+            phase="topic_extraction",
+            ref=ref,
+            topic_count=0,
         )
         candidates = _parse_topics(response.answer)
 
         logger.info(f"Reviewing topic coverage in notebook {notebook.id}...")
-        response = await client.chat.ask(
-            notebook.id, _topic_list_prompt(candidates, output_language=output_language)
+        response = await _ask_notebook(
+            client,
+            notebook.id,
+            _topic_list_prompt(candidates, output_language=output_language),
+            phase="topic_review",
+            ref=ref,
+            topic_count=len(candidates),
         )
         topics_objects = _parse_topics(response.answer)
 
@@ -417,7 +478,14 @@ async def get_topic_details(
             topics, topic_index, output_language=runtime_config(config).output_language
         )
         logger.info("Asking notebook for topic details...")
-        response = await client.chat.ask(notebook.id, prompt)
+        response = await _ask_notebook(
+            client,
+            notebook.id,
+            prompt,
+            phase="topic_detail",
+            ref=ref,
+            topic_count=len(topics),
+        )
 
         logger.info("Parsing response and saving details to database...")
         topics[topic_index].detail = response.answer
@@ -463,7 +531,14 @@ async def get_topic_details_all(
                 )
                 logger.info(f"Asking notebook for details on topic: '{topic.name}'...")
 
-                response = await client.chat.ask(notebook.id, prompt)
+                response = await _ask_notebook(
+                    client,
+                    notebook.id,
+                    prompt,
+                    phase="topic_detail",
+                    ref=ref,
+                    topic_count=len(topics),
+                )
                 topic.detail = response.answer
                 needs_db_save = True
 
