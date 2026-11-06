@@ -21,9 +21,10 @@ SPACE_ID = "1OwxWwQOPlNxQ"
 def test_parse_x_space_input_accepts_direct_urls_with_mobile_hosts_and_queries(value):
     from vsummary.util.x_space import XSpaceInputKind, parse_x_space_input
 
-    parsed = parse_x_space_input(value)
+    parsed = parse_x_space_input(f"  {value}  ")
 
     assert parsed is not None
+    assert parsed.original_url == value
     assert parsed.kind is XSpaceInputKind.SPACE
     assert parsed.input_id == SPACE_ID
 
@@ -40,9 +41,10 @@ def test_parse_x_space_input_accepts_direct_urls_with_mobile_hosts_and_queries(v
 def test_parse_x_space_input_accepts_status_urls_with_mobile_hosts_and_queries(value):
     from vsummary.util.x_space import XSpaceInputKind, parse_x_space_input
 
-    parsed = parse_x_space_input(value)
+    parsed = parse_x_space_input(f"  {value}  ")
 
     assert parsed is not None
+    assert parsed.original_url == value
     assert parsed.kind is XSpaceInputKind.STATUS
     assert parsed.input_id == "1234567890123456789"
 
@@ -138,7 +140,7 @@ async def test_resolve_x_space_rejects_a_status_post_without_a_space(monkeypatch
     )
 
     with pytest.raises(
-        x_space.XSpaceResolutionError, match="post does not contain an X Space"
+        x_space.XPostWithoutSpaceError, match="post does not contain an X Space"
     ):
         await x_space.resolve_x_space(
             "https://x.com/example/status/1234567890123456789"

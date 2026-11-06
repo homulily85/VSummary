@@ -4,7 +4,7 @@ from vsummary.util.video import (
     UnsupportedVideoSource,
     VideoRef,
     build_video_url,
-    parse_video_source,
+    parse_non_space_video_source,
 )
 
 VIDEO_ID = "dQw4w9WgXcQ"
@@ -20,30 +20,32 @@ VIDEO_ID = "dQw4w9WgXcQ"
         VIDEO_ID,
     ],
 )
-def test_parse_video_source_returns_normalized_youtube_reference(value):
-    assert parse_video_source(value) == VideoRef(source="youtube", id=VIDEO_ID)
+def test_parse_non_space_video_source_returns_normalized_youtube_reference(value):
+    assert parse_non_space_video_source(value) == VideoRef(
+        source="youtube", video_id=VIDEO_ID
+    )
 
 
 @pytest.mark.parametrize("value", ["", "   ", "not-a-url", "file:///tmp/audio.mp3"])
-def test_parse_video_source_rejects_unsupported_sources(value):
+def test_parse_non_space_video_source_rejects_unsupported_sources(value):
     with pytest.raises(UnsupportedVideoSource):
-        parse_video_source(value)
+        parse_non_space_video_source(value)
 
 
 def test_build_video_url_supports_youtube():
-    ref = VideoRef(source="youtube", id=VIDEO_ID)
+    ref = VideoRef(source="youtube", video_id=VIDEO_ID)
 
     assert build_video_url(ref) == f"https://www.youtube.com/watch?v={VIDEO_ID}"
 
 
 def test_build_video_url_rejects_unknown_sources():
     with pytest.raises(UnsupportedVideoSource):
-        build_video_url(VideoRef(source="vimeo", id="12345"))
+        build_video_url(VideoRef(source="vimeo", video_id="12345"))
 
 
 def test_generic_media_url_has_stable_cache_identity_and_round_trips():
-    first = parse_video_source("https://Vimeo.com:443/12345#section")
-    second = parse_video_source("https://vimeo.com/12345")
+    first = parse_non_space_video_source("https://Vimeo.com:443/12345#section")
+    second = parse_non_space_video_source("https://vimeo.com/12345")
 
     assert first.source == "yt_dlp"
     assert first.video_id == second.video_id
@@ -54,15 +56,15 @@ def test_generic_media_url_has_stable_cache_identity_and_round_trips():
     "value",
     ["http://127.0.0.1/media", "http://localhost/media", "http://[::1]/media"],
 )
-def test_parse_video_source_rejects_private_destinations(value):
+def test_parse_non_space_video_source_rejects_private_destinations(value):
     with pytest.raises(UnsupportedVideoSource):
-        parse_video_source(value)
+        parse_non_space_video_source(value)
 
 
 def test_parse_and_build_round_trip():
-    ref = parse_video_source(f"https://youtu.be/{VIDEO_ID}")
+    ref = parse_non_space_video_source(f"https://youtu.be/{VIDEO_ID}")
 
-    assert parse_video_source(build_video_url(ref)) == ref
+    assert parse_non_space_video_source(build_video_url(ref)) == ref
 
 
 @pytest.mark.parametrize(
@@ -73,8 +75,10 @@ def test_parse_and_build_round_trip():
         "https://m.twitch.tv/videos/123456789",
     ],
 )
-def test_parse_video_source_accepts_full_twitch_vod_urls(value):
-    assert parse_video_source(value) == VideoRef(source="twitch", video_id="123456789")
+def test_parse_non_space_video_source_accepts_full_twitch_vod_urls(value):
+    assert parse_non_space_video_source(value) == VideoRef(
+        source="twitch", video_id="123456789"
+    )
 
 
 @pytest.mark.parametrize(
@@ -83,13 +87,16 @@ def test_parse_video_source_accepts_full_twitch_vod_urls(value):
         "123456789",
     ],
 )
-def test_parse_video_source_rejects_unsupported_twitch_inputs(value):
+def test_parse_non_space_video_source_rejects_unsupported_twitch_inputs(value):
     with pytest.raises(UnsupportedVideoSource):
-        parse_video_source(value)
+        parse_non_space_video_source(value)
 
 
 def test_twitch_clip_uses_generic_media_backend():
-    assert parse_video_source("https://clips.twitch.tv/ExampleClip").source == "yt_dlp"
+    assert (
+        parse_non_space_video_source("https://clips.twitch.tv/ExampleClip").source
+        == "yt_dlp"
+    )
 
 
 def test_build_video_url_supports_twitch_vods():
@@ -98,16 +105,23 @@ def test_build_video_url_supports_twitch_vods():
     )
 
 
-def test_parse_and_build_direct_x_space_round_trip():
-    ref = parse_video_source("https://twitter.com/i/spaces/1OwxWwQOPlNxQ?ref=share")
-
-    assert ref == VideoRef(source="x_space", video_id="1OwxWwQOPlNxQ")
+def test_build_video_url_supports_direct_x_space():
+    ref = VideoRef(source="x_space", video_id="1OwxWwQOPlNxQ")
     assert build_video_url(ref) == "https://x.com/i/spaces/1OwxWwQOPlNxQ"
 
 
-def test_video_ref_accepts_explicit_video_id_and_keeps_read_only_compatibility():
+def test_video_ref_requires_video_id_without_legacy_alias():
     reference = VideoRef(source="youtube", video_id="abc")
-
     assert reference.video_id == "abc"
-    assert reference.id == "abc"
-    assert reference == VideoRef(source="youtube", id="abc")
+    assert reference.url is None
+    assert not hasattr(reference, "id")
+    with pytest.raises(TypeError):
+        VideoRef(source="youtube", id="abc")
+    with pytest.raises(TypeError):
+        VideoRef(source="youtube")
+
+
+@pytest.mark.parametrize("video_id", ["", None])
+def test_video_ref_rejects_empty_video_id(video_id):
+    with pytest.raises(ValueError, match="video_id is required"):
+        VideoRef(source="youtube", video_id=video_id)

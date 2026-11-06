@@ -1,11 +1,10 @@
 """Source-agnostic parsing and URL construction for supported video inputs."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from ipaddress import ip_address
 from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
-from vsummary.util.x_space import XSpaceInputKind, parse_x_space_input
 from vsummary.util.youtube import InvalidYouTubeInputError, to_video_url
 
 
@@ -13,43 +12,22 @@ class UnsupportedVideoSource(ValueError):
     """Raised when a video reference comes from an unsupported source."""
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class VideoRef:
-    """A normalized video reference split into a source and its ID within that
-    source (e.g. source="youtube", id="dQw4w9WgXcQ")."""
+    """A normalized video reference identified by source and video_id."""
 
     source: str
     video_id: str
-    url: str | None
+    url: str | None = field(default=None, kw_only=True)
 
-    def __init__(
-        self,
-        source: str,
-        video_id: str | None = None,
-        *,
-        id: str | None = None,
-        url: str | None = None,
-    ):
-        """Construct a reference, accepting ``id`` as a legacy keyword alias."""
-        resolved_id = video_id or id
-        if not resolved_id:
+    def __post_init__(self):
+        """Reject references without a source-local video ID."""
+        if not self.video_id:
             raise ValueError("video_id is required")
-        object.__setattr__(self, "source", source)
-        object.__setattr__(self, "video_id", resolved_id)
-        object.__setattr__(self, "url", url)
-
-    @property
-    def id(self) -> str:
-        """Expose ``video_id`` through the compatibility alias used by callers."""
-        return self.video_id
 
 
-def parse_video_source(value: str) -> VideoRef:
-    """Split a video URL (or bare ID) into a ``VideoRef``.
-
-    The function performs URL-shape normalization only; sources that need a
-    remote availability check are validated by their command backend.
-    """
+def parse_non_space_video_source(value: str) -> VideoRef:
+    """Parse a Twitch, YouTube, or generic public media reference."""
     if not value.strip():
         raise UnsupportedVideoSource("Video reference cannot be empty.")
 
@@ -64,10 +42,6 @@ def parse_video_source(value: str) -> VideoRef:
         and twitch_segments[1].isdigit()
     ):
         return VideoRef(source="twitch", video_id=twitch_segments[1])
-
-    x_space_input = parse_x_space_input(value)
-    if x_space_input and x_space_input.kind is XSpaceInputKind.SPACE:
-        return VideoRef(source="x_space", video_id=x_space_input.input_id)
 
     try:
         watch_url = to_video_url(value)
@@ -89,11 +63,7 @@ def parse_video_source(value: str) -> VideoRef:
 
 
 def build_video_url(ref: VideoRef) -> str:
-    """Reconstruct the full URL for a ``VideoRef``.
-
-    This is the counterpart to :func:`parse_video_source` and should grow a
-    branch per supported source.
-    """
+    """Build the public URL for a normalized video reference."""
     if ref.source == "youtube":
         return f"https://www.youtube.com/watch?v={ref.video_id}"
     if ref.source == "twitch":

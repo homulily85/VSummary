@@ -14,7 +14,7 @@ from vsummary.settings import RuntimeConfig
 from vsummary.util.generic_media import GenericMediaUnavailableError
 from vsummary.util.summarizer import InvalidSummaryResponse, PermanentSummaryError
 from vsummary.util.twitch import TwitchAudioUnavailableError
-from vsummary.util.video import parse_video_source
+from vsummary.util.video import parse_non_space_video_source
 
 
 def make_manual_fallback_job(
@@ -317,7 +317,7 @@ async def test_enqueue_checks_generic_media_and_persists_url(monkeypatch):
     monkeypatch.setattr(manualsummary_module, "SummaryJob", FakeJob)
     inspect = AsyncMock(return_value=SimpleNamespace(title="Talk", channel_name=None))
     monkeypatch.setattr(manualsummary_module, "inspect_generic_media", inspect)
-    ref = parse_video_source("https://vimeo.com/123")
+    ref = parse_non_space_video_source("https://vimeo.com/123")
     cog = ManualSummary.__new__(ManualSummary)
 
     await cog.enqueue(
@@ -340,7 +340,7 @@ async def test_generic_job_restores_url_for_generation(monkeypatch):
     cog.settings = SimpleNamespace()
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
-    ref = parse_video_source("https://vimeo.com/123")
+    ref = parse_non_space_video_source("https://vimeo.com/123")
     job = SummaryJob.model_construct(
         job_type="manual",
         claimed_by="worker",

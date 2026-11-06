@@ -41,6 +41,10 @@ class XSpaceResolutionError(ValueError):
     """The supplied X URL does not resolve to an archived Space."""
 
 
+class XPostWithoutSpaceError(XSpaceResolutionError):
+    """The status post has no associated Space."""
+
+
 class XSpaceAudioError(RuntimeError):
     """An archived X Space could not be prepared for NotebookLM."""
 
@@ -63,12 +67,14 @@ class XSpaceInput:
     kind: XSpaceInputKind
     input_id: str
     url: str
+    original_url: str
 
 
 def parse_x_space_input(value: str) -> XSpaceInput | None:
     """Recognize direct X Space and status-post URLs without network access."""
+    original_url = value.strip()
     try:
-        parsed = urlparse(value.strip())
+        parsed = urlparse(original_url)
         hostname = (parsed.hostname or "").lower()
     except ValueError:
         return None
@@ -83,22 +89,19 @@ def parse_x_space_input(value: str) -> XSpaceInput | None:
     ):
         space_id = segments[2]
         return XSpaceInput(
+            original_url=original_url,
             kind=XSpaceInputKind.SPACE,
             input_id=space_id,
             url=f"https://x.com/i/spaces/{space_id}",
         )
     if len(segments) == 3 and segments[1] == "status" and segments[2].isdigit():
         return XSpaceInput(
+            original_url=original_url,
             kind=XSpaceInputKind.STATUS,
             input_id=segments[2],
             url=f"https://x.com/{segments[0]}/status/{segments[2]}",
         )
     return None
-
-
-def is_x_space_input(value: str) -> bool:
-    """Return whether ``value`` has one of the X URL shapes we support."""
-    return parse_x_space_input(value) is not None
 
 
 async def resolve_x_space(value: str) -> VideoRef:
@@ -107,14 +110,19 @@ async def resolve_x_space(value: str) -> VideoRef:
     if parsed is None:
         raise XSpaceResolutionError("This is not a supported X Space URL.")
 
-    logger.info("Resolving X Space from %s URL.", parsed.kind.value)
+    return await resolve_parsed_x_space(parsed)
+
+
+async def resolve_parsed_x_space(x_input: XSpaceInput) -> VideoRef:
+    """Check the recording for an already recognized X URL."""
+    logger.info("Resolving X Space from %s URL.", x_input.kind.value)
     try:
-        info = await asyncio.to_thread(_extract_x_space_info, parsed.url)
+        info = await asyncio.to_thread(_extract_x_space_info, x_input.url)
     except XSpaceResolutionError:
         raise
     except Exception as exc:  # yt-dlp exposes site errors as varied exception types
-        raise _resolution_error_from_exception(exc, parsed.kind) from exc
-    ref = _ref_from_info(info, parsed.kind)
+        raise _resolution_error_from_exception(exc, x_input.kind) from exc
+    ref = _ref_from_info(info, x_input.kind)
     logger.info("Resolved archived X Space %s.", ref.video_id)
     return ref
 
@@ -140,7 +148,7 @@ def _ref_from_info(info: dict, input_kind: XSpaceInputKind) -> VideoRef:
     """Validate yt-dlp metadata and create an archived X Space reference."""
     if not _is_x_space_result(info):
         if input_kind is XSpaceInputKind.STATUS:
-            raise XSpaceResolutionError("This X post does not contain an X Space.")
+            raise XPostWithoutSpaceError("This X post does not contain an X Space.")
         raise XSpaceResolutionError(
             "This X Space is unavailable or cannot be accessed."
         )
@@ -195,7 +203,7 @@ def _resolution_error_from_exception(
     if "replay is disabled" in message:
         return XSpaceResolutionError("This X Space has ended but is not archived.")
     if input_kind is XSpaceInputKind.STATUS and "no video could be found" in message:
-        return XSpaceResolutionError("This X post does not contain an X Space.")
+        return XPostWithoutSpaceError("This X post does not contain an X Space.")
     return XSpaceResolutionError("This X Space is unavailable or cannot be accessed.")
 
 

@@ -18,16 +18,17 @@ from vsummary.util.video import (
     UnsupportedVideoSource,
     VideoRef,
     build_video_url,
-    parse_video_source,
+    parse_non_space_video_source,
 )
 from vsummary.util.video_cache import delete_cached_summary
 from vsummary.util.video_work import get_video_work_coordinator
 from vsummary.util.x_space import (
+    XPostWithoutSpaceError,
+    XSpaceInput,
     XSpaceInputKind,
     XSpaceResolutionError,
-    is_x_space_input,
     parse_x_space_input,
-    resolve_x_space,
+    resolve_parsed_x_space,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,29 +47,38 @@ _SOURCE_LABELS = {
 }
 
 
+async def _resolve_x_status(x_input: XSpaceInput) -> VideoRef:
+    """Use the original media URL when an X post has no Space."""
+    try:
+        return await resolve_parsed_x_space(x_input)
+    except XPostWithoutSpaceError:
+        return parse_non_space_video_source(x_input.original_url)
+
+
 async def _resolve_manual_source(value: str) -> VideoRef:
-    """Resolve X status URLs before a manual-summary job is created."""
-    if is_x_space_input(value):
-        try:
-            return await resolve_x_space(value)
-        except XSpaceResolutionError as exc:
-            if "does not contain an X Space" not in str(exc):
-                raise
-    return parse_video_source(value)
+    """Check X recordings before creating a manual-summary job."""
+    x_input = parse_x_space_input(value)
+    if x_input is None:
+        return parse_non_space_video_source(value)
+    if x_input.kind is XSpaceInputKind.STATUS:
+        return await _resolve_x_status(x_input)
+    return await resolve_parsed_x_space(x_input)
 
 
 async def _resolve_cached_source(value: str) -> VideoRef:
     """Resolve cache identity without checking direct recording availability."""
     x_input = parse_x_space_input(value)
-    if x_input and x_input.kind is XSpaceInputKind.STATUS:
-        try:
-            return await _resolve_manual_source(value)
-        except XSpaceResolutionError as exc:
-            raise XSpaceResolutionError(
-                "Could not resolve this X post. Use the direct X Space URL "
-                "to delete its cached summary."
-            ) from exc
-    return parse_video_source(value)
+    if x_input is None:
+        return parse_non_space_video_source(value)
+    if x_input.kind is XSpaceInputKind.SPACE:
+        return VideoRef(source="x_space", video_id=x_input.input_id)
+    try:
+        return await _resolve_x_status(x_input)
+    except XSpaceResolutionError as exc:
+        raise XSpaceResolutionError(
+            "Could not resolve this X post. Use the direct X Space URL "
+            "to delete its cached summary."
+        ) from exc
 
 
 class Summarizer(commands.Cog):

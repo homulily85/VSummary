@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import ClassVar
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -40,11 +40,11 @@ from vsummary.util.summarizer import (
     PermanentSummaryError,
     TransientSummaryError,
 )
-from vsummary.util.video import VideoRef, parse_video_source
+from vsummary.util.video import VideoRef, parse_non_space_video_source
 from vsummary.util.video_work import VideoWorkCoordinator
 
 VIDEO_ID = "dQw4w9WgXcQ"
-VIDEO_REF = VideoRef(source="youtube", id=VIDEO_ID)
+VIDEO_REF = VideoRef(source="youtube", video_id=VIDEO_ID)
 
 
 class QueryField:
@@ -1025,7 +1025,7 @@ async def test_generic_source_uploads_temporary_audio_file(monkeypatch, tmp_path
     client.sources.add_file = AsyncMock()
     audio = tmp_path / "media.m4a"
     audio.write_bytes(b"audio")
-    ref = parse_video_source("https://vimeo.com/123")
+    ref = parse_non_space_video_source("https://vimeo.com/123")
 
     @asynccontextmanager
     async def fake_download(received):
@@ -1241,18 +1241,27 @@ def test_deletecache_command_has_one_required_argument_and_existing_access_model
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "video",
+    ("video", "expected"),
     [
-        VIDEO_ID,
-        f"https://youtu.be/{VIDEO_ID}?t=42",
-        f"https://www.youtube.com/watch?v={VIDEO_ID}&t=42",
-        "https://m.twitch.tv/videos/123456789",
-        "https://mobile.twitter.com/i/spaces/1OwxWwQOPlNxQ?foo=bar",
-        "https://VIMEO.com:443/123456789#fragment",
+        (VIDEO_ID, VideoRef("youtube", VIDEO_ID)),
+        (f"https://youtu.be/{VIDEO_ID}?t=42", VideoRef("youtube", VIDEO_ID)),
+        (
+            f"https://www.youtube.com/watch?v={VIDEO_ID}&t=42",
+            VideoRef("youtube", VIDEO_ID),
+        ),
+        ("https://m.twitch.tv/videos/123456789", VideoRef("twitch", "123456789")),
+        (
+            "https://mobile.twitter.com/i/spaces/1OwxWwQOPlNxQ?foo=bar",
+            VideoRef("x_space", "1OwxWwQOPlNxQ"),
+        ),
+        (
+            "https://VIMEO.com:443/123456789#fragment",
+            parse_non_space_video_source("https://vimeo.com/123456789"),
+        ),
     ],
 )
 async def test_deletecache_normalizes_direct_references_without_availability_checks(
-    monkeypatch, video
+    monkeypatch, video, expected
 ):
     delete = AsyncMock(return_value=3)
     resolver = AsyncMock(
@@ -1261,13 +1270,13 @@ async def test_deletecache_normalizes_direct_references_without_availability_che
     monkeypatch.setattr(
         summarizer_module, "delete_cached_summary", delete, raising=False
     )
-    monkeypatch.setattr(summarizer_module, "resolve_x_space", resolver)
+    monkeypatch.setattr(summarizer_module, "resolve_parsed_x_space", resolver)
     bot = SimpleNamespace(notebook_client=FakeNotebookClient(), get_cog=AsyncMock())
     interaction = FakeInteraction()
 
     await Summarizer.deletecache.callback(Summarizer(bot), interaction, video)
 
-    delete.assert_awaited_once_with(parse_video_source(video))
+    delete.assert_awaited_once_with(expected)
     resolver.assert_not_awaited()
     bot.get_cog.assert_not_called()
     assert bot.notebook_client.created == bot.notebook_client.prompts == []
@@ -1320,24 +1329,27 @@ async def test_deletecache_resolves_x_posts_using_existing_media_fallback(
     space_ref = VideoRef(source="x_space", video_id="1OwxWwQOPlNxQ")
     resolver = AsyncMock(return_value=space_ref)
     if not contains_space:
-        from vsummary.util.x_space import XSpaceResolutionError
+        from vsummary.util.x_space import XPostWithoutSpaceError
 
-        resolver.side_effect = XSpaceResolutionError(
+        resolver.side_effect = XPostWithoutSpaceError(
             "This X post does not contain an X Space."
         )
     delete = AsyncMock(return_value=1)
-    monkeypatch.setattr(summarizer_module, "resolve_x_space", resolver)
+    monkeypatch.setattr(summarizer_module, "resolve_parsed_x_space", resolver)
     monkeypatch.setattr(
         summarizer_module, "delete_cached_summary", delete, raising=False
     )
 
+    parser = Mock(wraps=summarizer_module.parse_x_space_input)
+    monkeypatch.setattr(summarizer_module, "parse_x_space_input", parser)
     await Summarizer.deletecache.callback(
         Summarizer(SimpleNamespace()), FakeInteraction(), value
     )
+    parser.assert_called_once()
 
-    resolver.assert_awaited_once_with(value)
+    resolver.assert_awaited_once_with(summarizer_module.parse_x_space_input(value))
     delete.assert_awaited_once_with(
-        space_ref if contains_space else parse_video_source(value)
+        space_ref if contains_space else parse_non_space_video_source(value)
     )
 
 
@@ -1351,7 +1363,7 @@ async def test_deletecache_requests_direct_space_url_when_post_cannot_be_resolve
         side_effect=XSpaceResolutionError("This X Space is unavailable.")
     )
     delete = AsyncMock()
-    monkeypatch.setattr(summarizer_module, "resolve_x_space", resolver)
+    monkeypatch.setattr(summarizer_module, "resolve_parsed_x_space", resolver)
     monkeypatch.setattr(
         summarizer_module, "delete_cached_summary", delete, raising=False
     )
@@ -1541,9 +1553,9 @@ async def test_topics_command_queues_generic_media_url():
     assert interaction.followup.messages == [
         ("Media topics are queued and will be posted here.", {})
     ]
-    assert manual_summary.enqueue.await_args.kwargs["ref"] == parse_video_source(
-        "https://vimeo.com/123"
-    )
+    assert manual_summary.enqueue.await_args.kwargs[
+        "ref"
+    ] == parse_non_space_video_source("https://vimeo.com/123")
 
 
 @pytest.mark.asyncio
@@ -1565,32 +1577,39 @@ async def test_detail_reports_generic_media_preflight_failure():
 
 @pytest.mark.asyncio
 async def test_x_post_without_space_falls_back_to_generic_media(monkeypatch):
-    from vsummary.util.x_space import XSpaceResolutionError
+    from vsummary.util.x_space import XPostWithoutSpaceError
 
     manual_summary = SimpleNamespace(enqueue=AsyncMock())
     cog = Summarizer(SimpleNamespace(get_cog=lambda _: manual_summary))
     interaction = FakeInteraction()
-    monkeypatch.setattr(summarizer_module, "is_x_space_input", lambda _: True)
     monkeypatch.setattr(
         summarizer_module,
-        "resolve_x_space",
-        AsyncMock(
-            side_effect=XSpaceResolutionError(
-                "This X post does not contain an X Space."
-            )
-        ),
+        "resolve_parsed_x_space",
+        AsyncMock(side_effect=XPostWithoutSpaceError("ordinary post")),
     )
 
-    await Summarizer.topics.callback(
-        cog, interaction, "https://x.com/speaker/status/123456789"
-    )
+    parser = Mock(wraps=summarizer_module.parse_x_space_input)
+    monkeypatch.setattr(summarizer_module, "parse_x_space_input", parser)
+    value = "https://twitter.com/speaker/status/123456789?ref=share"
+    await Summarizer.topics.callback(cog, interaction, value)
+    parser.assert_called_once()
 
-    assert manual_summary.enqueue.await_args.kwargs["ref"].source == "yt_dlp"
+    assert manual_summary.enqueue.await_args.kwargs[
+        "ref"
+    ] == parse_non_space_video_source(value)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://x.com/i/spaces/1OwxWwQOPlNxQ",
+        "https://x.com/example/status/1234567890123456789",
+    ],
+)
 async def test_topics_command_resolves_an_archived_x_space_before_enqueueing(
     monkeypatch,
+    value,
 ):
     manual_summary = SimpleNamespace(enqueue=AsyncMock())
     bot = SimpleNamespace(
@@ -1600,15 +1619,12 @@ async def test_topics_command_resolves_an_archived_x_space_before_enqueueing(
     cog = Summarizer(bot)
     interaction = FakeInteraction()
     x_space_ref = VideoRef(source="x_space", video_id="1OwxWwQOPlNxQ")
-    monkeypatch.setattr(summarizer_module, "is_x_space_input", lambda _: True)
-    monkeypatch.setattr(
-        summarizer_module, "resolve_x_space", AsyncMock(return_value=x_space_ref)
-    )
+    resolver = AsyncMock(return_value=x_space_ref)
+    monkeypatch.setattr(summarizer_module, "resolve_parsed_x_space", resolver)
 
-    await Summarizer.topics.callback(
-        cog, interaction, "https://x.com/example/status/1234567890123456789"
-    )
+    await Summarizer.topics.callback(cog, interaction, value)
 
+    resolver.assert_awaited_once_with(summarizer_module.parse_x_space_input(value))
     assert interaction.followup.messages == [
         ("X Space topics are queued and will be posted here.", {}),
     ]
@@ -1632,10 +1648,9 @@ async def test_detail_command_reports_unarchived_x_space_without_queueing(monkey
         )
     )
     interaction = FakeInteraction()
-    monkeypatch.setattr(summarizer_module, "is_x_space_input", lambda _: True)
     monkeypatch.setattr(
         summarizer_module,
-        "resolve_x_space",
+        "resolve_parsed_x_space",
         AsyncMock(
             side_effect=XSpaceResolutionError(
                 "This X Space has ended but has not been archived yet."
