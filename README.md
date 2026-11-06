@@ -43,3 +43,5 @@ the destination with `discord.auto_summary_channel_id` in `config.toml`.
 - [Installation, configuration, and deployment](docs/installation.md)
 - [Slash command reference](docs/commands.md)
 - [System architecture and operations](docs/system.md)
+
+Database upgrade to 1.6: [offline migration guide](docs/migration-1.6.md).

@@ -18,7 +18,6 @@ from vsummary.logging import log_event
 from vsummary.model.channel import (
     FollowedChannel,
     JobStatus,
-    PendingVideoStatus,
     SummaryJob,
 )
 from vsummary.model.video import Topic
@@ -57,10 +56,6 @@ from vsummary.util.video_work import get_video_work_coordinator
 logger = logging.getLogger(__name__)
 
 HOLODEX_PAGE_SIZE = 50
-
-# These names remain module-level for existing integrations and test doubles.
-Channel = FollowedChannel
-PendingVideo = SummaryJob
 
 
 class Autosummary(commands.Cog):
@@ -140,7 +135,7 @@ class Autosummary(commands.Cog):
 
     async def check_new_videos(self):
         """Fetch new streams for every followed channel and enqueue eligible ones."""
-        channels = await Channel.find().to_list()
+        channels = await FollowedChannel.find().to_list()
         for channel in channels:
             try:
                 videos = await self._get_new_channel_videos(channel)
@@ -211,15 +206,13 @@ class Autosummary(commands.Cog):
             )
             return
 
-        try:
-            existing = await PendingVideo.find_one(
-                PendingVideo.channel_id == channel.channel_id,
-                PendingVideo.video_id == video.video_id,
-            )
-        except TypeError:
-            existing = await PendingVideo.find_one(
-                PendingVideo.video_id == video.video_id
-            )
+        existing = await SummaryJob.find_one(
+            {
+                "job_type": "auto",
+                "channel_id": channel.channel_id,
+                "video_id": video.video_id,
+            }
+        )
         if existing:
             return
 
@@ -228,7 +221,8 @@ class Autosummary(commands.Cog):
             video.available_at
             + timedelta(seconds=video.duration + self.config.transcript_delay_seconds),
         )
-        pending = PendingVideo(
+        pending = SummaryJob(
+            job_type="auto",
             video_id=video.video_id,
             channel_id=channel.channel_id,
             channel_name=channel.name,
@@ -274,12 +268,6 @@ class Autosummary(commands.Cog):
     async def _claim_due_jobs(self) -> list:
         """Atomically claim due or abandoned automatic jobs for this worker instance."""
         now = datetime.now(UTC)
-        if PendingVideo is not SummaryJob:
-            return await PendingVideo.find(
-                PendingVideo.status == PendingVideoStatus.QUEUED,
-                PendingVideo.next_attempt_at <= now,
-            ).to_list()
-
         claimed = []
         lease_expires_at = now + self._lease_duration()
         claims = (
@@ -321,6 +309,7 @@ class Autosummary(commands.Cog):
             ),
         )
         for claim_index, (query, claimed_status) in enumerate(claims):
+            query["job_type"] = "auto"
             while True:
                 update = {
                     "$set": {
@@ -330,16 +319,14 @@ class Autosummary(commands.Cog):
                         "lease_expires_at": lease_expires_at,
                     }
                 }
-                record = (
-                    await PendingVideo.get_pymongo_collection().find_one_and_update(
-                        query,
-                        update,
-                        return_document=ReturnDocument.AFTER,
-                    )
+                record = await SummaryJob.get_pymongo_collection().find_one_and_update(
+                    query,
+                    update,
+                    return_document=ReturnDocument.AFTER,
                 )
                 if record is None:
                     break
-                item = PendingVideo.model_validate(record)
+                item = SummaryJob.model_validate(record)
                 claimed.append(item)
                 log_event(
                     logger,
@@ -358,11 +345,9 @@ class Autosummary(commands.Cog):
     async def _process_pending_video(self, item):
         """Renew a lease while advancing one automatic job through its current phase."""
         stop_renewal = asyncio.Event()
-        renewal_task = None
-        if self._uses_leases(item):
-            renewal_task = asyncio.create_task(
-                self._renew_lease_until_finished(item, stop_renewal)
-            )
+        renewal_task = asyncio.create_task(
+            self._renew_lease_until_finished(item, stop_renewal)
+        )
         try:
             status = getattr(item, "status", JobStatus.QUEUED)
             status_value = getattr(status, "value", status)
@@ -371,11 +356,6 @@ class Autosummary(commands.Cog):
                     return
                 status = getattr(item, "status", JobStatus.READY_TO_DELIVER)
                 status_value = getattr(status, "value", status)
-                if (
-                    getattr(item, "summary_details", None)
-                    and status_value == PendingVideoStatus.QUEUED.value
-                ):
-                    status_value = JobStatus.READY_TO_DELIVER.value
 
             if status_value in {
                 JobStatus.READY_TO_DELIVER.value,
@@ -383,10 +363,9 @@ class Autosummary(commands.Cog):
             }:
                 await self._deliver_for_job(item)
         finally:
-            if renewal_task is not None:
-                stop_renewal.set()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await renewal_task
+            stop_renewal.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await renewal_task
 
     async def _generate_for_job(self, item):
         """Generate and persist topics before Discord delivery can begin."""
@@ -747,11 +726,6 @@ class Autosummary(commands.Cog):
         return timedelta(seconds=self.config.job_lease_seconds)
 
     @staticmethod
-    def _uses_leases(item) -> bool:
-        """Identify canonical durable jobs rather than legacy compatibility records."""
-        return PendingVideo is SummaryJob and isinstance(item, SummaryJob)
-
-    @staticmethod
     def _job_context(item, **additional) -> dict[str, object]:
         """Return identifiers needed to correlate durable workflow log records."""
         context: dict[str, object] = {}
@@ -767,21 +741,17 @@ class Autosummary(commands.Cog):
 
     def _release_lease(self, item) -> None:
         """Clear ownership fields after a canonical job leaves active processing."""
-        if self._uses_leases(item):
-            item.claimed_by = None
-            item.claimed_at = None
-            item.lease_expires_at = None
+        item.claimed_by = None
+        item.claimed_at = None
+        item.lease_expires_at = None
 
     async def _save_item(self, item) -> bool:
         """Persist only if this worker still owns a claimed SummaryJob."""
-        if not self._uses_leases(item):
-            await item.save()
-            return True
-
         values = item.model_dump(mode="python", by_alias=True, exclude={"id"})
         values.pop("_id", None)
-        result = await PendingVideo.get_pymongo_collection().update_one(
-            {"_id": item.id, "claimed_by": self.worker_id}, {"$set": values}
+        result = await SummaryJob.get_pymongo_collection().update_one(
+            {"_id": item.id, "job_type": "auto", "claimed_by": self.worker_id},
+            {"$set": values},
         )
         if getattr(result, "matched_count", 0) != 1:
             log_event(
@@ -809,8 +779,8 @@ class Autosummary(commands.Cog):
     async def _renew_lease(self, item) -> bool:
         """Extend this worker's lease only when it still owns the persisted job."""
         expires_at = datetime.now(UTC) + self._lease_duration()
-        result = await PendingVideo.get_pymongo_collection().update_one(
-            {"_id": item.id, "claimed_by": self.worker_id},
+        result = await SummaryJob.get_pymongo_collection().update_one(
+            {"_id": item.id, "job_type": "auto", "claimed_by": self.worker_id},
             {"$set": {"lease_expires_at": expires_at}},
         )
         if getattr(result, "matched_count", 0) != 1:
@@ -834,18 +804,8 @@ class Autosummary(commands.Cog):
 
     @staticmethod
     def _set_status(item, status: JobStatus):
-        """Assign canonical status or map it to the legacy pending-video equivalent."""
-        current = getattr(item, "status", None)
-        if isinstance(current, PendingVideoStatus):
-            old_status = {
-                JobStatus.QUEUED: PendingVideoStatus.QUEUED,
-                JobStatus.COMPLETED: PendingVideoStatus.DONE,
-                JobStatus.CANCELLED: PendingVideoStatus.DONE,
-                JobStatus.FAILED: PendingVideoStatus.FAILED,
-            }
-            item.status = old_status.get(status, PendingVideoStatus.QUEUED)
-        else:
-            item.status = status
+        """Assign the current durable-job lifecycle state."""
+        item.status = status
 
     @app_commands.command(
         name="addignoredtopic",
@@ -952,7 +912,9 @@ class Autosummary(commands.Cog):
             )
             return
 
-        existing = await Channel.find_one(Channel.channel_id == channel_id)
+        existing = await FollowedChannel.find_one(
+            FollowedChannel.channel_id == channel_id
+        )
         if existing:
             await send_limited(
                 self.bot,
@@ -961,7 +923,7 @@ class Autosummary(commands.Cog):
             )
             return
         try:
-            await Channel(
+            await FollowedChannel(
                 channel_id=channel_id,
                 name=channel.name,
                 added_at=datetime.now(UTC),
@@ -989,7 +951,9 @@ class Autosummary(commands.Cog):
     async def removechannel(self, interaction: discord.Interaction, channel_id: str):
         """Delete a followed channel and any automatic jobs still tied to it."""
         await interaction.response.defer(thinking=True)
-        result = await Channel.find_one(Channel.channel_id == channel_id)
+        result = await FollowedChannel.find_one(
+            FollowedChannel.channel_id == channel_id
+        )
         if result is None:
             await send_limited(
                 self.bot,
@@ -998,11 +962,7 @@ class Autosummary(commands.Cog):
             )
             return
         await result.delete()
-        delete_many = getattr(PendingVideo, "delete_many", None)
-        if delete_many is not None:
-            await delete_many(PendingVideo.channel_id == channel_id)
-        else:
-            await PendingVideo.delete_one(PendingVideo.channel_id == channel_id)
+        await SummaryJob.find({"job_type": "auto", "channel_id": channel_id}).delete()
         await send_limited(
             self.bot,
             interaction.followup.send,
@@ -1016,7 +976,7 @@ class Autosummary(commands.Cog):
     async def listchannels(self, interaction: discord.Interaction):
         """List all followed channels in Discord-safe response chunks."""
         await interaction.response.defer(thinking=True)
-        channels = await Channel.find().to_list()
+        channels = await FollowedChannel.find().to_list()
         if not channels:
             await send_limited(
                 self.bot,

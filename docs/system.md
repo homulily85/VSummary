@@ -38,7 +38,7 @@ rate limiter.
 post URLs are resolved to an archived Space before a job is created. Other
 public media URLs are checked with `yt-dlp`; their URL is stored with the job
 so the worker can download audio after a restart. The
-command writes a `ManualSummaryJob` and returns immediately so Discord does not
+command writes a manual `SummaryJob` and returns immediately so Discord does not
 time out while NotebookLM is working.
 
 The manual worker runs every ten seconds. It atomically claims due jobs,
@@ -52,7 +52,7 @@ resumes instead of generating content again.
 `/addchannel` stores a Holodex channel in `FollowedChannel`. The auto-summary
 poller runs at `workers.poll_interval_minutes`, obtains streams published after the
 channel was added, ignores configured unwanted Holodex topic types, and creates
-a `SummaryJob` for each eligible stream. Generation is delayed until at least
+an auto `SummaryJob` for each eligible stream. Generation is delayed until at least
 `autosummary.transcript_delay_seconds` after the stream ends (two hours by
 default) to give a transcript time to become available.
 
@@ -98,10 +98,10 @@ retry policy appropriate to the error. The final YouTube audio fallback also
 uses both passes, with no additional generation attempt. Topics and details are cached separately
 for each trimmed, case-folded language name; aliases are not combined. Existing
 untagged records are retained but excluded from all language-specific lookups.
-Startup ensures the new unique three-field cache index exists before removing
-only the obsolete two-field unique index. Other indexes are preserved, and a
-migration failure prevents workers from starting. Stop older bot processes
-before deploying this change.
+The offline migration ensures the new unique three-field cache index exists
+before removing only the obsolete two-field unique index. Other indexes are
+preserved. Startup does not run this migration; stop all bot processes and
+complete the offline migration successfully before starting the new version.
 
 Language changes take effect after a restart. Pending generation uses the
 current setting, reusing that language's cache while leaving other languages
@@ -119,11 +119,10 @@ automatically truncated, and coverage and length compliance depend on NotebookLM
 
 | Collection/model | Purpose | Important invariants |
 | --- | --- | --- |
-| `Channel` / `FollowedChannel` | Channels followed for automatic summaries. | One record per `channel_id`; `added_at` is UTC. |
+| `FollowedChannel` | Channels followed for automatic summaries. | One record per `channel_id`; `added_at` is UTC. |
 | `AutoSummaryTopicPolicy` | Effective-dated global topic decisions. | The latest decision before a video's publication controls whether it is queued. |
-| `PendingVideo` / `SummaryJob` | Automatic generation and delivery jobs. | Unique `(channel_id, video_id)`; all scheduling and lease timestamps are UTC. |
-| `ManualSummaryJob` | User-requested topic/detail jobs. | Separate source, operation, requester, retry, lease, and delivery checkpoint data. |
-| `Video` / `VideoSummary` | Cached NotebookLM topics and details. | Unique `(source, video_id, output_language)` cache key; untagged legacy records are preserved. |
+| `SummaryJob` | Automatic and user-requested generation/delivery jobs, distinguished by required `job_type` (`auto` / `manual`). | Auto-only unique `(channel_id, video_id)`; manual delivery uses `discord_channel_id`. Retry, lease, payload and chunk checkpoints share one schema. |
+| `VideoSummary` | Cached NotebookLM topics and details. | Unique `(source, video_id, output_language)` cache key; untagged legacy records are preserved. |
 
 Automatic jobs normally move through:
 
@@ -218,3 +217,8 @@ Database name and Holodex behavior remain fixed in code.
 Use the command guide for normal bot actions and the installation guide for
 settings. Manage persistent schema changes through the deployment process and
 preserve a database backup before changing models or indexes.
+
+
+Database upgrades for version 1.6 must run offline before starting the bot.
+See [migration instructions](migration-1.6.md). Old collections are retained
+for comparison; workers only read the canonical collections above.

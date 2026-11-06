@@ -8,7 +8,7 @@ import pytest
 
 import vsummary.cogs.manualsummary.manualsummary as manualsummary_module
 from vsummary.cogs.manualsummary.manualsummary import ManualSummary
-from vsummary.model.channel import JobStatus, ManualSummaryJob, ManualSummaryOperation
+from vsummary.model.channel import JobStatus, ManualSummaryOperation, SummaryJob
 from vsummary.model.video import Topic
 from vsummary.settings import RuntimeConfig
 from vsummary.util.generic_media import GenericMediaUnavailableError
@@ -31,14 +31,16 @@ def make_manual_fallback_job(
     )
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
-    job = ManualSummaryJob.model_construct(
+    job = SummaryJob.model_construct(
+        job_type="manual",
+        claimed_by="worker",
         source=source,
         video_id="dQw4w9WgXcQ",
         title="Title",
         channel_name="Channel",
         operation=operation,
         topic_index=0,
-        channel_id=123,
+        discord_channel_id=123,
         requester_id=456,
         next_attempt_at=datetime.now(UTC),
         retry_count=retry_count,
@@ -94,10 +96,7 @@ async def test_manual_summary_queues_audio_fallback_after_native_retries(
     assert job.youtube_audio_fallback is True
     assert job.retry_count == 2
     assert before <= job.next_attempt_at <= datetime.now(UTC)
-    assert (
-        ManualSummaryJob.model_construct(**job.model_dump()).youtube_audio_fallback
-        is True
-    )
+    assert SummaryJob.model_construct(**job.model_dump()).youtube_audio_fallback is True
 
 
 @pytest.mark.asyncio
@@ -148,7 +147,7 @@ async def test_manual_audio_fallback_resumes_each_operation(
 ):
     cog, job = make_manual_fallback_job(operation=operation, retry_count=2)
     job.youtube_audio_fallback = True
-    job = ManualSummaryJob.model_construct(**job.model_dump())
+    job = SummaryJob.model_construct(**job.model_dump())
     summary = AsyncMock(return_value=result)
     monkeypatch.setattr(manualsummary_module, name, summary)
 
@@ -172,6 +171,7 @@ async def test_manual_audio_fallback_resumes_each_operation(
     assert job.status is JobStatus.READY_TO_DELIVER
     target.send = AsyncMock()
     job.status = JobStatus.DELIVERING  # The next lease claim selects delivery.
+    job.claimed_by = "worker"
     await cog._process(job)
     assert job.status is JobStatus.COMPLETED
     assert job.delivery_chunks == saved_chunks
@@ -242,11 +242,13 @@ async def test_topic_delivery_posts_plain_text_without_a_topic_picker(monkeypatc
     cog.bot = SimpleNamespace(get_channel=lambda _: channel)
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
-    job = ManualSummaryJob.model_construct(
+    job = SummaryJob.model_construct(
+        job_type="manual",
+        claimed_by="worker",
         source="youtube",
         video_id="dQw4w9WgXcQ",
         operation=ManualSummaryOperation.TOPICS,
-        channel_id=123,
+        discord_channel_id=123,
         requester_id=456,
         next_attempt_at=datetime.now(UTC),
         status=JobStatus.DELIVERING,
@@ -278,7 +280,7 @@ async def test_enqueue_stores_video_metadata(monkeypatch):
 
     cog = ManualSummary.__new__(ManualSummary)
     cog.worker_id = "worker"
-    monkeypatch.setattr(manualsummary_module, "ManualSummaryJob", FakeManualSummaryJob)
+    monkeypatch.setattr(manualsummary_module, "SummaryJob", FakeManualSummaryJob)
     monkeypatch.setattr(
         manualsummary_module,
         "get_video_metadata",
@@ -312,7 +314,7 @@ async def test_enqueue_checks_generic_media_and_persists_url(monkeypatch):
         async def save(self):
             saved["saved"] = True
 
-    monkeypatch.setattr(manualsummary_module, "ManualSummaryJob", FakeJob)
+    monkeypatch.setattr(manualsummary_module, "SummaryJob", FakeJob)
     inspect = AsyncMock(return_value=SimpleNamespace(title="Talk", channel_name=None))
     monkeypatch.setattr(manualsummary_module, "inspect_generic_media", inspect)
     ref = parse_video_source("https://vimeo.com/123")
@@ -339,12 +341,14 @@ async def test_generic_job_restores_url_for_generation(monkeypatch):
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
     ref = parse_video_source("https://vimeo.com/123")
-    job = ManualSummaryJob.model_construct(
+    job = SummaryJob.model_construct(
+        job_type="manual",
+        claimed_by="worker",
         source=ref.source,
         video_id=ref.video_id,
         source_url=ref.url,
         operation=ManualSummaryOperation.TOPICS,
-        channel_id=123,
+        discord_channel_id=123,
         requester_id=456,
         next_attempt_at=datetime.now(UTC),
     )
@@ -380,12 +384,14 @@ async def test_generic_terminal_failure_is_delivered_as_failure_notice(monkeypat
     cog.settings = SimpleNamespace(source_retry_limit=5)
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
-    job = ManualSummaryJob.model_construct(
+    job = SummaryJob.model_construct(
+        job_type="manual",
+        claimed_by="worker",
         source="yt_dlp",
         video_id="hash",
         source_url="https://vimeo.com/123",
         operation=ManualSummaryOperation.TOPICS,
-        channel_id=123,
+        discord_channel_id=123,
         requester_id=456,
         next_attempt_at=datetime.now(UTC),
         retry_count=0,
@@ -413,12 +419,12 @@ async def test_manual_generation_renews_owned_lease(monkeypatch):
 
     class Collection:
         async def update_one(self, query, values):
-            assert query == {"_id": "job", "claimed_by": "worker"}
+            assert query == {"_id": "job", "job_type": "manual", "claimed_by": "worker"}
             assert values["$set"]["lease_expires_at"] > datetime.now(UTC)
             renewed.set()
 
     monkeypatch.setattr(
-        manualsummary_module.ManualSummaryJob,
+        manualsummary_module.SummaryJob,
         "get_pymongo_collection",
         lambda: Collection(),
     )
@@ -438,11 +444,13 @@ async def test_twitch_audio_failure_is_logged_with_video_context(monkeypatch, ca
     cog.settings = SimpleNamespace(source_retry_limit=5)
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
-    job = ManualSummaryJob.model_construct(
+    job = SummaryJob.model_construct(
+        job_type="manual",
+        claimed_by="worker",
         source="twitch",
         video_id="123456789",
         operation=ManualSummaryOperation.TOPICS,
-        channel_id=123,
+        discord_channel_id=123,
         requester_id=456,
         next_attempt_at=datetime.now(UTC),
     )
@@ -475,12 +483,14 @@ async def test_detail_includes_video_and_channel_metadata(monkeypatch):
     cog.settings = SimpleNamespace()
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
-    job = ManualSummaryJob.model_construct(
+    job = SummaryJob.model_construct(
+        job_type="manual",
+        claimed_by="worker",
         source="youtube",
         video_id="dQw4w9WgXcQ",
         operation=ManualSummaryOperation.DETAIL_ONE,
         topic_index=0,
-        channel_id=123,
+        discord_channel_id=123,
         requester_id=456,
         next_attempt_at=datetime.now(UTC),
     )
@@ -517,11 +527,13 @@ async def test_all_details_include_video_and_channel_metadata_once(monkeypatch):
     cog.settings = SimpleNamespace()
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
-    job = ManualSummaryJob.model_construct(
+    job = SummaryJob.model_construct(
+        job_type="manual",
+        claimed_by="worker",
         source="youtube",
         video_id="dQw4w9WgXcQ",
         operation=ManualSummaryOperation.DETAIL_ALL,
-        channel_id=123,
+        discord_channel_id=123,
         requester_id=456,
         next_attempt_at=datetime.now(UTC),
     )
@@ -586,12 +598,14 @@ async def test_manual_summary_retries_invalid_response_immediately(
     cog.settings = SimpleNamespace(source_retry_limit=5)
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
-    job = ManualSummaryJob.model_construct(
+    job = SummaryJob.model_construct(
+        job_type="manual",
+        claimed_by="worker",
         source="youtube",
         video_id="dQw4w9WgXcQ",
         operation=operation,
         topic_index=0,
-        channel_id=123,
+        discord_channel_id=123,
         requester_id=456,
         next_attempt_at=datetime.now(UTC),
     )
@@ -623,11 +637,13 @@ async def test_manual_summary_queues_after_two_invalid_responses(monkeypatch):
     cog.settings = SimpleNamespace(source_retry_limit=5)
     cog.worker_id = "worker"
     cog._save = AsyncMock(return_value=True)
-    job = ManualSummaryJob.model_construct(
+    job = SummaryJob.model_construct(
+        job_type="manual",
+        claimed_by="worker",
         source="youtube",
         video_id="dQw4w9WgXcQ",
         operation=ManualSummaryOperation.TOPICS,
-        channel_id=123,
+        discord_channel_id=123,
         requester_id=456,
         next_attempt_at=datetime.now(UTC),
     )
@@ -641,3 +657,33 @@ async def test_manual_summary_queues_after_two_invalid_responses(monkeypatch):
     assert job.status is JobStatus.QUEUED
     assert job.last_error == "NotebookLM did not return JSON topic data"
     assert job.next_attempt_at > datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_manual_delivery_checkpoints_and_stops_on_lost_lease():
+    cog, job = make_manual_fallback_job()
+    target = SimpleNamespace(send=AsyncMock())
+    cog.bot.get_channel = lambda _: target
+    job.operation = ManualSummaryOperation.DETAIL_ALL
+    job.delivery_chunks = ["first", "second", "third"]
+    job.status = JobStatus.DELIVERING
+    cog._save = AsyncMock(side_effect=[True, False])
+    await cog._deliver(job)
+    assert [call.args[0] for call in target.send.await_args_list] == ["first", "second"]
+    assert job.delivery_chunk_index == 2
+
+
+@pytest.mark.asyncio
+async def test_manual_lost_lease_after_generation_does_not_deliver(monkeypatch):
+    cog, job = make_manual_fallback_job()
+    job.status = JobStatus.GENERATING
+    job.claimed_by = "worker"
+    cog._save = AsyncMock(return_value=False)
+    cog._deliver = AsyncMock()
+    monkeypatch.setattr(
+        manualsummary_module,
+        "get_topic_list",
+        AsyncMock(return_value=[Topic(name="Intro")]),
+    )
+    await cog._process(job)
+    cog._deliver.assert_not_awaited()

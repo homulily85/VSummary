@@ -103,3 +103,11 @@ def test_parse_and_build_direct_x_space_round_trip():
 
     assert ref == VideoRef(source="x_space", video_id="1OwxWwQOPlNxQ")
     assert build_video_url(ref) == "https://x.com/i/spaces/1OwxWwQOPlNxQ"
+
+
+def test_video_ref_accepts_explicit_video_id_and_keeps_read_only_compatibility():
+    reference = VideoRef(source="youtube", video_id="abc")
+
+    assert reference.video_id == "abc"
+    assert reference.id == "abc"
+    assert reference == VideoRef(source="youtube", id="abc")

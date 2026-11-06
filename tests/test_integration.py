@@ -24,9 +24,8 @@ from vsummary.cogs.summarizer.summarizer import Summarizer
 from vsummary.model.channel import (
     AutoSummaryTopicPolicy,
     JobStatus,
-    ManualSummaryJob,
     ManualSummaryOperation,
-    PendingVideoStatus,
+    SummaryJob,
 )
 from vsummary.model.video import Topic, VideoSummary
 from vsummary.settings import RuntimeConfig, Settings
@@ -163,7 +162,7 @@ class FakeVideoRecord:
             self.records.append(self)
 
 
-class FakePendingRecord:
+class FakeSummaryJob:
     video_id = QueryField()
     channel_id = QueryField()
     status = QueryField()
@@ -180,7 +179,8 @@ class FakePendingRecord:
         available_at,
         next_attempt_at,
         retry_count=0,
-        status=PendingVideoStatus.QUEUED,
+        job_type="auto",
+        status=JobStatus.QUEUED,
     ):
         self.video_id = video_id
         self.channel_id = channel_id
@@ -190,20 +190,31 @@ class FakePendingRecord:
         self.next_attempt_at = next_attempt_at
         self.retry_count = retry_count
         self.status = status
+        self.job_type = job_type
+        self.summary_details = []
+        self.delivery_chunks = []
+        self.delivery_chunk_index = 0
+        self.delivery_retry_count = 0
+        self.claimed_by = "worker"
         self.save_count = 0
 
     @classmethod
     async def find_one(cls, query):
-        if isinstance(query, tuple) and query[0] is cls.video_id:
-            return next(
-                (record for record in cls.records if record.video_id == query[1]),
-                None,
-            )
-        return cls.records[0] if cls.records else None
+        return next(
+            (
+                record
+                for record in cls.records
+                if all(getattr(record, key) == value for key, value in query.items())
+            ),
+            None,
+        )
 
     @classmethod
     def find(cls, *args):
-        return SimpleNamespace(to_list=lambda: cls._to_list())
+        async def delete():
+            cls.deleted_queries.append(args[0])
+
+        return SimpleNamespace(to_list=lambda: cls._to_list(), delete=delete)
 
     @classmethod
     async def _to_list(cls):
@@ -255,6 +266,13 @@ def make_autosummary(bot=None):
     cog.holodex = AsyncMock()
     cog.holodex.get_video_topic = AsyncMock(return_value=None)
     cog.notebook = cog.bot.notebook_client
+    cog.worker_id = "worker"
+
+    async def save(job):
+        await job.save()
+        return True
+
+    cog._save_item = AsyncMock(side_effect=save)
     return cog
 
 
@@ -268,12 +286,14 @@ def make_manual_summary(bot):
 
 
 def make_manual_detail_job(topic_index=0):
-    return ManualSummaryJob.model_construct(
+    return SummaryJob.model_construct(
+        job_type="manual",
+        claimed_by="worker",
         source="youtube",
         video_id=VIDEO_ID,
         operation=ManualSummaryOperation.DETAIL_ONE,
         topic_index=topic_index,
-        channel_id=123,
+        discord_channel_id=123,
         requester_id=456,
         next_attempt_at=datetime.now(UTC),
     )
@@ -282,13 +302,13 @@ def make_manual_detail_job(topic_index=0):
 @pytest.fixture(autouse=True)
 def reset_fake_storage(monkeypatch):
     FakeVideoRecord.records = []
-    FakePendingRecord.records = []
-    FakePendingRecord.deleted_queries = []
+    FakeSummaryJob.records = []
+    FakeSummaryJob.deleted_queries = []
     FakeFollowedChannel.records = []
     FakeFollowedChannel.find_one_result = None
-    monkeypatch.setattr(summarizer_util, "Video", FakeVideoRecord)
-    monkeypatch.setattr(autosummary_module, "Channel", FakeFollowedChannel)
-    monkeypatch.setattr(autosummary_module, "PendingVideo", FakePendingRecord)
+    monkeypatch.setattr(summarizer_util, "VideoSummary", FakeVideoRecord)
+    monkeypatch.setattr(autosummary_module, "FollowedChannel", FakeFollowedChannel)
+    monkeypatch.setattr(autosummary_module, "SummaryJob", FakeSummaryJob)
 
 
 @pytest.mark.asyncio
@@ -499,7 +519,7 @@ async def test_workers_do_not_retry_or_download_audio_for_status_3(operation, st
         cog.summary_service = NotebookLMSummaryService(client, config=config)
         cog._save_item = AsyncMock(return_value=True)
         cog._post_failure = AsyncMock()
-        job = FakePendingRecord(
+        job = FakeSummaryJob(
             video_id=VIDEO_ID,
             channel_id="UC1",
             channel_name="Channel",
@@ -608,7 +628,7 @@ async def test_workers_preserve_retry_policy_for_topic_review(
         cog.summary_service = NotebookLMSummaryService(client, config=config)
         cog._save_item = AsyncMock(return_value=True)
         cog._post_failure = AsyncMock()
-        job = FakePendingRecord(
+        job = FakeSummaryJob(
             video_id=VIDEO_ID,
             channel_id="UC1",
             channel_name="Channel",
@@ -832,7 +852,7 @@ async def test_current_language_applies_to_generation_but_not_saved_delivery(aut
         return cog
 
     if automatic:
-        job = FakePendingRecord(
+        job = FakeSummaryJob(
             video_id=VIDEO_ID,
             channel_id="UC1",
             channel_name="Channel",
@@ -866,6 +886,7 @@ async def test_current_language_applies_to_generation_but_not_saved_delivery(aut
         await restarted_worker._process_pending_video(job)
     else:
         job.status = JobStatus.DELIVERING
+        job.claimed_by = "worker"
         await restarted_worker._process(job)
     assert job.status is JobStatus.COMPLETED
     assert job.delivery_chunks == saved_chunks
@@ -1425,7 +1446,7 @@ async def test_deletecache_waits_for_generation_and_preserves_jobs_and_delivery(
     automatic.settings = RuntimeConfig(auto_summary_channel_id=123)
     automatic.summary_service = NotebookLMSummaryService(client)
     automatic._save_item = AsyncMock(return_value=True)
-    job = FakePendingRecord(
+    job = FakeSummaryJob(
         video_id=VIDEO_ID,
         channel_id="UC1",
         channel_name="Channel",
@@ -1673,10 +1694,14 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
             next_attempt_at=datetime(2026, 9, 19, 11, 45, tzinfo=UTC),
         ),
     ]
-    monkeypatch.setattr(summarizer_module, "SummaryJob", auto_jobs, raising=False)
-    monkeypatch.setattr(
-        summarizer_module, "ManualSummaryJob", manual_jobs, raising=False
-    )
+    for job in auto_jobs.jobs:
+        job.job_type, job.source, job.source_url = "auto", "youtube", None
+    for job in manual_jobs.jobs:
+        job.job_type = "manual"
+        if not hasattr(job, "source_url"):
+            job.source_url = None
+    auto_jobs.jobs += manual_jobs.jobs
+    monkeypatch.setattr(summarizer_module, "SummaryJob", auto_jobs)
     interaction = FakeInteraction()
 
     await Summarizer.queue.callback(Summarizer(SimpleNamespace()), interaction)
@@ -1701,7 +1726,6 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
     assert auto_jobs.query == {
         "status": {"$in": ["queued", "generating", "ready_to_deliver", "delivering"]}
     }
-    assert manual_jobs.query == auto_jobs.query
     assert not hasattr(summarizer_module, "get_topic_list")
 
 
@@ -1870,7 +1894,7 @@ async def test_manual_detail_waits_for_auto_summary_and_reuses_cached_details(
     )
     auto_summary = make_autosummary(bot)
     auto_summary.summary_service = NotebookLMSummaryService(client)
-    item = FakePendingRecord(
+    item = FakeSummaryJob(
         video_id=VIDEO_ID,
         channel_id="UC1",
         channel_name="Test",
@@ -1930,7 +1954,7 @@ async def test_auto_summary_waits_for_an_earlier_manual_detail_job(monkeypatch):
     auto_summary.summary_service = SimpleNamespace(
         summarize=AsyncMock(return_value=[Topic(name="Introduction", detail="Details")])
     )
-    item = FakePendingRecord(
+    item = FakeSummaryJob(
         video_id=VIDEO_ID,
         channel_id="UC1",
         channel_name="Test",
@@ -1975,7 +1999,7 @@ async def test_notebooklm_error_in_manual_detail_releases_work_for_auto_summary(
     auto_summary.summary_service = SimpleNamespace(
         summarize=AsyncMock(return_value=[Topic(name="Introduction", detail="Details")])
     )
-    item = FakePendingRecord(
+    item = FakeSummaryJob(
         video_id=VIDEO_ID,
         channel_id="UC1",
         channel_name="Test",
@@ -2086,7 +2110,9 @@ async def test_autosummary_remove_channel_deletes_pending_videos_and_handles_mis
     await Autosummary.removechannel.callback(cog, interaction, "UC123")
 
     assert followed.deleted is True
-    assert len(FakePendingRecord.deleted_queries) == 1
+    assert FakeSummaryJob.deleted_queries == [
+        {"job_type": "auto", "channel_id": "UC123"}
+    ]
     assert interaction.followup.messages == [
         ("Removed channel 'UC123' and its pending videos.", {})
     ]
@@ -2154,7 +2180,7 @@ async def test_autosummary_poll_and_process_loops_delegate_each_due_item():
         videos[0], FakeFollowedChannel.records[0]
     )
 
-    due_item = FakePendingRecord(
+    due_item = FakeSummaryJob(
         video_id="due",
         channel_id="UC1",
         channel_name="First",
@@ -2162,7 +2188,8 @@ async def test_autosummary_poll_and_process_loops_delegate_each_due_item():
         available_at=datetime.now(UTC),
         next_attempt_at=datetime.now(UTC),
     )
-    FakePendingRecord.records = [due_item]
+    FakeSummaryJob.records = [due_item]
+    cog._claim_due_jobs = AsyncMock(return_value=[due_item])
     cog._process_pending_video = AsyncMock()
 
     await cog.process_due_videos()
@@ -2255,7 +2282,7 @@ async def test_auto_transcript_delay_uses_operational_config():
         duration=30,
     )
     await cog._enqueue_new_video(video, channel)
-    assert FakePendingRecord.records[0].next_attempt_at == published + timedelta(
+    assert FakeSummaryJob.records[0].next_attempt_at == published + timedelta(
         seconds=90
     )
 
@@ -2312,9 +2339,9 @@ async def test_autosummary_enqueue_skips_ignored_and_duplicate_videos(monkeypatc
 
     await cog._enqueue_new_video(ignored, channel)
 
-    assert FakePendingRecord.records == []
+    assert FakeSummaryJob.records == []
 
-    existing = FakePendingRecord(
+    existing = FakeSummaryJob(
         video_id=VIDEO_ID,
         channel_id="UC1",
         channel_name="Test",
@@ -2322,7 +2349,7 @@ async def test_autosummary_enqueue_skips_ignored_and_duplicate_videos(monkeypatc
         available_at=datetime.now(UTC),
         next_attempt_at=datetime.now(UTC),
     )
-    FakePendingRecord.records = [existing]
+    FakeSummaryJob.records = [existing]
     duplicate = HolodexVideo(
         id=VIDEO_ID,
         title="Duplicate",
@@ -2333,7 +2360,7 @@ async def test_autosummary_enqueue_skips_ignored_and_duplicate_videos(monkeypatc
 
     await cog._enqueue_new_video(duplicate, channel)
 
-    assert FakePendingRecord.records == [existing]
+    assert FakeSummaryJob.records == [existing]
 
 
 @pytest.mark.asyncio
@@ -2373,7 +2400,7 @@ async def test_autosummary_only_enqueues_unignored_topic_videos_published_after_
     await cog._enqueue_new_video(before_removal, channel)
     await cog._enqueue_new_video(after_removal, channel)
 
-    assert [job.video_id for job in FakePendingRecord.records] == ["after"]
+    assert [job.video_id for job in FakeSummaryJob.records] == ["after"]
 
 
 @pytest.mark.asyncio
@@ -2386,24 +2413,6 @@ async def test_addignoredtopic_does_not_require_manage_guild_permission(monkeypa
     policy = SimpleNamespace(
         topic_id="shorts", effective_at=datetime(2026, 9, 22, 12, tzinfo=UTC)
     )
-    setter = AsyncMock(return_value=(True, policy))
-    monkeypatch.setattr(autosummary_module, "set_auto_summary_topic_policy", setter)
-
-    await Autosummary.addignoredtopic.callback(cog, interaction, "shorts")
-
-    setter.assert_awaited_once_with("shorts", ignored=True)
-    assert interaction.response.sent == (
-        "Topic `shorts` will be ignored for videos published after <t:1790078400:F>."
-    )
-    assert interaction.response.sent_kwargs == {"ephemeral": True}
-
-
-@pytest.mark.asyncio
-async def test_addignoredtopic_persists_a_future_policy(monkeypatch):
-    cog = make_autosummary()
-    interaction = FakeInteraction()
-    effective_at = datetime(2026, 9, 22, 12, tzinfo=UTC)
-    policy = SimpleNamespace(topic_id="shorts", effective_at=effective_at)
     setter = AsyncMock(return_value=(True, policy))
     monkeypatch.setattr(autosummary_module, "set_auto_summary_topic_policy", setter)
 
@@ -2446,7 +2455,7 @@ async def test_autosummary_enqueue_sets_ready_and_delayed_attempt_times(monkeypa
 
     await cog._enqueue_new_video(ready_video, channel)
 
-    ready_pending = FakePendingRecord.records[-1]
+    ready_pending = FakeSummaryJob.records[-1]
     assert ready_pending.video_id == "ready"
     assert ready_pending.next_attempt_at <= datetime.now(UTC)
 
@@ -2457,7 +2466,7 @@ async def test_autosummary_enqueue_sets_ready_and_delayed_attempt_times(monkeypa
 
     await cog._enqueue_new_video(delayed_video, channel)
 
-    delayed_pending = FakePendingRecord.records[-1]
+    delayed_pending = FakeSummaryJob.records[-1]
     assert abs(
         delayed_pending.next_attempt_at
         - (delayed_at + timedelta(seconds=1800, hours=2))
@@ -2472,7 +2481,7 @@ async def test_autosummary_processes_success_and_posts_summary(monkeypatch):
         get_channel=lambda channel_id: target if channel_id == 123 else None,
     )
     cog = make_autosummary(bot)
-    item = FakePendingRecord(
+    item = FakeSummaryJob(
         video_id=VIDEO_ID,
         channel_id="UC1",
         channel_name="Test",
@@ -2494,7 +2503,7 @@ async def test_autosummary_processes_success_and_posts_summary(monkeypatch):
 
     await cog._process_pending_video(item)
 
-    assert item.status is PendingVideoStatus.DONE
+    assert item.status is JobStatus.COMPLETED
     assert target.messages == [
         "**Video:** A stream\n**Channel:** Test\n\n**Intro**\nDetails\n\n**Outro**\nMore details"
     ]
@@ -2509,7 +2518,7 @@ async def test_autosummary_retries_then_marks_video_failed_and_posts_failure(
     cog = make_autosummary(bot)
     cog.settings = RuntimeConfig(auto_summary_channel_id=123)
 
-    retry_item = FakePendingRecord(
+    retry_item = FakeSummaryJob(
         video_id="retry",
         channel_id="UC1",
         channel_name="Test",
@@ -2520,12 +2529,12 @@ async def test_autosummary_retries_then_marks_video_failed_and_posts_failure(
     )
     await cog._handle_source_error(retry_item)
 
-    assert retry_item.status is PendingVideoStatus.QUEUED
+    assert retry_item.status is JobStatus.QUEUED
     assert retry_item.retry_count == 1
     assert retry_item.next_attempt_at > datetime.now(UTC)
     assert target.messages == []
 
-    failed_item = FakePendingRecord(
+    failed_item = FakeSummaryJob(
         video_id="failed",
         channel_id="UC1",
         channel_name="Test",
@@ -2536,7 +2545,7 @@ async def test_autosummary_retries_then_marks_video_failed_and_posts_failure(
     )
     await cog._handle_source_error(failed_item)
 
-    assert failed_item.status is PendingVideoStatus.FAILED
+    assert failed_item.status is JobStatus.FAILED
     assert len(target.messages) == 1
     assert "Failed to generate a summary after 5 attempts" in target.messages[0]
 
@@ -2632,9 +2641,8 @@ async def test_startup_configures_timezone_aware_mongodb_datetimes(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("migration_fails", [False, True])
-async def test_startup_migrates_language_cache_before_external_workers(
-    monkeypatch, migration_fails
+async def test_startup_initializes_workers_without_running_offline_migration(
+    monkeypatch,
 ):
     events = []
     collection = object()
@@ -2653,11 +2661,7 @@ async def test_startup_migrates_language_cache_before_external_workers(
         assert not kwargs.get("allow_index_dropping", False)
         events.append("initialize")
 
-    async def migrate(value):
-        assert value is collection
-        events.append("migrate")
-        if migration_fails:
-            raise RuntimeError("index migration failed")
+    migrate = AsyncMock(side_effect=AssertionError("Migration must run offline"))
 
     @asynccontextmanager
     async def notebook_session():
@@ -2683,14 +2687,9 @@ async def test_startup_migrates_language_cache_before_external_workers(
     monkeypatch.setattr(main_module, "Bot", lambda **kwargs: bot)
     settings = Settings(discord_token="token", mongodb_uri="mongodb://localhost")
 
-    if migration_fails:
-        with pytest.raises(RuntimeError, match="index migration failed"):
-            await main_module.async_main(settings)
-        assert events == ["initialize", "migrate"]
-        bot.start.assert_not_awaited()
-    else:
-        await main_module.async_main(settings)
-        assert events == ["initialize", "migrate", "notebook"]
-        bot.start.assert_awaited_once_with("token")
-        bot.close.assert_awaited_once()
+    await main_module.async_main(settings)
+    assert events == ["initialize", "notebook"]
+    migrate.assert_not_awaited()
+    bot.start.assert_awaited_once_with("token")
+    bot.close.assert_awaited_once()
     mongo_client.close.assert_awaited_once()

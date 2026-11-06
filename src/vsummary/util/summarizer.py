@@ -17,7 +17,6 @@ from vsummary.util.video import VideoRef, build_video_url
 from vsummary.util.x_space import download_x_space_audio
 
 logger = logging.getLogger(__name__)
-Video = VideoSummary
 # Conservative application budget, not a claimed Google API limit. UTF-8 bytes
 # also bound character count and leave headroom for multilingual topic names.
 _MAX_CHAT_QUESTION_BYTES = 4000
@@ -353,7 +352,7 @@ async def _get_or_create_topic_list(
     *,
     use_youtube_audio: bool = False,
     config: RuntimeConfig | None = None,
-) -> tuple[Video, "Notebook | None"]:
+) -> tuple[VideoSummary, "Notebook | None"]:
     """
     Get the topic list for a video, creating it if it doesn't exist.
     :param client: The NotebookLMClient instance to use for interacting with the notebook service
@@ -366,10 +365,10 @@ async def _get_or_create_topic_list(
     language_key = output_language.casefold()
 
     logger.info(f"Checking if video {video_link} is already in database...")
-    video = await Video.find_one(
-        Video.source == ref.source,
-        Video.video_id == ref.video_id,
-        Video.output_language == language_key,
+    video = await VideoSummary.find_one(
+        VideoSummary.source == ref.source,
+        VideoSummary.video_id == ref.video_id,
+        VideoSummary.output_language == language_key,
     )
     if video and video.topics:
         video.topics = _validated_topics(video.topics)
@@ -409,7 +408,7 @@ async def _get_or_create_topic_list(
         if video:
             video.topics = topics_objects
         else:
-            video = Video(
+            video = VideoSummary(
                 source=ref.source,
                 video_id=ref.video_id,
                 output_language=language_key,

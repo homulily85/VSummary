@@ -37,6 +37,19 @@ class FakeJob:
         self.saved += 1
 
 
+@pytest.fixture(autouse=True)
+def fake_job_persistence(monkeypatch):
+    original = Autosummary._save_item
+
+    async def save(cog, job):
+        if isinstance(job, FakeJob):
+            await job.save()
+            return True
+        return await original(cog, job)
+
+    monkeypatch.setattr(Autosummary, "_save_item", save)
+
+
 def make_youtube_fallback_job(*, enabled=True, retry_count=1):
     cog = Autosummary.__new__(Autosummary)
     cog.bot = SimpleNamespace(notebook_client=object())
@@ -53,6 +66,7 @@ def make_youtube_fallback_job(*, enabled=True, retry_count=1):
     cog._save_item = AsyncMock(return_value=True)
     cog._post_failure = AsyncMock()
     job = SummaryJob.model_construct(
+        job_type="auto",
         video_id="dQw4w9WgXcQ",
         channel_id="channel",
         channel_name="Channel",
@@ -268,6 +282,7 @@ async def test_delivery_failure_keeps_persisted_summary_and_does_not_regenerate(
 @pytest.mark.asyncio
 async def test_claim_due_jobs_uses_current_beanie_collection_api(monkeypatch):
     record = {
+        "job_type": "auto",
         "video_id": "video",
         "channel_id": "channel",
         "channel_name": "Channel",
@@ -301,6 +316,7 @@ async def test_claim_due_jobs_uses_current_beanie_collection_api(monkeypatch):
 async def test_claim_due_jobs_reclaims_an_expired_delivery_lease(monkeypatch):
     now = datetime.now(UTC)
     record = {
+        "job_type": "auto",
         "video_id": "video",
         "channel_id": "channel",
         "channel_name": "Channel",
@@ -484,6 +500,7 @@ async def test_cancellation_persists_and_releases_claimed_job(monkeypatch):
         classmethod(lambda cls: collection),
     )
     job = SummaryJob.model_construct(
+        job_type="auto",
         id="job-id",
         video_id="video",
         channel_id="channel",
@@ -505,7 +522,7 @@ async def test_cancellation_persists_and_releases_claimed_job(monkeypatch):
     assert not await cog._generate_for_job(job)
 
     query, update = collection.update_one.await_args.args
-    assert query == {"_id": "job-id", "claimed_by": "worker"}
+    assert query == {"_id": "job-id", "job_type": "auto", "claimed_by": "worker"}
     assert update["$set"]["status"] == JobStatus.CANCELLED
     assert update["$set"]["claimed_by"] is None
     assert update["$set"]["lease_expires_at"] is None
@@ -631,6 +648,7 @@ async def test_missing_topic_is_retried_before_generation(monkeypatch):
 @pytest.mark.asyncio
 async def test_owned_job_writes_include_the_current_claimed_by(monkeypatch):
     job = SummaryJob.model_construct(
+        job_type="auto",
         id="job-id",
         video_id="video",
         channel_id="channel",
@@ -655,5 +673,6 @@ async def test_owned_job_writes_include_the_current_claimed_by(monkeypatch):
     assert await cog._save_item(job)
     assert collection.update_one.await_args.args[0] == {
         "_id": "job-id",
+        "job_type": "auto",
         "claimed_by": "worker",
     }

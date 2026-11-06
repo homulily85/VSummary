@@ -1,4 +1,4 @@
-"""Cached summary deletion and startup index migration."""
+"""Cached summary deletion and offline index migration."""
 
 import logging
 
@@ -27,8 +27,8 @@ async def migrate_video_cache_indexes(collection: AsyncCollection) -> None:
     """Establish the language key before removing obsolete video-only uniqueness.
 
     Keep cached documents and unrelated indexes intact. Only IndexNotFound is
-    harmless when another startup concurrently removes the same obsolete index.
-    All other failures abort startup before any workers run.
+    harmless when another migration concurrently removes the same obsolete index.
+    All other failures propagate to the offline migration command.
     """
     await collection.create_indexes([VIDEO_LANGUAGE_CACHE_INDEX])
     indexes = await collection.index_information()

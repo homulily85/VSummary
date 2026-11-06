@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from discord.ext import commands, tasks
 from pymongo import ReturnDocument
 
-from vsummary.model.channel import JobStatus, ManualSummaryJob, ManualSummaryOperation
+from vsummary.model.channel import JobStatus, ManualSummaryOperation, SummaryJob
 from vsummary.settings import RuntimeConfig, Settings, runtime_config
 from vsummary.util.discord import send_limited, split_message
 from vsummary.util.generic_media import (
@@ -97,7 +97,8 @@ class ManualSummary(commands.Cog):
             if ref.source == "yt_dlp"
             else await self._load_metadata(ref)
         )
-        job = ManualSummaryJob(
+        job = SummaryJob(
+            job_type="manual",
             source=ref.source,
             video_id=ref.video_id,
             source_url=ref.url,
@@ -105,7 +106,7 @@ class ManualSummary(commands.Cog):
             channel_name=metadata.channel_name if metadata else None,
             operation=operation,
             topic_index=topic_index,
-            channel_id=channel_id,
+            discord_channel_id=channel_id,
             requester_id=requester_id,
             next_attempt_at=datetime.now(UTC),
         )
@@ -127,7 +128,7 @@ class ManualSummary(commands.Cog):
         """Atomically claim scheduled jobs and expired generation or delivery leases."""
         now = datetime.now(UTC)
         claimed = []
-        collection = ManualSummaryJob.get_pymongo_collection()
+        collection = SummaryJob.get_pymongo_collection()
         for query, status in (
             (
                 {"status": JobStatus.QUEUED.value, "next_attempt_at": {"$lte": now}},
@@ -155,6 +156,7 @@ class ManualSummary(commands.Cog):
                 JobStatus.DELIVERING,
             ),
         ):
+            query["job_type"] = "manual"
             while record := await collection.find_one_and_update(
                 query,
                 {
@@ -167,7 +169,7 @@ class ManualSummary(commands.Cog):
                 },
                 return_document=ReturnDocument.AFTER,
             ):
-                claimed.append(ManualSummaryJob.model_validate(record))
+                claimed.append(SummaryJob.model_validate(record))
         return claimed
 
     async def _process(self, job):
@@ -175,7 +177,7 @@ class ManualSummary(commands.Cog):
         if job.status == JobStatus.GENERATING:
             async with self._renew_generation_lease(job):
                 await self._generate(job)
-        if job.status == JobStatus.DELIVERING:
+        if job.status == JobStatus.DELIVERING and job.claimed_by == self.worker_id:
             await self._deliver(job)
 
     @asynccontextmanager
@@ -186,8 +188,12 @@ class ManualSummary(commands.Cog):
             while True:
                 await asyncio.sleep(self._lease_duration().total_seconds() / 3)
                 try:
-                    await ManualSummaryJob.get_pymongo_collection().update_one(
-                        {"_id": job.id, "claimed_by": self.worker_id},
+                    await SummaryJob.get_pymongo_collection().update_one(
+                        {
+                            "_id": job.id,
+                            "job_type": "manual",
+                            "claimed_by": self.worker_id,
+                        },
                         {
                             "$set": {
                                 "lease_expires_at": datetime.now(UTC)
@@ -299,14 +305,15 @@ class ManualSummary(commands.Cog):
         job.status = JobStatus.DELIVERING
         job.delivery_chunk_index = 0
         job.last_error = None
-        await self._save(job)
+        if not await self._save(job):
+            job.claimed_by = None
 
     async def _deliver(self, job):
         """Send unconfirmed chunks and checkpoint progress after every successful send."""
         try:
             channel = self.bot.get_channel(
-                job.channel_id
-            ) or await self.bot.fetch_channel(job.channel_id)
+                job.discord_channel_id
+            ) or await self.bot.fetch_channel(job.discord_channel_id)
             if (
                 job.operation == ManualSummaryOperation.TOPICS
                 and job.delivery_chunk_index == 0
@@ -319,9 +326,13 @@ class ManualSummary(commands.Cog):
                     + job.delivery_chunks[0],
                 )
                 job.delivery_chunk_index = 1
+                if not await self._save(job):
+                    return
             for chunk in job.delivery_chunks[job.delivery_chunk_index :]:
                 await send_limited(self.bot, channel.send, chunk)
                 job.delivery_chunk_index += 1
+                if not await self._save(job):
+                    return
             job.status = (
                 JobStatus.FAILED
                 if getattr(job, "failure_notice", False)
@@ -444,8 +455,9 @@ class ManualSummary(commands.Cog):
         """Persist a job only while this worker still owns its lease."""
         values = job.model_dump(mode="python", by_alias=True, exclude={"id"})
         values.pop("_id", None)
-        result = await ManualSummaryJob.get_pymongo_collection().update_one(
-            {"_id": job.id, "claimed_by": self.worker_id}, {"$set": values}
+        result = await SummaryJob.get_pymongo_collection().update_one(
+            {"_id": job.id, "job_type": "manual", "claimed_by": self.worker_id},
+            {"$set": values},
         )
         return result.matched_count == 1
 

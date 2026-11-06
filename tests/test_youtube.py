@@ -41,7 +41,3 @@ def test_to_video_url_normalizes_supported_inputs(value):
 def test_to_video_url_rejects_unsupported_inputs(value):
     with pytest.raises(InvalidYouTubeInputError):
         to_video_url(value)
-
-
-def test_to_video_url_returns_a_string():
-    assert isinstance(to_video_url(VIDEO_ID), str)

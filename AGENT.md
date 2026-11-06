@@ -23,7 +23,7 @@ every change, no exceptions:
 1. **Write the test(s) first.** Before implementing or modifying any
    feature, add or update the closest relevant file under `tests/`
    (`test_settings.py`, `test_models.py`,
-   `test_refactored_models.py`, `test_holodex.py`, `test_video.py`,
+   `test_holodex.py`, `test_video.py`,
    `test_youtube.py`, `test_formatting.py`, or `test_workflow_state.py`).
    Use `test_integration.py` only when coverage genuinely spans multiple
    boundaries. The test(s) should express the desired behavior and are
@@ -95,7 +95,7 @@ src/vsummary/
 │   └── autosummary/
 │       └── autosummary.py # channel commands and durable Holodex polling workflow
 ├── model/
-│   ├── video.py          # Topic and VideoSummary documents; legacy Video compatibility model
+│   ├── video.py          # Topic and VideoSummary documents
 │   └── channel.py        # FollowedChannel, SummaryJob, and job-state models
 └── util/
     ├── discord.py         # Discord message chunking within the 2,000-character limit
@@ -108,8 +108,7 @@ tests/
 ├── test_formatting.py       # Discord message chunking
 ├── test_holodex.py          # Holodex client contracts and retry behavior
 ├── test_integration.py      # mixed Discord, NotebookLM, and autosummary coverage
-├── test_models.py           # legacy model compatibility behavior
-├── test_refactored_models.py# current model names, states, and validation
+├── test_models.py           # model fields, defaults, validation, states, and indexes
 ├── test_settings.py         # settings parsing and validation
 ├── test_video.py            # source-agnostic VideoRef behavior
 ├── test_workflow_state.py   # autosummary generation/delivery state transitions
@@ -129,16 +128,22 @@ Notes for agents:
 - Data models backed by MongoDB go in `src/vsummary/model/` as Beanie
   `Document` subclasses. `main.py` registers `FollowedChannel`, `SummaryJob`,
   and `VideoSummary` with `beanie.init_beanie(...)` during startup.
-- `FollowedChannel` and `SummaryJob` preserve the existing `Channel` and
-  `PendingVideo` collection names. `Channel`, `PendingVideo`, and `Video` are
-  compatibility models/aliases; prefer the current names in new code.
+- Canonical collections are `FollowedChannel`, `SummaryJob`, `VideoSummary`,
+  and `AutoSummaryTopicPolicy`. No compatibility model aliases remain.
+- `SummaryJob.job_type` is required (`auto` or `manual`). Auto jobs use
+  `channel_id` for the YouTube channel; manual jobs use `discord_channel_id`
+  for delivery. Every worker claim and write must filter its job type.
+- Upgrade old databases offline with `uv run python -m vsummary.migrations.v1_6`
+  (dry-run) then `--apply`; see `docs/migration-1.6.md`. Keep the bot stopped.
+  Legacy collections are retained; do not reintroduce runtime legacy fallbacks.
 - `VideoSummary` has a unique `(source, video_id, output_language)` index. Its
   language key is stripped and case-folded; legacy untagged records remain
-  separate and are never selected for new generation. Startup ensures the new
-  index exists before removing only the old unique `(source, video_id)` index;
-  preserve unrelated indexes and abort startup if migration fails.
-  `SummaryJob` has a unique `(channel_id, video_id)` index plus status and `next_attempt_at`
-  indexes. Do not bypass these constraints with check-then-insert logic.
+  separate and are never selected for new generation. The offline migration
+  ensures the new index exists before removing only the old unique
+  `(source, video_id)` index; preserve unrelated indexes. Startup does not run
+  this migration.
+  `SummaryJob` has a partial unique `(channel_id, video_id)` index for auto jobs
+  and `(job_type, status, next_attempt_at)` plus lease indexes. Do not bypass these constraints with check-then-insert logic.
 - `/deletecache video:<URL-or-ID>` clears all language caches and untagged legacy
   records for exactly one `(source, video_id)`. Keep database deletion in
   `util/video_cache.py` and acquire the bot's shared per-video coordinator in the

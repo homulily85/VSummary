@@ -32,15 +32,5 @@ class VideoSummary(Document):
     topics: list[Topic] = Field(default_factory=list)
 
     class Settings:
-        """Store canonical summaries in the compatible ``Video`` collection."""
-
-        name = "Video"
+        name = "VideoSummary"
         indexes: ClassVar[list] = [VIDEO_LANGUAGE_CACHE_INDEX]
-
-
-class Video(Document):
-    """Legacy compatibility shape for cached video documents."""
-
-    source: str
-    video_id: str
-    topics: list[Topic] | None = None

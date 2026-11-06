@@ -2,10 +2,10 @@
 
 from datetime import UTC, datetime
 from enum import Enum
-from typing import ClassVar
+from typing import ClassVar, Literal, Self
 
 from beanie import Document
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pymongo import IndexModel
 
 from vsummary.model.video import Topic
@@ -53,9 +53,7 @@ class FollowedChannel(Document):
         return value.astimezone(UTC)
 
     class Settings:
-        """Map this model to the legacy-preserved ``Channel`` collection."""
-
-        name = "Channel"
+        name = "FollowedChannel"
         indexes: ClassVar[list] = [IndexModel([("channel_id", 1)], unique=True)]
 
 
@@ -89,8 +87,6 @@ class AutoSummaryTopicPolicy(Document):
         return value.astimezone(UTC)
 
     class Settings:
-        """Store topic-policy history with efficient topic and time lookup."""
-
         name = "AutoSummaryTopicPolicy"
         indexes: ClassVar[list] = [
             IndexModel([("topic_key", 1), ("effective_at", 1)], unique=True)
@@ -98,7 +94,7 @@ class AutoSummaryTopicPolicy(Document):
 
 
 class SummaryJob(Document):
-    """Durable automatic-summary job with leased generation and delivery phases.
+    """Durable automatic or manual summary job with leased generation and delivery phases.
 
     The payload is saved before Discord delivery so transient send failures do
     not regenerate NotebookLM output. ``claimed_*`` fields implement a worker
@@ -106,11 +102,19 @@ class SummaryJob(Document):
     ``youtube_audio_fallback`` selects the final audio attempt after native retries.
     """
 
+    job_type: Literal["auto", "manual"]
+    source: str = "youtube"
     video_id: str
-    channel_id: str
-    channel_name: str
-    title: str
-    available_at: datetime
+    source_url: str | None = None
+    channel_id: str | None = None
+    discord_channel_id: int | None = None
+    channel_name: str | None = None
+    title: str | None = None
+    available_at: datetime | None = None
+    operation: ManualSummaryOperation | None = None
+    topic_index: int | None = Field(default=None, ge=0)
+    requester_id: int | None = None
+    failure_notice: bool = False
     retry_count: int = 0
     youtube_audio_fallback: bool = False
     delivery_retry_count: int = 0
@@ -141,85 +145,39 @@ class SummaryJob(Document):
             raise ValueError("datetime values must be timezone-aware")
         return value.astimezone(UTC) if value is not None else None
 
-    class Settings:
-        """Map to the compatible ``PendingVideo`` collection and its indexes."""
-
-        name = "PendingVideo"
-        indexes: ClassVar[list] = [
-            IndexModel([("channel_id", 1), ("video_id", 1)], unique=True),
-            [("status", 1)],
-            [("next_attempt_at", 1)],
-            [("lease_expires_at", 1)],
-        ]
-
-
-class ManualSummaryJob(Document):
-    """Durable user-requested job targeting the Discord channel that requested it.
-
-    ``operation`` and ``topic_index`` describe the requested content, while
-    retry, lease, and delivery fields mirror :class:`SummaryJob` semantics.
-    ``youtube_audio_fallback`` preserves the final audio phase across restarts.
-    """
-
-    source: str
-    video_id: str
-    source_url: str | None = None
-    title: str | None = None
-    channel_name: str | None = None
-    operation: ManualSummaryOperation
-    topic_index: int | None = None
-    channel_id: int
-    requester_id: int
-    next_attempt_at: datetime
-    status: JobStatus = JobStatus.QUEUED
-    retry_count: int = 0
-    youtube_audio_fallback: bool = False
-    delivery_retry_count: int = 0
-    delivery_chunks: list[str] = Field(default_factory=list)
-    delivery_chunk_index: int = 0
-    last_error: str | None = None
-    failure_notice: bool = False
-    claimed_by: str | None = None
-    claimed_at: datetime | None = None
-    lease_expires_at: datetime | None = None
-
-    @field_validator("next_attempt_at", "claimed_at", "lease_expires_at")
-    @classmethod
-    def require_manual_job_timezone(cls, value: datetime | None) -> datetime | None:
-        """Normalize manual-job lease and schedule timestamps to UTC."""
-        if value is not None and value.tzinfo is None:
-            raise ValueError("datetime values must be timezone-aware")
-        return value.astimezone(UTC) if value is not None else None
+    @model_validator(mode="after")
+    def require_job_fields(self) -> Self:
+        if self.job_type == "auto":
+            if self.source != "youtube" or any(
+                value is None
+                for value in (
+                    self.channel_id,
+                    self.channel_name,
+                    self.title,
+                    self.available_at,
+                )
+            ):
+                raise ValueError(
+                    "auto jobs require YouTube channel metadata and available_at"
+                )
+        elif any(
+            value is None
+            for value in (self.operation, self.requester_id, self.discord_channel_id)
+        ):
+            raise ValueError(
+                "manual jobs require operation, requester_id and discord_channel_id"
+            )
+        return self
 
     class Settings:
-        """Map manual jobs to their dedicated collection and worker indexes."""
-
-        name = "ManualSummaryJob"
+        name = "SummaryJob"
         indexes: ClassVar[list] = [
-            [("status", 1), ("next_attempt_at", 1)],
+            IndexModel(
+                [("channel_id", 1), ("video_id", 1)],
+                unique=True,
+                name="auto_channel_video_unique",
+                partialFilterExpression={"job_type": "auto"},
+            ),
+            [("job_type", 1), ("status", 1), ("next_attempt_at", 1)],
             [("lease_expires_at", 1)],
         ]
-
-
-class PendingVideoStatus(str, Enum):
-    """Legacy automatic-summary status values retained for compatibility."""
-
-    QUEUED = "queued"
-    DONE = "done"
-    FAILED = "failed"
-
-
-Channel = FollowedChannel
-
-
-class PendingVideo(Document):
-    """Compatibility model for older pending-video documents and integrations."""
-
-    video_id: str
-    channel_id: str
-    channel_name: str
-    title: str
-    available_at: datetime
-    retry_count: int = 0
-    next_attempt_at: datetime
-    status: PendingVideoStatus = PendingVideoStatus.QUEUED

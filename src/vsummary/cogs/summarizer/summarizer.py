@@ -9,7 +9,6 @@ from pymongo.errors import PyMongoError
 
 from vsummary.model.channel import (
     JobStatus,
-    ManualSummaryJob,
     ManualSummaryOperation,
     SummaryJob,
 )
@@ -197,32 +196,20 @@ class Summarizer(commands.Cog):
         """List active auto-summary and manual-summary jobs in processing order."""
         await interaction.response.defer(thinking=True)
         query = {"status": {"$in": _ACTIVE_JOB_STATUSES}}
-        auto_jobs = await SummaryJob.find(query).to_list()
-        manual_jobs = await ManualSummaryJob.find(query).to_list()
+        jobs = await SummaryJob.find(query).to_list()
         entries = [
             (
                 job.next_attempt_at,
-                "Auto",
-                job.title,
-                build_video_url(VideoRef(source="youtube", video_id=job.video_id)),
-            )
-            for job in auto_jobs
-        ]
-        entries.extend(
-            (
-                job.next_attempt_at,
-                "Manual",
-                getattr(job, "title", None) or job.video_id,
+                "Auto" if job.job_type == "auto" else "Manual",
+                job.title or job.video_id,
                 build_video_url(
                     VideoRef(
-                        source=job.source,
-                        video_id=job.video_id,
-                        url=getattr(job, "source_url", None),
+                        source=job.source, video_id=job.video_id, url=job.source_url
                     )
                 ),
             )
-            for job in manual_jobs
-        )
+            for job in jobs
+        ]
         if not entries:
             await send_limited(
                 self.bot, interaction.followup.send, "The queue is empty."
