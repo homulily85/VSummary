@@ -1409,7 +1409,7 @@ wheels = [
 
 [[package]]
 name = "vsummary"
-version = "1.7.0"
+version = "1.6.1"
 source = { editable = "." }
 dependencies = [
     { name = "beanie" },

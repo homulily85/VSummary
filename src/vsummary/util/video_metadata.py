@@ -1,9 +1,7 @@
 """Read display titles and channel names for supported sources."""
 
 import asyncio
-import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
 
 import yt_dlp
 
@@ -16,42 +14,25 @@ class VideoMetadataError(RuntimeError):
 
 @dataclass(frozen=True)
 class VideoMetadata:
-    """Carry display and verification metadata for a recording.
+    """Carry display metadata for a recording.
 
     Attributes:
         title: Non-blank recording title.
         channel_name: Display name for the channel, uploader, or artist when available.
-        channel_id: Validated YouTube channel ID, when available.
-        channel_url: Channel profile URL reported by the extractor.
-        description: Bounded copy of the video description.
-        links: Deduplicated URLs found in the description.
-        aired_at: UTC release time for a recording identified as a past livestream.
-        published_on: Upload date reported by the extractor.
     """
 
     title: str
     channel_name: str | None
-    channel_id: str | None = None
-    channel_url: str | None = None
-    description: str = ""
-    links: tuple[str, ...] = ()
-    aired_at: datetime | None = None
-    published_on: date | None = None
-
-    @property
-    def content_date(self) -> date | None:
-        """Return the livestream date, or the upload date if it is unknown."""
-        return self.aired_at.date() if self.aired_at else self.published_on
 
 
 async def get_video_metadata(ref: VideoRef) -> VideoMetadata:
-    """Look up video metadata in a worker thread.
+    """Look up a video's title and channel in a worker thread.
 
     Args:
         ref: Video reference whose URL can be opened by yt-dlp.
 
     Returns:
-        Recording title and channel or uploader name, plus optional verification metadata.
+        Recording title and channel or uploader name.
 
     Raises:
         UnsupportedVideoSource: If the reference cannot be turned into a URL.
@@ -62,15 +43,14 @@ async def get_video_metadata(ref: VideoRef) -> VideoMetadata:
 
 
 def _extract_video_metadata(url: str) -> VideoMetadata:
-    """Read display and verification metadata with yt-dlp without downloading media.
+    """Read required display fields with yt-dlp without downloading media.
 
     Args:
         url: Recording URL to inspect.
 
     Returns:
         Metadata with a trimmed title and channel name, using the uploader as a
-            fallback. Optional description, profile, and date fields are included
-            when available.
+            fallback.
 
     Raises:
         VideoMetadataError: If extraction fails, the result is invalid, or the title and
@@ -98,34 +78,7 @@ def _extract_video_metadata(url: str) -> VideoMetadata:
         raise VideoMetadataError(
             "Could not load video metadata: title or channel missing"
         )
-    description = (_nonempty_text(info.get("description")) or "")[:20000]
-    channel_id = _nonempty_text(info.get("channel_id"))
-    if not channel_id or not re.fullmatch(r"UC[A-Za-z0-9_-]{22}", channel_id):
-        channel_id = None
-    published = _nonempty_text(info.get("upload_date"))
-    try:
-        published_on = (
-            datetime.strptime(published, "%Y%m%d").date() if published else None
-        )
-    except ValueError:
-        published_on = None
-    aired_at = None
-    stamp = info.get("release_timestamp")
-    if info.get("was_live") and type(stamp) in {float, int}:
-        try:
-            aired_at = datetime.fromtimestamp(stamp, tz=UTC)
-        except (OverflowError, OSError, ValueError):
-            pass
-    return VideoMetadata(
-        title=title,
-        channel_name=channel_name,
-        channel_id=channel_id,
-        channel_url=_nonempty_text(info.get("channel_url")),
-        description=description,
-        links=tuple(dict.fromkeys(re.findall(r'https?://[^\s<>"\x27]+', description))),
-        aired_at=aired_at,
-        published_on=published_on,
-    )
+    return VideoMetadata(title=title, channel_name=channel_name)
 
 
 def _nonempty_text(value: object) -> str | None:

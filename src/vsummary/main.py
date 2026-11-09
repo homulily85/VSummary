@@ -18,13 +18,6 @@ from vsummary.model.channel import (
     SummaryJob,
 )
 from vsummary.model.video import VideoSummary
-from vsummary.model.wiki import (
-    VideoVerification,
-    WikiAlias,
-    WikiEntity,
-    WikiEvidence,
-    WikiFact,
-)
 from vsummary.settings import Settings, SettingsError, load_settings
 
 logger = logging.getLogger(__name__)
@@ -70,11 +63,6 @@ async def async_main(settings: Settings | None = None):
                 AutoSummaryTopicPolicy,
                 SummaryJob,
                 VideoSummary,
-                WikiEntity,
-                WikiAlias,
-                WikiFact,
-                WikiEvidence,
-                VideoVerification,
             ],
         )
         logger.info("Connected to MongoDB!")
