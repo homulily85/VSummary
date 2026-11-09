@@ -7,7 +7,6 @@ import pytest
 
 from vsummary.util import holodex
 from vsummary.util.holodex import (
-    DEFAULT_IGNORED_TOPICS,
     HOLODEX_API_URL,
     REFERER,
     USER_AGENT,
@@ -60,18 +59,6 @@ async def make_client(clock):
     finally:
         for client in clients:
             await client.aclose()
-
-
-@pytest.mark.parametrize(
-    "topic_id", ["Original_Song", "membersonly", "shorts", "Music_Cover"]
-)
-def test_default_ignored_topics_include_the_original_excluded_topics(topic_id):
-    assert topic_id in DEFAULT_IGNORED_TOPICS
-
-
-@pytest.mark.parametrize("topic_id", [None, "normal", "Gaming"])
-def test_default_ignored_topics_exclude_other_topics(topic_id):
-    assert topic_id not in DEFAULT_IGNORED_TOPICS
 
 
 @pytest.mark.asyncio

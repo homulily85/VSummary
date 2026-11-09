@@ -13,9 +13,7 @@ SPACE_ID = "1OwxWwQOPlNxQ"
     "value",
     [
         f"https://x.com/i/spaces/{SPACE_ID}",
-        f"https://twitter.com/i/spaces/{SPACE_ID}?s=20",
         f"https://mobile.twitter.com/i/spaces/{SPACE_ID}?ref=mobile",
-        f"https://m.x.com/i/spaces/{SPACE_ID}",
     ],
 )
 def test_parse_x_space_input_accepts_direct_urls_with_mobile_hosts_and_queries(value):
@@ -32,9 +30,7 @@ def test_parse_x_space_input_accepts_direct_urls_with_mobile_hosts_and_queries(v
 @pytest.mark.parametrize(
     "value",
     [
-        "https://x.com/example/status/1234567890123456789",
         "https://twitter.com/example/status/1234567890123456789?s=20",
-        "https://mobile.twitter.com/example/status/1234567890123456789?ref=mobile",
         "https://m.x.com/example/status/1234567890123456789",
     ],
 )

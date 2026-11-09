@@ -23,9 +23,9 @@ Discord command or Holodex poll
  shared Discord rate limiter ---> destination channel
 ```
 
-`main.py` owns application lifetime: it loads validated settings, configures
-logging, opens MongoDB, registers Beanie documents, migrates the video cache
-index, opens the authenticated NotebookLM client, and starts `Bot`. `Bot` loads
+`main.py` manages application startup and shutdown. It loads validated settings,
+configures logging, opens MongoDB, registers Beanie documents, opens the
+authenticated NotebookLM client, and starts `Bot`. `Bot` loads
 the ping, manual-summary, slash-command, and auto-summary cogs. It also holds shared services that cogs
 use: the NotebookLM client, settings, per-video coordinator, and Discord send
 rate limiter.
@@ -98,10 +98,6 @@ retry policy appropriate to the error. The final YouTube audio fallback also
 uses both passes, with no additional generation attempt. Topics and details are cached separately
 for each trimmed, case-folded language name; aliases are not combined. Existing
 untagged records are retained but excluded from all language-specific lookups.
-The offline migration ensures the new unique three-field cache index exists
-before removing only the obsolete two-field unique index. Other indexes are
-preserved. Startup does not run this migration; stop all bot processes and
-complete the offline migration successfully before starting the new version.
 
 Language changes take effect after a restart. Pending generation uses the
 current setting, reusing that language's cache while leaving other languages
@@ -217,8 +213,3 @@ Database name and Holodex behavior remain fixed in code.
 Use the command guide for normal bot actions and the installation guide for
 settings. Manage persistent schema changes through the deployment process and
 preserve a database backup before changing models or indexes.
-
-
-Database upgrades for version 1.6 must run offline before starting the bot.
-See [migration instructions](migration-1.6.md). Old collections are retained
-for comparison; workers only read the canonical collections above.

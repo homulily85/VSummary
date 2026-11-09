@@ -133,17 +133,12 @@ Notes for agents:
 - `SummaryJob.job_type` is required (`auto` or `manual`). Auto jobs use
   `channel_id` for the YouTube channel; manual jobs use `discord_channel_id`
   for delivery. Every worker claim and write must filter its job type.
-- Upgrade old databases offline with `uv run python -m vsummary.migrations.v1_6`
-  (dry-run) then `--apply`; see `docs/migration-1.6.md`. Keep the bot stopped.
-  Legacy collections are retained; do not reintroduce runtime legacy fallbacks.
 - `VideoSummary` has a unique `(source, video_id, output_language)` index. Its
-  language key is stripped and case-folded; legacy untagged records remain
-  separate and are never selected for new generation. The offline migration
-  ensures the new index exists before removing only the old unique
-  `(source, video_id)` index; preserve unrelated indexes. Startup does not run
-  this migration.
-  `SummaryJob` has a partial unique `(channel_id, video_id)` index for auto jobs
-  and `(job_type, status, next_attempt_at)` plus lease indexes. Do not bypass these constraints with check-then-insert logic.
+  language key is stripped and case-folded. Untagged records remain separate
+  and are never selected for new generation.
+- `SummaryJob` has a partial unique `(channel_id, video_id)` index for auto jobs
+  and `(job_type, status, next_attempt_at)` plus lease indexes. Do not bypass
+  these constraints with check-then-insert logic.
 - `/deletecache video:<URL-or-ID>` clears all language caches and untagged legacy
   records for exactly one `(source, video_id)`. Keep database deletion in
   `util/video_cache.py` and acquire the bot's shared per-video coordinator in the

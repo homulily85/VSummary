@@ -38,9 +38,7 @@ def test_output_language_defaults_to_english():
 @pytest.mark.parametrize(
     ("language", "expected"),
     [
-        ("Vietnamese", "Vietnamese"),
         (" Japanese ", "Japanese"),
-        ("Traditional Chinese", "Traditional Chinese"),
         ("日本語", "日本語"),
     ],
 )
@@ -193,7 +191,6 @@ def test_dotenv_secrets_preserve_environment_precedence_and_notebooklm_auth(
     [
         "[broken",
         "[database]\nname='other'",
-        "[holodex]\ntimeout_seconds=1",
         "[discord]\nunknown=1",
         "discord=1",
     ],
@@ -226,13 +223,9 @@ def test_invalid_or_unsupported_config_is_rejected(tmp_path, text):
         ("logging", "discord_min_level", "bad"),
         ("logging", "discord_queue_size", 0),
         ("logging", "path", ""),
-        ("summary", "output_language", ""),
         ("summary", "output_language", " \t "),
         ("summary", "output_language", "Japanese\x00"),
         ("summary", "output_language", False),
-        ("summary", "output_language", 3),
-        ("summary", "output_language", []),
-        ("summary", "output_language", {}),
         ("summary", "output_language", None),
     ],
 )

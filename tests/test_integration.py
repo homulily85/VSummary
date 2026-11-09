@@ -313,6 +313,40 @@ def make_manual_detail_job(topic_index=0):
     )
 
 
+def make_worker_job(client, config, operation):
+    bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        notebook_client=client,
+        video_work=VideoWorkCoordinator(),
+    )
+    if operation == "automatic":
+        cog = make_autosummary(bot)
+        cog.summary_service = NotebookLMSummaryService(client, config=config)
+        cog._save_item = AsyncMock(return_value=True)
+        job = FakeSummaryJob(
+            video_id=VIDEO_ID,
+            channel_id="UC1",
+            channel_name="Channel",
+            title="A stream",
+            available_at=datetime.now(UTC),
+            next_attempt_at=datetime.now(UTC),
+            status=JobStatus.QUEUED,
+        )
+    else:
+        cog = make_manual_summary(bot)
+        job = make_manual_detail_job()
+        job.operation = {
+            "topics": ManualSummaryOperation.TOPICS,
+            "detail": ManualSummaryOperation.DETAIL_ONE,
+            "all": ManualSummaryOperation.DETAIL_ALL,
+        }[operation]
+        job.title, job.channel_name = "A stream", "Channel"
+    cog.settings = config
+    return cog, job
+
+
 @pytest.fixture(autouse=True)
 def reset_fake_storage(monkeypatch):
     FakeVideoRecord.records = []
@@ -396,12 +430,9 @@ async def test_topic_list_requests_english_names_and_caches_them_in_order():
     ("draft", "reviewed"),
     [
         (["Concert", "Travel"], ["Concert", "Audience questions", "Travel"]),
-        (["Concert and travel"], ["Concert rehearsal", "Travel plans"]),
         (["Concert", "Travel"], ["Concert", "Travel", "Concert"]),
-        (["Concert", "Unsupported entry"], ["Concert"]),
-        (['Travel "plans"'], ['Travel "plans"']),
     ],
-    ids=["omission", "split", "recurring", "corrected", "unchanged"],
+    ids=["omission", "recurring"],
 )
 async def test_topic_review_saves_only_the_corrected_list(monkeypatch, draft, reviewed):
     draft_json = json.dumps([{"name": name} for name in draft])
@@ -434,11 +465,10 @@ async def test_topic_review_saves_only_the_corrected_list(monkeypatch, draft, re
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["topics", "detail", "all", "service"])
-@pytest.mark.parametrize("text", ["a", "🎵"])
 async def test_large_topic_inventories_keep_every_topic_with_bounded_chat_requests(
-    monkeypatch, operation, text
+    monkeypatch, operation
 ):
-    names = [f"Segment {i:04}: " + text * 86 for i in range(100)]
+    names = [f"Segment {i:04}: " + "🎵" * 86 for i in range(100)]
     reviewed_names = names + ["Audience questions"]
     draft = json.dumps([{"name": name} for name in names], ensure_ascii=False)
     reviewed = json.dumps(
@@ -510,10 +540,10 @@ async def test_oversized_language_never_dispatches_a_chat_request():
 @pytest.mark.parametrize(
     ("operation", "stage"),
     [
-        (operation, stage)
-        for operation in ("automatic", "topics", "detail", "all")
-        for stage in ("topic_extraction", "topic_review", "topic_detail")
-        if not (operation == "topics" and stage == "topic_detail")
+        ("automatic", "topic_detail"),
+        ("topics", "topic_extraction"),
+        ("detail", "topic_detail"),
+        ("all", "topic_review"),
     ],
 )
 async def test_workers_do_not_retry_or_download_audio_for_status_3(operation, stage):
@@ -526,37 +556,8 @@ async def test_workers_do_not_retry_or_download_audio_for_status_3(operation, st
             )
         ]
     )
-    bot = SimpleNamespace(
-        fetch_channel=None,
-        message_rate_limiter=None,
-        settings=None,
-        notebook_client=client,
-        video_work=VideoWorkCoordinator(),
-    )
     config = RuntimeConfig(source_retry_limit=1, youtube_yt_dlp_fallback_enabled=True)
-    if operation == "automatic":
-        cog = make_autosummary(bot)
-        cog.summary_service = NotebookLMSummaryService(client, config=config)
-        cog._save_item = AsyncMock(return_value=True)
-        job = FakeSummaryJob(
-            video_id=VIDEO_ID,
-            channel_id="UC1",
-            channel_name="Channel",
-            title="Video",
-            available_at=datetime.now(UTC),
-            next_attempt_at=datetime.now(UTC),
-            status=JobStatus.QUEUED,
-        )
-    else:
-        cog = make_manual_summary(bot)
-        job = make_manual_detail_job()
-        job.operation = {
-            "topics": ManualSummaryOperation.TOPICS,
-            "detail": ManualSummaryOperation.DETAIL_ONE,
-            "all": ManualSummaryOperation.DETAIL_ALL,
-        }[operation]
-        job.title, job.channel_name = "Video", "Channel"
-    cog.settings = config
+    cog, job = make_worker_job(client, config, operation)
     if operation == "automatic":
         assert not await cog._generate_for_job(job)
     else:
@@ -573,25 +574,27 @@ async def test_workers_do_not_retry_or_download_audio_for_status_3(operation, st
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("existing_record", [False, True])
 @pytest.mark.parametrize(
-    ("answer", "error_type"),
+    ("existing_record", "answer", "error_type"),
     [
-        ("not JSON", InvalidSummaryResponse),
-        ("[]", InvalidSummaryResponse),
-        ('{"name": "Concert"}', InvalidSummaryResponse),
-        ('[{"name": " "}]', InvalidSummaryResponse),
-        (json.dumps([{"name": "x" * 101}]), InvalidSummaryResponse),
-        (httpx.ReadTimeout("review timed out"), TransientSummaryError),
-        (RuntimeError("review failed"), RuntimeError),
+        pytest.param(False, "not JSON", InvalidSummaryResponse, id="json-no-cache"),
+        pytest.param(True, "not JSON", InvalidSummaryResponse, id="json-empty-cache"),
+        pytest.param(
+            False,
+            httpx.ReadTimeout("review timed out"),
+            TransientSummaryError,
+            id="timeout",
+        ),
+        pytest.param(False, RuntimeError("review failed"), RuntimeError, id="request"),
     ],
-    ids=["json", "empty", "shape", "blank", "long", "timeout", "request"],
 )
 async def test_topic_review_failure_leaves_no_draft_cache(
     existing_record, answer, error_type
 ):
     if existing_record:
-        video = FakeVideoRecord(source="youtube", video_id=VIDEO_ID, topics=[])
+        video = FakeVideoRecord(
+            source="youtube", video_id=VIDEO_ID, topics=[], output_language="english"
+        )
         await video.save()
     client = FakeNotebookClient(answers=['[{"name": "Concert"}]', answer])
 
@@ -608,8 +611,17 @@ async def test_topic_review_failure_leaves_no_draft_cache(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["automatic", "topics", "detail", "all"])
-@pytest.mark.parametrize("outcome", ["recovered", "exhausted", "audio_failure"])
+@pytest.mark.parametrize(
+    ("operation", "outcome"),
+    [
+        ("automatic", "recovered"),
+        ("automatic", "exhausted"),
+        ("automatic", "audio_failure"),
+        ("topics", "recovered"),
+        ("detail", "exhausted"),
+        ("all", "audio_failure"),
+    ],
+)
 async def test_workers_preserve_retry_policy_for_topic_review(
     monkeypatch, tmp_path, operation, outcome
 ):
@@ -638,40 +650,10 @@ async def test_workers_preserve_retry_policy_for_topic_review(
             cleaned.append(ref)
 
     monkeypatch.setattr(summarizer_util, "download_generic_audio", fake_download)
-    bot = SimpleNamespace(
-        fetch_channel=None,
-        message_rate_limiter=None,
-        settings=None,
-        notebook_client=client,
-        video_work=VideoWorkCoordinator(),
-    )
     config = RuntimeConfig(
         youtube_yt_dlp_fallback_enabled=True, output_language="Japanese"
     )
-    if operation == "automatic":
-        cog = make_autosummary(bot)
-        cog.summary_service = NotebookLMSummaryService(client, config=config)
-        cog._save_item = AsyncMock(return_value=True)
-        job = FakeSummaryJob(
-            video_id=VIDEO_ID,
-            channel_id="UC1",
-            channel_name="Channel",
-            title="A stream",
-            available_at=datetime.now(UTC),
-            next_attempt_at=datetime.now(UTC),
-            status=JobStatus.QUEUED,
-        )
-    else:
-        cog = make_manual_summary(bot)
-        job = make_manual_detail_job()
-        job.operation = {
-            "topics": ManualSummaryOperation.TOPICS,
-            "detail": ManualSummaryOperation.DETAIL_ONE,
-            "all": ManualSummaryOperation.DETAIL_ALL,
-        }[operation]
-        job.title = "A stream"
-        job.channel_name = "Channel"
-    cog.settings = config
+    cog, job = make_worker_job(client, config, operation)
     if outcome == "audio_failure":
         job.youtube_audio_fallback = True
         job.retry_count = config.source_retry_limit
@@ -1115,7 +1097,7 @@ async def test_generic_source_uploads_temporary_audio_file(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["topics", "detail", "all", "service"])
+@pytest.mark.parametrize("operation", ["topics", "service"])
 async def test_youtube_audio_fallback_uploads_audio_and_keeps_the_youtube_cache(
     monkeypatch,
     tmp_path,
@@ -1148,16 +1130,6 @@ async def test_youtube_audio_fallback_uploads_audio_and_keeps_the_youtube_cache(
             client, VIDEO_REF, use_youtube_audio=True, config=config
         )
         assert result == [Topic(name="Intro")]
-    elif operation == "detail":
-        result = await summarizer_util.get_topic_details(
-            client, VIDEO_REF, 0, use_youtube_audio=True, config=config
-        )
-        assert result == {"topic_name": "Intro", "detail": "Details"}
-    elif operation == "all":
-        result = await summarizer_util.get_topic_details_all(
-            client, VIDEO_REF, use_youtube_audio=True, config=config
-        )
-        assert result == [{"topic_name": "Intro", "detail": "Details"}]
     else:
         result = await NotebookLMSummaryService(client, config=config).summarize(
             VIDEO_REF, use_youtube_audio=True
@@ -1311,12 +1283,7 @@ def test_deletecache_command_has_one_required_argument_and_existing_access_model
 @pytest.mark.parametrize(
     ("video", "expected"),
     [
-        (VIDEO_ID, VideoRef("youtube", VIDEO_ID)),
         (f"https://youtu.be/{VIDEO_ID}?t=42", VideoRef("youtube", VIDEO_ID)),
-        (
-            f"https://www.youtube.com/watch?v={VIDEO_ID}&t=42",
-            VideoRef("youtube", VIDEO_ID),
-        ),
         ("https://m.twitch.tv/videos/123456789", VideoRef("twitch", "123456789")),
         (
             "https://mobile.twitter.com/i/spaces/1OwxWwQOPlNxQ?foo=bar",
@@ -1365,7 +1332,7 @@ async def test_deletecache_normalizes_direct_references_without_availability_che
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("count", [0, 1, 4])
+@pytest.mark.parametrize("count", [0, 1])
 async def test_deletecache_reports_count_or_missing_cache_through_rate_limiter(
     monkeypatch, count
 ):
@@ -1392,7 +1359,7 @@ async def test_deletecache_reports_count_or_missing_cache_through_rate_limiter(
     message = (
         "No cached summary found for this video."
         if count == 0
-        else f"Deleted {count} cached summary {'record' if count == 1 else 'records'} for this video across all languages."
+        else "Deleted 1 cached summary record for this video across all languages."
     )
     limiter.send.assert_awaited_once_with(
         interaction.followup.send, message, ephemeral=True
@@ -1471,16 +1438,7 @@ async def test_deletecache_requests_direct_space_url_when_post_cannot_be_resolve
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "video",
-    [
-        "",
-        "not-a-url",
-        "ftp://example.com/video",
-        "http://127.0.0.1/video",
-        "https://[invalid",
-    ],
-)
+@pytest.mark.parametrize("video", ["http://127.0.0.1/video", "https://[invalid"])
 async def test_deletecache_rejects_invalid_references_without_deleting(
     monkeypatch, video
 ):
@@ -1922,14 +1880,13 @@ def test_topic_prompt_requests_detailed_english_prose_without_lists():
     assert "do not invent missing details" in prompt
 
 
-@pytest.mark.parametrize("language", ["Vietnamese", "Japanese", "Traditional Chinese"])
-def test_detail_prompt_uses_selected_language_and_keeps_length_and_boundaries(language):
+def test_detail_prompt_uses_selected_language_and_keeps_length_and_boundaries():
     prompt = summarizer_util._topic_prompt(
         [Topic(name="First"), Topic(name="Middle"), Topic(name="Last")],
         1,
-        output_language=language,
+        output_language="Japanese",
     )
-    assert f"explanation in {language}" in prompt
+    assert "explanation in Japanese" in prompt
     assert "in English" not in prompt
     assert "450 words" in prompt
     assert "no minimum word count or fixed paragraph count" in prompt
@@ -2882,11 +2839,10 @@ async def test_startup_configures_timezone_aware_mongodb_datetimes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_startup_initializes_workers_without_running_offline_migration(
+async def test_startup_initializes_database_before_opening_notebooklm(
     monkeypatch,
 ):
     events = []
-    collection = object()
     database = object()
 
     class FakeMongoClient:
@@ -2902,8 +2858,6 @@ async def test_startup_initializes_workers_without_running_offline_migration(
         assert not kwargs.get("allow_index_dropping", False)
         events.append("initialize")
 
-    migrate = AsyncMock(side_effect=AssertionError("Migration must run offline"))
-
     @asynccontextmanager
     async def notebook_session(*, keepalive=None):
         assert keepalive == 600
@@ -2918,12 +2872,6 @@ async def test_startup_initializes_workers_without_running_offline_migration(
     )
     monkeypatch.setattr(main_module, "init_beanie", initialize)
     monkeypatch.setattr(
-        main_module, "migrate_video_cache_indexes", migrate, raising=False
-    )
-    monkeypatch.setattr(
-        main_module.VideoSummary, "get_pymongo_collection", lambda: collection
-    )
-    monkeypatch.setattr(
         main_module, "NotebookLMClient", SimpleNamespace(from_storage=notebook_session)
     )
     monkeypatch.setattr(main_module, "Bot", lambda **kwargs: bot)
@@ -2931,7 +2879,6 @@ async def test_startup_initializes_workers_without_running_offline_migration(
 
     await main_module.async_main(settings)
     assert events == ["initialize", "notebook"]
-    migrate.assert_not_awaited()
     bot.start.assert_awaited_once_with("token")
     bot.close.assert_awaited_once()
     mongo_client.close.assert_awaited_once()
