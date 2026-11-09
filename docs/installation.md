@@ -145,7 +145,7 @@ durable retries after the initial failure. Logging levels accept `DEBUG`,
 `true`/`false`, without quotes. Shared media settings apply to Twitch, archived
 X Spaces, generic media, and the YouTube audio fallback.
 
-### Summary output language and cache upgrade
+### Summary output language and cache
 
 To generate topics and details in another language, add this to `config.toml`
 and restart the bot:
@@ -170,13 +170,9 @@ YouTube audio fallback. Already saved job output is delivered unchanged, even
 if the setting changes before delivery succeeds. Completed and failed jobs are
 not requeued by a language change.
 
-Stop older bot processes before upgrading to language-specific caching. Startup
-creates the unique `(source, video_id, output_language)` cache index before
-removing the obsolete unique `(source, video_id)` index, preserving other
-indexes. This transition can run repeatedly and must succeed before workers
-start. Existing cache records without a language tag are preserved but not
-reused, including for English; the first request creates a new language-tagged
-cache without guessing the language of older content.
+The cache uses a unique `(source, video_id, output_language)` index. Requests
+look up the configured language and create a language-tagged entry on a cache
+miss. Existing untagged records stay in the database.
 
 ### Migrating an existing `.env`
 
@@ -255,8 +251,8 @@ Use Docker Engine or Docker Desktop with Linux containers on AMD64. Pull the
 published `homulily85/vsummary` image from Docker Hub. It includes the Python
 runtime and audio tools. Have a reachable MongoDB deployment and
 [create and invite your Discord bot](#3-create-and-invite-the-discord-bot)
-before starting the container. For an existing database from before 1.6,
-complete the [offline migration](migration-1.6.md) first.
+before starting the container. If you reuse an existing database, it must
+already use the current schema.
 
 ### Set up Google authentication
 

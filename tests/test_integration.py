@@ -2839,11 +2839,10 @@ async def test_startup_configures_timezone_aware_mongodb_datetimes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_startup_initializes_workers_without_running_offline_migration(
+async def test_startup_initializes_database_before_opening_notebooklm(
     monkeypatch,
 ):
     events = []
-    collection = object()
     database = object()
 
     class FakeMongoClient:
@@ -2859,8 +2858,6 @@ async def test_startup_initializes_workers_without_running_offline_migration(
         assert not kwargs.get("allow_index_dropping", False)
         events.append("initialize")
 
-    migrate = AsyncMock(side_effect=AssertionError("Migration must run offline"))
-
     @asynccontextmanager
     async def notebook_session(*, keepalive=None):
         assert keepalive == 600
@@ -2875,12 +2872,6 @@ async def test_startup_initializes_workers_without_running_offline_migration(
     )
     monkeypatch.setattr(main_module, "init_beanie", initialize)
     monkeypatch.setattr(
-        main_module, "migrate_video_cache_indexes", migrate, raising=False
-    )
-    monkeypatch.setattr(
-        main_module.VideoSummary, "get_pymongo_collection", lambda: collection
-    )
-    monkeypatch.setattr(
         main_module, "NotebookLMClient", SimpleNamespace(from_storage=notebook_session)
     )
     monkeypatch.setattr(main_module, "Bot", lambda **kwargs: bot)
@@ -2888,7 +2879,6 @@ async def test_startup_initializes_workers_without_running_offline_migration(
 
     await main_module.async_main(settings)
     assert events == ["initialize", "notebook"]
-    migrate.assert_not_awaited()
     bot.start.assert_awaited_once_with("token")
     bot.close.assert_awaited_once()
     mongo_client.close.assert_awaited_once()
