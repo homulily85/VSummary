@@ -1,0 +1,38 @@
+name: Merge Dependabot minor updates
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+
+jobs:
+  merge-minor:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Read Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      - name: Merge if every update is minor and CI passes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          UPDATES: ${{ steps.metadata.outputs.updated-dependencies-json }}
+        run: |
+          if ! jq -e 'type == "array" and length > 0 and all(.[]; .updateType == "version-update:semver-minor")' <<< "$UPDATES" > /dev/null; then
+            exit 0
+          fi
+
+          until gh pr checks "$PR_URL" --required --json name > /dev/null 2>&1; do
+            sleep 5
+          done
+
+          gh pr checks "$PR_URL" --required --watch --fail-fast
+          gh pr merge "$PR_URL" --merge --match-head-commit "$HEAD_SHA"
