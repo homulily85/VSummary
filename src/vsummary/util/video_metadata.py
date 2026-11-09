@@ -1,4 +1,4 @@
-"""Metadata lookup for supported video sources."""
+"""Read display titles and channel names for supported sources."""
 
 import asyncio
 from dataclasses import dataclass
@@ -9,24 +9,53 @@ from vsummary.util.video import VideoRef, build_video_url
 
 
 class VideoMetadataError(RuntimeError):
-    """Video title or channel metadata could not be loaded."""
+    """Signal missing or unusable display metadata from yt-dlp."""
 
 
 @dataclass(frozen=True)
 class VideoMetadata:
-    """Display metadata loaded before a manual job begins generation."""
+    """Carry display metadata for a recording.
+
+    Attributes:
+        title: Non-blank recording title.
+        channel_name: Display name for the channel, uploader, or artist when available.
+    """
 
     title: str
     channel_name: str | None
 
 
 async def get_video_metadata(ref: VideoRef) -> VideoMetadata:
-    """Load a supported video's title and channel name without downloading it."""
+    """Look up a video's title and channel in a worker thread.
+
+    Args:
+        ref: Video reference whose URL can be opened by yt-dlp.
+
+    Returns:
+        Recording title and channel or uploader name.
+
+    Raises:
+        UnsupportedVideoSource: If the reference cannot be turned into a URL.
+        VideoMetadataError: If extraction fails or either required display field is
+            absent.
+    """
     return await asyncio.to_thread(_extract_video_metadata, build_video_url(ref))
 
 
 def _extract_video_metadata(url: str) -> VideoMetadata:
-    """Use yt-dlp metadata extraction and validate the display fields it returns."""
+    """Read required display fields with yt-dlp without downloading media.
+
+    Args:
+        url: Recording URL to inspect.
+
+    Returns:
+        Metadata with a trimmed title and channel name, using the uploader as a
+            fallback.
+
+    Raises:
+        VideoMetadataError: If extraction fails, the result is invalid, or the title and
+            channel cannot both be obtained.
+    """
     options = {
         "quiet": True,
         "no_warnings": True,
@@ -53,5 +82,12 @@ def _extract_video_metadata(url: str) -> VideoMetadata:
 
 
 def _nonempty_text(value: object) -> str | None:
-    """Return stripped text only when ``value`` is a non-blank string."""
+    """Normalize optional display text.
+
+    Args:
+        value: Raw metadata field.
+
+    Returns:
+        Stripped text if it contains a non-blank string, otherwise ``None``.
+    """
     return value.strip() if isinstance(value, str) and value.strip() else None

@@ -1,1 +1,1 @@
-"""Automatic summary polling and delivery cog."""
+"""Holodex subscriptions and automatic video summary delivery."""

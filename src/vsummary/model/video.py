@@ -1,4 +1,4 @@
-"""Persistent cached NotebookLM topic data."""
+"""Cached NotebookLM topics and details stored by source and output language."""
 
 from typing import ClassVar
 
@@ -14,16 +14,26 @@ VIDEO_LANGUAGE_CACHE_INDEX = IndexModel(
 
 
 class Topic(BaseModel):
-    """One ordered video topic and its optional generated explanation."""
+    """Represent one topic in the order it appears in a summary.
+
+    Attributes:
+        name: Display name used to identify the topic.
+        detail: Generated explanation, or ``None`` before detail generation.
+    """
 
     name: str
     detail: str | None = None
 
 
 class VideoSummary(Document):
-    """Cached topics keyed by source, source-local ID, and normalized language.
+    """Store reusable topic output for one video and language.
 
-    Untagged legacy records retain ``None`` and are excluded from new lookups.
+    Attributes:
+        source: Source key from the normalized video reference.
+        video_id: Identifier within the source.
+        output_language: Trimmed, case-folded language key. Untagged legacy records use
+            ``None`` and are excluded from language-specific lookups.
+        topics: Ordered topic list with any generated details.
     """
 
     source: str
@@ -32,5 +42,7 @@ class VideoSummary(Document):
     topics: list[Topic] = Field(default_factory=list)
 
     class Settings:
+        """Configure the unique index for the source, video, and language cache key."""
+
         name = "VideoSummary"
         indexes: ClassVar[list] = [VIDEO_LANGUAGE_CACHE_INDEX]

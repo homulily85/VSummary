@@ -1,1 +1,1 @@
-"""Reusable source, network, formatting, and workflow utilities."""
+"""Source normalization, external clients, and summary generation utilities."""

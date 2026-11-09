@@ -1,4 +1,4 @@
-"""Resolve, validate, and download archived public X Spaces."""
+"""Recognize X URLs, verify archived Spaces, and prepare replay audio."""
 
 from __future__ import annotations
 
@@ -38,23 +38,23 @@ _SPACE_ID_RE = re.compile(r"[A-Za-z0-9]{13}")
 
 
 class XSpaceResolutionError(ValueError):
-    """The supplied X URL does not resolve to an archived Space."""
+    """Signal that an X URL cannot be resolved to a playable archived Space."""
 
 
 class XPostWithoutSpaceError(XSpaceResolutionError):
-    """The status post has no associated Space."""
+    """Signal a status post without an associated Space."""
 
 
 class XSpaceAudioError(RuntimeError):
-    """An archived X Space could not be prepared for NotebookLM."""
+    """Signal a failure while preparing an archived Space for upload."""
 
 
 class XSpaceAudioUnavailableError(XSpaceAudioError):
-    """The X Space audio is unavailable or cannot be uploaded."""
+    """Signal an inaccessible replay or an unsupported conversion or size."""
 
 
 class XSpaceInputKind(str, Enum):
-    """The supported X URL shapes accepted before remote resolution."""
+    """Distinguish direct Space links from links to status posts."""
 
     SPACE = "space"
     STATUS = "status"
@@ -62,7 +62,14 @@ class XSpaceInputKind(str, Enum):
 
 @dataclass(frozen=True)
 class XSpaceInput:
-    """A supported X URL, normalized before requesting X through yt-dlp."""
+    """Carry a recognized X link before remote replay validation.
+
+    Attributes:
+        kind: Whether the input points to a Space or a status post.
+        input_id: ID from the input URL.
+        url: Canonical X URL passed to yt-dlp.
+        original_url: User-supplied URL with surrounding whitespace removed.
+    """
 
     kind: XSpaceInputKind
     input_id: str
@@ -71,7 +78,14 @@ class XSpaceInput:
 
 
 def parse_x_space_input(value: str) -> XSpaceInput | None:
-    """Recognize direct X Space and status-post URLs without network access."""
+    """Recognize direct Space and status-post URLs without making requests.
+
+    Args:
+        value: Candidate HTTP(S) URL on a recognized X or Twitter host.
+
+    Returns:
+        Normalized input for a recognized URL shape, or ``None`` otherwise.
+    """
     original_url = value.strip()
     try:
         parsed = urlparse(original_url)
@@ -105,7 +119,18 @@ def parse_x_space_input(value: str) -> XSpaceInput | None:
 
 
 async def resolve_parsed_x_space(x_input: XSpaceInput) -> VideoRef:
-    """Check the recording for an already recognized X URL."""
+    """Resolve a recognized X link to a playable Space replay.
+
+    Args:
+        x_input: Direct Space or status-post link classified by the local parser.
+
+    Returns:
+        Video reference keyed by the resolved Space ID.
+
+    Raises:
+        XPostWithoutSpaceError: If the post contains no Space.
+        XSpaceResolutionError: If extraction fails or the Space has no playable archive.
+    """
     logger.info("Resolving X Space from %s URL.", x_input.kind.value)
     try:
         info = await asyncio.to_thread(_extract_x_space_info, x_input.url)
@@ -119,7 +144,18 @@ async def resolve_parsed_x_space(x_input: XSpaceInput) -> VideoRef:
 
 
 def _extract_x_space_info(url: str) -> dict:
-    """Ask yt-dlp for X metadata without downloading audio."""
+    """Read X metadata with yt-dlp in inspection mode.
+
+    Args:
+        url: Canonical Space or status-post URL.
+
+    Returns:
+        Raw metadata dictionary.
+
+    Raises:
+        XSpaceResolutionError: If yt-dlp returns no metadata dictionary.
+        yt_dlp.utils.DownloadError: If yt-dlp cannot extract the metadata.
+    """
     options = {
         "quiet": True,
         "no_warnings": True,
@@ -136,7 +172,20 @@ def _extract_x_space_info(url: str) -> dict:
 
 
 def _ref_from_info(info: dict, input_kind: XSpaceInputKind) -> VideoRef:
-    """Validate yt-dlp metadata and create an archived X Space reference."""
+    """Validate Space metadata and build its replay reference.
+
+    Args:
+        info: Extracted yt-dlp metadata.
+        input_kind: URL kind used to classify a result without a Space.
+
+    Returns:
+        Video reference containing the validated Space ID.
+
+    Raises:
+        XPostWithoutSpaceError: If the input is a post and the result contains no Space.
+        XSpaceResolutionError: If the result has an invalid Space ID or no playable
+            archive.
+    """
     if not _is_x_space_result(info):
         if input_kind is XSpaceInputKind.STATUS:
             raise XPostWithoutSpaceError("This X post does not contain an X Space.")
@@ -157,14 +206,29 @@ def _ref_from_info(info: dict, input_kind: XSpaceInputKind) -> VideoRef:
 
 
 def _is_x_space_result(info: dict) -> bool:
-    """Identify metadata emitted by yt-dlp's Twitter Spaces extractor."""
+    """Identify metadata from yt-dlp's Twitter Spaces extractor.
+
+    Args:
+        info: Metadata dictionary returned by yt-dlp.
+
+    Returns:
+        Whether either extractor field identifies Twitter Spaces.
+    """
     extractor_key = info.get("extractor_key")
     extractor = info.get("extractor")
     return extractor_key == "TwitterSpaces" or extractor == "twitter:spaces"
 
 
 def _require_archived_replay(info: dict) -> None:
-    """Reject upcoming, live, and ended-but-unarchived Space states."""
+    """Require a finished Space with replay formats.
+
+    Args:
+        info: Extracted Space metadata.
+
+    Raises:
+        XSpaceResolutionError: If the Space is upcoming, live, processing, or lacks an
+            archived replay.
+    """
     live_status = info.get("live_status")
     if live_status == "is_upcoming":
         raise XSpaceResolutionError("This X Space has not started yet.")
@@ -183,7 +247,15 @@ def _require_archived_replay(info: dict) -> None:
 def _resolution_error_from_exception(
     exc: Exception, input_kind: XSpaceInputKind
 ) -> XSpaceResolutionError:
-    """Translate variable yt-dlp failures into actionable user-facing messages."""
+    """Translate a yt-dlp error into a user-facing Space resolution error.
+
+    Args:
+        exc: Exception raised while inspecting the X URL.
+        input_kind: URL kind used to recognize a status post without a Space.
+
+    Returns:
+        Specific resolution error for recognized failures, or a generic access error.
+    """
     message = str(exc).lower()
     if "not started yet" in message:
         return XSpaceResolutionError("This X Space has not started yet.")
@@ -199,7 +271,22 @@ def _resolution_error_from_exception(
 
 
 def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) -> Path:
-    """Download, transcode, size-check, and return one archived Space M4A file."""
+    """Revalidate an archived Space and convert its replay to M4A.
+
+    Args:
+        url: Canonical archived Space URL.
+        directory: Directory for the converted file.
+        config: Download format, bitrate, and size limit. Defaults to runtime settings.
+
+    Returns:
+        Path to the single validated M4A file.
+
+    Raises:
+        XSpaceAudioUnavailableError: If FFmpeg is missing, the archive cannot be
+            validated or converted, or the size limit is exceeded.
+        XSpaceAudioError: If the expected single M4A output is missing or ambiguous.
+        OSError: If the output cannot be inspected on disk.
+    """
     config = runtime_config(config)
     if shutil.which("ffmpeg") is None:
         raise XSpaceAudioUnavailableError("ffmpeg is required to process X Space audio")
@@ -249,7 +336,22 @@ def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) 
 async def download_x_space_audio(
     ref: VideoRef, *, config: RuntimeConfig | None = None
 ) -> AsyncIterator[Path]:
-    """Download an archived X Space as a temporary M4A audio file."""
+    """Prepare replay audio for an archived Space in a temporary directory.
+
+    Args:
+        ref: Normalized X Space reference.
+        config: Audio settings. Defaults to runtime settings.
+
+    Yields:
+        Path to the M4A file, available until the context exits.
+
+    Raises:
+        ValueError: If the reference is for another source.
+        XSpaceAudioUnavailableError: If the replay cannot be accessed or converted, or
+            exceeds the size limit.
+        XSpaceAudioError: If the downloader does not produce one M4A file.
+        OSError: If a temporary-file operation fails.
+    """
     if ref.source != "x_space":
         raise ValueError("X Space audio can only be downloaded for X Space references")
     with tempfile.TemporaryDirectory(prefix="vsummary-x-space-") as directory:

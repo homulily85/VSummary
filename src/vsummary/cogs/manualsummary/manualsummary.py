@@ -1,4 +1,4 @@
-"""Durable worker that generates and delivers manual Discord summary requests."""
+"""Durable generation and Discord delivery for manual summary requests."""
 
 from __future__ import annotations
 
@@ -48,7 +48,16 @@ class ManualSummary(commands.Cog):
     def __init__(
         self, bot: Bot, *, settings: Settings | None = None, start_worker: bool = True
     ):
-        """Bind shared services and optionally begin the configured worker loop."""
+        """Configure the worker and optionally start its polling loop.
+
+        Args:
+            bot: Discord bot providing NotebookLM, video locks, and delivery services.
+            settings: Settings override. When omitted, use the bot's settings.
+            start_worker: Whether to start polling immediately.
+
+        Raises:
+            RuntimeError: If polling is started without a running event loop.
+        """
         self.bot = bot
         self.settings = settings if settings is not None else bot.settings
         self.worker_id = uuid.uuid4().hex
@@ -60,33 +69,38 @@ class ManualSummary(commands.Cog):
 
     @property
     def jobs(self):
-        """Bind shared job mechanics to this worker's current settings."""
+        """Job service for the manual worker's identity and current runtime configuration."""
         return SummaryJobService("manual", self.worker_id, self.config, logger)
 
     @property
     def config(self) -> RuntimeConfig:
-        """Return injected operational settings or the centralized defaults."""
+        """Effective operational settings for the worker, including runtime defaults."""
         return runtime_config(self.settings)
 
     def _lease_duration(self) -> timedelta:
+        """Read the configured claim lifetime.
+
+        Returns:
+            Lease interval as a timedelta.
+        """
         return timedelta(seconds=self.config.job_lease_seconds)
 
     def cog_unload(self):
-        """Stop future worker-loop iterations when Discord unloads this cog."""
+        """Cancel the manual worker loop when Discord unloads the cog."""
         self.worker_loop.cancel()
 
     async def close(self):
-        """Stop the worker during the application's explicit shutdown sequence."""
+        """Request cancellation of the manual worker during application shutdown."""
         self.worker_loop.cancel()
 
     @tasks.loop()
     async def worker_loop(self):
-        """Claim and process all manual jobs that are due in this polling interval."""
+        """Run one poll of the durable manual-job queue."""
         await self.process_due_jobs()
 
     @worker_loop.before_loop
     async def before_worker_loop(self):
-        """Wait until Discord can safely resolve channels before processing jobs."""
+        """Wait for Discord readiness before the first manual-job poll."""
         await self.bot.wait_until_ready()
 
     async def enqueue(
@@ -98,7 +112,30 @@ class ManualSummary(commands.Cog):
         requester_id: int,
         topic_index: int | None = None,
     ) -> SummaryJob:
-        """Persist a new manual job with optional source metadata for delivery."""
+        """Inspect media metadata and save a manual job that is due immediately.
+
+        Missing metadata for dedicated sources is logged and the job can proceed.
+        Generic URLs are inspected before any job is saved.
+
+        Args:
+            ref: Normalized source reference, including the URL for generic media.
+            operation: Topics, one topic detail, or all topic details.
+            channel_id: Discord channel where the worker will deliver the result.
+            requester_id: ID of the Discord user requesting the summary.
+            topic_index: Zero-based index for a single-topic job, or ``None`` when
+                omitted.
+
+        Returns:
+            Persisted manual job with any available display metadata.
+
+        Raises:
+            GenericMediaError: If generic media cannot be validated or inspected.
+            UnsupportedVideoSource: If the reference cannot be turned into a supported
+                URL.
+            pydantic.ValidationError: If the proposed job does not pass model
+                validation.
+            pymongo.errors.PyMongoError: If the job cannot be saved.
+        """
         metadata = (
             await inspect_generic_media(ref)
             if ref.source == "yt_dlp"
@@ -121,7 +158,14 @@ class ManualSummary(commands.Cog):
         return job
 
     async def process_due_jobs(self):
-        """Process each atomically claimed job without stopping on a peer failure."""
+        """Claim due manual jobs and advance each independently.
+
+        Log per-job failures and continue with the remaining claimed jobs.
+
+        Raises:
+            pymongo.errors.PyMongoError: If claiming due jobs fails.
+            pydantic.ValidationError: If a claimed job fails model validation.
+        """
         for job in await self._claim_due_jobs():
             try:
                 await self._process(job)
@@ -132,9 +176,30 @@ class ManualSummary(commands.Cog):
                 )
 
     async def _claim_due_jobs(self):
+        """Claim due manual jobs and reclaim work with an expired or absent lease.
+
+        Returns:
+            Claimed jobs to generate or deliver.
+
+        Raises:
+            pymongo.errors.PyMongoError: If the claim operation fails.
+            pydantic.ValidationError: If a claimed job fails model validation.
+        """
         return await self.jobs.claim_due_jobs()
 
     async def _process(self, job):
+        """Advance one manual job under a renewable lease.
+
+        Generate output for a job in the generation phase. Deliver the saved payload if
+        the job is ready and still owned by this worker.
+
+        Args:
+            job: Claimed manual job.
+
+        Raises:
+            LeaseLostError: If the lease heartbeat interrupts processing.
+            pymongo.errors.PyMongoError: If job state cannot be persisted.
+        """
         async with self.jobs.maintain_lease(job):
             if job.status == JobStatus.GENERATING:
                 await self._generate(job)
@@ -145,7 +210,19 @@ class ManualSummary(commands.Cog):
                 await self._deliver(job)
 
     async def _generate(self, job: SummaryJob):
-        """Build and persist delivery chunks, retrying source failures durably."""
+        """Build and save the manual job's Discord delivery payload.
+
+        Generate under the per-video lock. Convert an invalid topic index into a
+        delivery message and route source failures through retry or terminal-notice
+        handling.
+
+        Args:
+            job: Claimed job to populate with delivery chunks and generation state.
+
+        Raises:
+            UnsupportedVideoSource: If a metadata lookup cannot build a URL.
+            pymongo.errors.PyMongoError: If job state cannot be persisted.
+        """
         use_youtube_audio = job.source == "youtube" and job.youtube_audio_fallback
         if use_youtube_audio and not self.config.youtube_yt_dlp_fallback_enabled:
             job.last_error = "YouTube audio fallback is disabled."
@@ -169,7 +246,18 @@ class ManualSummary(commands.Cog):
                 job.channel_name = metadata.channel_name
 
         async def generate_delivery_chunks():
-            """Execute the requested NotebookLM operation without mutating job state."""
+            """Generate and format the output requested by the enclosing job.
+
+            Returns:
+                Discord-sized chunks containing the requested topics or details.
+
+            Raises:
+                IndexError: If a requested topic index is outside the generated list.
+                SummaryServiceError: If generation fails with a classified summary
+                    error.
+                notebooklm.NotebookLMError: If a NotebookLM request fails.
+                pymongo.errors.PyMongoError: If a cache read or write fails.
+            """
             if job.operation == ManualSummaryOperation.TOPICS:
                 topics = await get_topic_list(
                     self.bot.notebook_client, ref, **generation_options
@@ -240,12 +328,46 @@ class ManualSummary(commands.Cog):
             job.claimed_by = None
 
     async def _deliver(self, job):
+        """Deliver saved chunks to the originating Discord channel.
+
+        Prefix the first topics chunk with an introduction. Use the durable service to
+        record progress on success or failure.
+
+        Args:
+            job: Manual job with its saved delivery payload and destination.
+
+        Returns:
+            Whether delivery and final persistence both succeeded.
+
+        Raises:
+            pymongo.errors.PyMongoError: If a job checkpoint cannot be saved.
+        """
+
         async def resolve_channel():
+            """Resolve the destination for the enclosing job.
+
+            Returns:
+                Cached or fetched Discord channel.
+
+            Raises:
+                discord.HTTPException: If the channel is absent from the cache and the
+                    fetch fails.
+            """
             return self.bot.get_channel(
                 job.discord_channel_id
             ) or await self.bot.fetch_channel(job.discord_channel_id)
 
         async def send(channel, chunk):
+            """Send one manual-job chunk through the shared rate limiter.
+
+            Args:
+                channel: Resolved Discord destination.
+                chunk: Saved content, with the topics introduction added for the first
+                    chunk when applicable.
+
+            Raises:
+                discord.HTTPException: If Discord cannot send the chunk.
+            """
             if (
                 job.operation == ManualSummaryOperation.TOPICS
                 and job.delivery_chunk_index == 0
@@ -257,6 +379,21 @@ class ManualSummary(commands.Cog):
         return await self.jobs.deliver(job, resolve_channel, send, self._save)
 
     async def _fail(self, job, exc, *, permanent=False, allow_youtube_fallback=False):
+        """Record a source failure, schedule the next action, and release the lease.
+
+        Args:
+            job: Manual job whose generation failed.
+            exc: Exception to log and record.
+            permanent: Whether to prepare a terminal notice immediately.
+            allow_youtube_fallback: Whether an exhausted native attempt may switch to
+                audio.
+
+        Returns:
+            Whether the resulting job state was saved while still owned.
+
+        Raises:
+            pymongo.errors.PyMongoError: If the save fails.
+        """
         logger.error(
             "Manual summary failed: %s",
             exc,
@@ -278,16 +415,45 @@ class ManualSummary(commands.Cog):
         return await self._save(job)
 
     async def _delivery_failure(self, job, exc):
+        """Record a delivery failure and save the updated state after releasing the lease.
+
+        Args:
+            job: Manual job with saved delivery progress.
+            exc: Exception from the delivery attempt.
+
+        Returns:
+            Whether the resulting job state was saved while still owned.
+
+        Raises:
+            pymongo.errors.PyMongoError: If the save fails.
+        """
         delivery_failure(job, exc, self.config)
         self._release(job)
         return await self._save(job)
 
     def _release(self, job):
+        """Clear the in-memory claim on a manual job.
+
+        Args:
+            job: Job whose lease fields should be cleared.
+        """
         SummaryJobService.release(job)
 
     @staticmethod
     def _format_detail(detail, metadata) -> str:
-        """Render one generated detail, adding source metadata only for the first one."""
+        """Render one topic as Discord Markdown with an optional video heading.
+
+        Args:
+            detail: Mapping with ``topic_name`` and ``detail`` entries.
+            metadata: Video metadata to place above the topic, or ``None`` for topic
+                text alone.
+
+        Returns:
+            Formatted detail, including title and channel when supplied.
+
+        Raises:
+            KeyError: If either detail field is missing.
+        """
         message = f"**{detail['topic_name']}**\n{detail['detail']}"
         if metadata is None:
             return message
@@ -298,7 +464,15 @@ class ManualSummary(commands.Cog):
 
     @staticmethod
     def _stored_metadata(job: SummaryJob) -> VideoMetadata | None:
-        """Return complete metadata previously persisted on a job, if any."""
+        """Recover display metadata already saved with a job.
+
+        Args:
+            job: Manual job with an optional title and channel name.
+
+        Returns:
+            Metadata with the saved title and optional channel, or ``None`` without a
+                title.
+        """
         title = job.title
         channel_name = job.channel_name
         if isinstance(title, str) and title:
@@ -311,7 +485,17 @@ class ManualSummary(commands.Cog):
         return None
 
     async def _load_metadata(self, ref: VideoRef) -> VideoMetadata | None:
-        """Load display metadata without allowing lookup failures to block a request."""
+        """Look up display metadata for a dedicated media source.
+
+        Args:
+            ref: Media reference to inspect with yt-dlp.
+
+        Returns:
+            Video metadata, or ``None`` if yt-dlp cannot provide the required fields.
+
+        Raises:
+            UnsupportedVideoSource: If the reference cannot be turned into a URL.
+        """
         try:
             return await get_video_metadata(ref)
         except VideoMetadataError as exc:
@@ -324,9 +508,27 @@ class ManualSummary(commands.Cog):
             return None
 
     async def _save(self, job):
+        """Persist a manual job through the ownership filter.
+
+        Args:
+            job: Job state to save.
+
+        Returns:
+            Whether the worker still matched the claim and saved the job.
+
+        Raises:
+            pymongo.errors.PyMongoError: If the save fails.
+        """
         return await self.jobs.save_owned(job)
 
 
 async def setup(bot):
-    """Register the durable manual-summary worker cog."""
+    """Register and start the durable manual-summary cog.
+
+    Args:
+        bot: Discord bot receiving the worker cog.
+
+    Raises:
+        discord.ClientException: If the cog is already registered.
+    """
     await bot.add_cog(ManualSummary(bot))

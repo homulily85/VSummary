@@ -1,1 +1,1 @@
-"""Discord cog implementations grouped by user-facing capability."""
+"""Discord extensions for slash commands and background summary workers."""

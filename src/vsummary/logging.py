@@ -1,4 +1,4 @@
-"""Application logging sinks and safe Discord log delivery."""
+"""Console and file logging with optional queued delivery to Discord."""
 
 from __future__ import annotations
 
@@ -43,20 +43,32 @@ _URI_CREDENTIALS = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@]+@")
 
 
 class LoggingConfigurationError(RuntimeError):
-    """Raised when the required application file log cannot be configured."""
+    """Signal an invalid log level or a failure to open the required log file."""
 
 
 class ContextFormatter(logging.Formatter):
-    """Formatter that renders optional structured log context consistently."""
+    """Format standard log records with a stable representation of their context."""
 
     def format(self, record: logging.LogRecord) -> str:
-        """Append normalized structured context before delegating to logging."""
+        """Add rendered structured context to a record and format it.
+
+        Args:
+            record: Log record to update with a ``context_text`` attribute.
+
+        Returns:
+            Formatted record text, including any exception text handled by the base
+                formatter.
+        """
         record.context_text = _format_context(getattr(record, "context", None))
         return super().format(record)
 
 
 class DiscordLogHandler(logging.Handler):
-    """A non-blocking logging sink with a configured Discord severity threshold."""
+    """Forward qualifying log events through a bounded asynchronous queue.
+
+    Events can be dropped under load. The sink reports the drop count when space becomes
+    available and disables itself on a channel or delivery failure.
+    """
 
     def __init__(
         self,
@@ -65,7 +77,17 @@ class DiscordLogHandler(logging.Handler):
         queue_size: int = DEFAULT_CONFIG.discord_log_queue_size,
         min_level: str = DEFAULT_CONFIG.discord_log_min_level,
     ):
-        """Create a bounded severity-filtered queue for one Discord channel."""
+        """Create the queue for a Discord log destination.
+
+        Args:
+            channel_id: Discord channel ID for log messages.
+            queue_size: Maximum number of queued events. Defaults to the runtime queue
+                size.
+            min_level: Minimum severity name. Defaults to the runtime Discord log level.
+
+        Raises:
+            ValueError: If the severity name is unrecognized.
+        """
         super().__init__(min_level)
         self.channel_id = channel_id
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=queue_size)
@@ -76,7 +98,14 @@ class DiscordLogHandler(logging.Handler):
         self._dropped_count = 0
 
     def emit(self, record: logging.LogRecord) -> None:
-        """Queue a pre-rendered event without ever blocking an application task."""
+        """Render and queue a log event without waiting for a Discord send.
+
+        Skip low-severity events and records that cannot be formatted. Track drops if
+        the queue is full.
+
+        Args:
+            record: Record supplied by Python logging.
+        """
         if self.disabled or record.levelno < self.level:
             return
         try:
@@ -86,7 +115,14 @@ class DiscordLogHandler(logging.Handler):
         self._enqueue(message)
 
     async def start(self, bot: Bot) -> None:
-        """Resolve the configured channel and start delivery after Discord is ready."""
+        """Resolve the destination and schedule delivery once Discord is ready.
+
+        Use the channel cache before fetching the channel. Disable the sink if
+        resolution fails or the channel cannot send messages.
+
+        Args:
+            bot: Connected bot used for channel lookup and rate-limited sends.
+        """
         if self.disabled or self._task is not None:
             return
         try:
@@ -112,7 +148,7 @@ class DiscordLogHandler(logging.Handler):
         )
 
     async def stop(self) -> None:
-        """Stop delivery without logging from shutdown paths."""
+        """Cancel the delivery task and release its bot and channel references."""
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
@@ -124,7 +160,15 @@ class DiscordLogHandler(logging.Handler):
         self._bot = None
 
     def format_record(self, record: logging.LogRecord) -> str:
-        """Render UTC and viewer-local timestamps, a video link, and a concise error."""
+        """Render one record for the Discord log destination.
+
+        Args:
+            record: Event with an optional exception and video context.
+
+        Returns:
+            Discord-sized text with a UTC timestamp, a viewer-local timestamp, an
+                optional video link, and a redacted error message.
+        """
         timestamp = (
             datetime.fromtimestamp(record.created, UTC)
             .isoformat(timespec="seconds")
@@ -141,7 +185,13 @@ class DiscordLogHandler(logging.Handler):
         return _truncate("\n".join(lines), DISCORD_MESSAGE_LIMIT)
 
     async def _deliver(self) -> None:
-        """Drain queued logs until cancellation or an unrecoverable send failure."""
+        """Drain the queue through the shared Discord send limiter.
+
+        Disable the sink on a send failure and acknowledge each dequeued item.
+
+        Raises:
+            asyncio.CancelledError: If the delivery task is cancelled.
+        """
         while True:
             message = await self.queue.get()
             try:
@@ -156,7 +206,11 @@ class DiscordLogHandler(logging.Handler):
             self._enqueue_dropped_summary()
 
     def _enqueue(self, message: str) -> None:
-        """Queue a message or record its loss when the bounded queue is full."""
+        """Queue an event or count it as dropped if capacity is exhausted.
+
+        Args:
+            message: Preformatted Discord log text.
+        """
         if self.queue.full():
             self._dropped_count += 1
             return
@@ -167,7 +221,7 @@ class DiscordLogHandler(logging.Handler):
         self.queue.put_nowait(message)
 
     def _enqueue_dropped_summary(self) -> None:
-        """Queue one warning summarizing events dropped while the sink was saturated."""
+        """Queue one warning for accumulated drops when space becomes available."""
         if not self._dropped_count or self.queue.full() or self.disabled:
             return
         summary = _truncate(
@@ -180,7 +234,11 @@ class DiscordLogHandler(logging.Handler):
         self._dropped_count = 0
 
     def _disable(self, reason: str) -> None:
-        """Permanently stop this sink after an unavailable-channel or send failure."""
+        """Disable this sink and log the reason through the remaining handlers.
+
+        Args:
+            reason: Description of the channel resolution or send failure.
+        """
         if self.disabled:
             return
         self.disabled = True
@@ -193,7 +251,22 @@ class DiscordLogHandler(logging.Handler):
 
 
 def configure_logging(settings: Settings | None = None) -> DiscordLogHandler | None:
-    """Configure the required console/file sinks and optional Discord sink."""
+    """Install application handlers on the root logger.
+
+    Replace and close previously installed VSummary handlers. Configure file rotation at
+    midnight UTC.
+
+    Args:
+        settings: Settings for severity, file rotation, and optional Discord delivery.
+            When omitted, use runtime defaults.
+
+    Returns:
+        Discord handler to start once the bot is ready, or ``None`` if disabled.
+
+    Raises:
+        LoggingConfigurationError: If the log level is invalid or the required file
+            handler cannot be opened.
+    """
     config = runtime_config(settings)
     log_path = Path(config.log_file_path)
     level_name = config.log_level
@@ -259,12 +332,29 @@ def log_event(
     *args: object,
     **context: object,
 ) -> None:
-    """Emit a log record with structured context shared by all configured sinks."""
+    """Log a message with fields available to the configured formatters.
+
+    Args:
+        logger: Destination logger.
+        level: Numeric logging severity.
+        message: Message format string.
+        *args: Values interpolated into the message by Python logging.
+        **context: Structured fields attached to the record.
+    """
     logger.log(level, message, *args, extra={"context": context})
 
 
 def _format_context(value: object, *, redact: bool = False) -> str:
-    """Render mapping context as stable key/value pairs, optionally redacting secrets."""
+    """Render structured context in a stable order.
+
+    Args:
+        value: Context mapping to format.
+        redact: Whether to mask recognized credential keys and text patterns.
+
+    Returns:
+        Space-prefixed key-value text, or an empty string for absent or non-mapping
+            context.
+    """
     if not isinstance(value, Mapping) or not value:
         return ""
     parts = []
@@ -279,7 +369,15 @@ def _format_context(value: object, *, redact: bool = False) -> str:
 
 
 def _video_url_from_context(value: object) -> str | None:
-    """Build a video URL from log context when one is available."""
+    """Recover a canonical video URL from structured log fields.
+
+    Args:
+        value: Context expected to contain a video ID and optionally a source. A missing
+            source defaults to YouTube.
+
+    Returns:
+        Video URL, or ``None`` if the context cannot be turned into a supported URL.
+    """
     if not isinstance(value, Mapping):
         return None
     video_id = value.get("video_id")
@@ -295,7 +393,14 @@ def _video_url_from_context(value: object) -> str | None:
 
 
 def _record_error(record: logging.LogRecord) -> str:
-    """Extract the exception text without its traceback when available."""
+    """Extract the short error text for a log record.
+
+    Args:
+        record: Event that may carry exception information.
+
+    Returns:
+        Exception type and message when present, otherwise the formatted log message.
+    """
     if record.exc_info and record.exc_info[1] is not None:
         exception_type, exception, _ = record.exc_info
         return f"{exception_type.__name__}: {exception}"
@@ -303,13 +408,28 @@ def _record_error(record: logging.LogRecord) -> str:
 
 
 def _redact_text(value: str) -> str:
-    """Remove common credentials from arbitrary log text before external delivery."""
+    """Mask common credential assignments and URI credentials.
+
+    Args:
+        value: Text to redact before external delivery.
+
+    Returns:
+        Text with recognized credentials replaced by redaction markers.
+    """
     value = _URI_CREDENTIALS.sub(r"\1<redacted>@", value)
     return _SECRET_ASSIGNMENT.sub(r"\1<redacted>", value)
 
 
 def _truncate(value: str, limit: int) -> str:
-    """Limit text length with an ellipsis while preserving the requested maximum."""
+    """Fit text within a character limit.
+
+    Args:
+        value: Text to shorten.
+        limit: Maximum character count. Non-positive limits produce empty text.
+
+    Returns:
+        Original text if it fits, or a shortened string ending in an ellipsis.
+    """
     if limit <= 0:
         return ""
     if len(value) <= limit:
