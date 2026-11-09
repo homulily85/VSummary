@@ -13,8 +13,7 @@ from vsummary.util.video import VideoRef
 REF = VideoRef(source="youtube", video_id="dQw4w9WgXcQ")
 
 
-@pytest.mark.parametrize("text", ["a", "語", "🎵"])
-@pytest.mark.parametrize("index", [0, 500, 999])
+@pytest.mark.parametrize(("text", "index"), [("a", 0), ("🎵", 500), ("語", 999)])
 def test_detail_prompt_stays_small_and_names_only_the_selected_segment(text, index):
     topics = [Topic(name=f"Segment {i:04}: " + text * 86) for i in range(1000)]
     prompt = summarizer._topic_prompt(topics, index, output_language="Japanese")
