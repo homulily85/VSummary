@@ -28,6 +28,16 @@ def test_detail_prompt_stays_small_and_names_only_the_selected_segment(text, ind
     assert "450 words" in prompt
 
 
+def test_detail_prompt_ends_with_instruction_to_omit_follow_up_questions():
+    prompt = summarizer._topic_prompt([Topic(name="Discussion")], 0)
+
+    assert prompt.endswith(
+        "End immediately after the final sentence of the summary. "
+        "Do not append follow-up questions, suggested questions, "
+        "or invitations to continue the discussion."
+    )
+
+
 def test_review_uses_the_complete_previous_answer_without_resending_the_inventory():
     topics = [Topic(name=f"Segment {i:04}: " + "🎵" * 86) for i in range(1000)]
     prompt = summarizer._topic_list_prompt(topics, output_language="Japanese")

@@ -302,7 +302,9 @@ def _topic_prompt(
         f"Do not use bullets, numbered lists, headings, labels such as 'Subtopic:', "
         f"a title, or meta-commentary. Do not discuss adjacent topics. Use only "
         f"information supported by the video and do not invent missing details. "
-        f"Return only the prose summary."
+        "Return only the prose summary. End immediately after the final sentence "
+        "of the summary. Do not append follow-up questions, suggested questions, "
+        "or invitations to continue the discussion."
     )
 
 
