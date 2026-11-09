@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable, Sequence
 
 import httpx
@@ -20,6 +21,13 @@ logger = logging.getLogger(__name__)
 # Conservative application budget, not a claimed Google API limit. UTF-8 bytes
 # also bound character count and leave headroom for multilingual topic names.
 _MAX_CHAT_QUESTION_BYTES = 4000
+# Match numeric markers while preserving escaped brackets and numeric link labels.
+_CITATION_MARKER = (
+    r"(?<!\\)(?<!\[)\[[ \t]*[0-9]+(?:[ \t]*,[ \t]*[0-9]+)*[ \t]*\](?!\(|\])"
+)
+_CITATION_RUN = re.compile(
+    rf"(?<![ \t])([ \t]*){_CITATION_MARKER}(?:[ \t]*{_CITATION_MARKER})*([ \t]*)"
+)
 
 
 class SummaryServiceError(Exception):
@@ -212,6 +220,32 @@ def _parse_topics(answer: str) -> list[Topic]:
             raise InvalidSummaryResponse("NotebookLM topic data is missing a name")
         topics.append(Topic(name=item["name"]))
     return _validated_topics(topics)
+
+
+def _clean_topic_detail(answer: str) -> str:
+    """Remove citation runs and adjust whitespace only at each removal."""
+
+    def remove_citations(match: re.Match[str]) -> str:
+        before, after = match.groups()
+        start, end = match.span()
+        if end == len(answer):
+            return ""
+        following = answer[end]
+        if following in "\r\n":
+            # Keep explicit Markdown hard breaks.
+            return after if after.endswith("  ") else ""
+        if start == 0 or answer[start - 1] in "\r\n":
+            return before
+        if following in ".,!?;:…)]}。，！？、；：）】" or answer[start - 1] in "([{":
+            return ""
+        return " " if before or after else ""
+
+    detail, removed = _CITATION_RUN.subn(remove_citations, answer)
+    if removed and not detail.strip():
+        raise InvalidSummaryResponse(
+            "NotebookLM returned only citations for topic detail"
+        )
+    return detail
 
 
 async def _create_notebook_with_source(
@@ -483,7 +517,7 @@ async def get_topic_details(
         )
 
         logger.info("Parsing response and saving details to database...")
-        topics[topic_index].detail = response.answer
+        topics[topic_index].detail = _clean_topic_detail(response.answer)
         await video.save()
         logger.info("Topic detail saved to database.")
         return {
@@ -534,7 +568,7 @@ async def get_topic_details_all(
                     ref=ref,
                     topic_count=len(topics),
                 )
-                topic.detail = response.answer
+                topic.detail = _clean_topic_detail(response.answer)
                 needs_db_save = True
 
                 results.append({"topic_name": topic.name, "detail": topic.detail})

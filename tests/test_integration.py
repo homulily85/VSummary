@@ -798,7 +798,18 @@ async def test_topic_cache_separates_languages_and_preserves_untagged_legacy_dat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("all_details", [False, True])
-async def test_missing_details_use_only_the_selected_language_cache(all_details):
+async def test_missing_details_use_only_the_selected_language_cache(
+    all_details, monkeypatch
+):
+    cached_detail = "保存された詳細 [8, 9]"
+    cited_detail = (
+        "新しい詳細 [1]。  補足[2,3][4, 5] と [メモ]。\n\n"
+        "[6] [1](https://example.com) はリンクです。[7]  \n最後の詳細。[8]"
+    )
+    clean_detail = (
+        "新しい詳細。  補足 と [メモ]。\n\n"
+        "[1](https://example.com) はリンクです。  \n最後の詳細。"
+    )
     english = FakeVideoRecord(
         source="youtube",
         video_id=VIDEO_ID,
@@ -812,31 +823,65 @@ async def test_missing_details_use_only_the_selected_language_cache(all_details)
         source="youtube",
         video_id=VIDEO_ID,
         output_language="japanese",
-        topics=[Topic(name="コンサート", detail="保存された詳細"), Topic(name="質問")],
+        topics=[Topic(name="コンサート", detail=cached_detail), Topic(name="質問")],
     )
     await english.save()
     await japanese.save()
-    client = FakeNotebookClient(answers=["新しい詳細"])
+    save = AsyncMock(wraps=japanese.save)
+    monkeypatch.setattr(japanese, "save", save)
+    client = FakeNotebookClient(answers=[cited_detail])
     config = RuntimeConfig(output_language="Japanese")
     if all_details:
         result = await summarizer_util.get_topic_details_all(
             client, VIDEO_REF, config=config
         )
         assert result == [
-            {"topic_name": "コンサート", "detail": "保存された詳細"},
-            {"topic_name": "質問", "detail": "新しい詳細"},
+            {"topic_name": "コンサート", "detail": cached_detail},
+            {"topic_name": "質問", "detail": clean_detail},
         ]
     else:
         assert await summarizer_util.get_topic_details(
             client, VIDEO_REF, 1, config=config
-        ) == {"topic_name": "質問", "detail": "新しい詳細"}
+        ) == {"topic_name": "質問", "detail": clean_detail}
+        assert await summarizer_util.get_topic_details(
+            client, VIDEO_REF, 0, config=config
+        ) == {"topic_name": "コンサート", "detail": cached_detail}
     assert english.topics == [
         Topic(name="Concert", detail="English details"),
         Topic(name="Questions"),
     ]
-    assert japanese.topics[1].detail == "新しい詳細"
+    assert japanese.topics[0].detail == cached_detail
+    assert japanese.topics[1].detail == clean_detail
+    save.assert_awaited_once()
     assert len(client.prompts) == 1
     assert "explanation in Japanese" in client.prompts[0][1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("all_details", [False, True])
+async def test_citation_only_detail_is_rejected_without_caching(
+    all_details, monkeypatch
+):
+    video = FakeVideoRecord(
+        source="youtube",
+        video_id=VIDEO_ID,
+        output_language="english",
+        topics=[Topic(name="Concert")],
+    )
+    await video.save()
+    save = AsyncMock(wraps=video.save)
+    monkeypatch.setattr(video, "save", save)
+    client = FakeNotebookClient(answers=[" [1][2, 3]\n\n [4] "])
+
+    with pytest.raises(InvalidSummaryResponse):
+        if all_details:
+            await summarizer_util.get_topic_details_all(client, VIDEO_REF)
+        else:
+            await summarizer_util.get_topic_details(client, VIDEO_REF, 0)
+
+    assert video.topics[0].detail is None
+    save.assert_not_awaited()
+    assert client.deleted == ["notebook-1"]
 
 
 @pytest.mark.asyncio
