@@ -1,4 +1,4 @@
-"""Validated TOML operational configuration and environment-backed secrets."""
+"""Runtime defaults, TOML validation, and environment-backed credentials."""
 
 from __future__ import annotations
 
@@ -17,12 +17,43 @@ DATABASE_NAME = "VSummary"
 
 
 class SettingsError(ValueError):
-    """Runtime secrets or operational configuration are missing or invalid."""
+    """Signal a missing credential or invalid runtime configuration."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RuntimeConfig:
-    """Non-secret operational settings with one shared source of defaults."""
+    """Define the immutable operational settings shared by the bot and workers.
+
+    Attributes:
+        auto_summary_channel_id: Discord destination for automatic summaries, or
+            ``None``.
+        discord_send_interval_seconds: Minimum interval between Discord sends.
+        poll_interval_minutes: Interval between automatic worker polls.
+        manual_poll_interval_seconds: Interval between manual worker polls.
+        job_lease_seconds: Duration of a worker claim before it must be renewed.
+        source_retry_limit: Generation failure count that exhausts ordinary retries.
+        delivery_retry_limit: Delivery failure count at which delivery retries end.
+        retry_initial_delay_seconds: Delay after the first retryable job failure.
+        retry_multiplier: Factor by which the delay grows on each failure.
+        invalid_summary_retries: Immediate retries for malformed NotebookLM output.
+        transcript_delay_seconds: Time after a stream ends before it can be summarized.
+        output_language: Language requested for generated topics and details.
+        youtube_yt_dlp_fallback_enabled: Whether eligible jobs may try YouTube audio.
+        max_audio_mib: Maximum size of a prepared audio file, in mebibytes.
+        audio_bitrate_kbps: Target bitrate for transcoded audio, in kilobits per second.
+        audio_download_format: yt-dlp format selector used for downloads.
+        source_upload_timeout_seconds: Timeout for preparing an uploaded NotebookLM
+            source.
+        log_file_path: Destination for rotating application logs.
+        log_level: Minimum severity for application logging.
+        log_rotation_interval_days: Number of days between log rotations.
+        log_backup_count: Number of rotated log files to retain, with zero disabling
+            pruning.
+        discord_log_channel_id: Discord log destination, or ``None`` to disable the
+            sink.
+        discord_log_queue_size: Capacity of the Discord log queue in events.
+        discord_log_min_level: Minimum severity accepted by the Discord log sink.
+    """
 
     auto_summary_channel_id: int | None = None
     discord_send_interval_seconds: float = 1.0
@@ -51,7 +82,18 @@ class RuntimeConfig:
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, object]) -> RuntimeConfig:
-        """Validate sectioned TOML values, rejecting unknown keys and wrong types."""
+        """Build operational settings from sectioned TOML data.
+
+        Args:
+            values: Mapping from configuration section names to their options.
+
+        Returns:
+            Runtime settings with defaults filled in for omitted options.
+
+        Raises:
+            SettingsError: If the input contains unknown sections or options, malformed
+                tables, or invalid option values.
+        """
         if not isinstance(values, Mapping):
             raise SettingsError("configuration must contain TOML sections")
         parsed = {}
@@ -70,7 +112,14 @@ class RuntimeConfig:
         return cls(**parsed)
 
     def retry_delay_seconds(self, failure_count: int) -> float:
-        """Return the existing exponential job backoff with configured parameters."""
+        """Calculate the exponential delay for a job retry.
+
+        Args:
+            failure_count: One-based count of failures, including the latest failure.
+
+        Returns:
+            Delay in seconds. The first failure uses the configured initial delay.
+        """
         return self.retry_initial_delay_seconds * self.retry_multiplier ** (
             failure_count - 1
         )
@@ -118,7 +167,13 @@ _CONFIG_SECTIONS = {
 
 @dataclass(frozen=True, slots=True)
 class Settings(RuntimeConfig):
-    """Application composition of validated secrets and operational settings."""
+    """Combine runtime options with credentials required at startup.
+
+    Attributes:
+        discord_token: Token used to authenticate the bot with Discord.
+        mongodb_uri: Connection URI for the asynchronous MongoDB client.
+        mongodb_database: Fixed database name used by the application.
+    """
 
     discord_token: str = dataclass_field(repr=False)
     mongodb_uri: str = dataclass_field(repr=False)
@@ -131,7 +186,20 @@ class Settings(RuntimeConfig):
         *,
         config: Mapping[str, object] | None = None,
     ) -> Settings:
-        """Read only supported secrets from the environment and options from TOML."""
+        """Build validated settings from separate credential and option mappings.
+
+        Args:
+            values: Environment-style mapping containing ``DISCORD_TOKEN`` and
+                ``MONGODB_URI``.
+            config: Optional sectioned TOML data. When omitted, use runtime defaults.
+
+        Returns:
+            Settings with trimmed credentials and validated operational options.
+
+        Raises:
+            SettingsError: If a required credential is missing or blank, or the
+                operational configuration is invalid.
+        """
         operational = RuntimeConfig.from_mapping({} if config is None else config)
         return cls(
             discord_token=_required(values, "DISCORD_TOKEN"),
@@ -147,7 +215,23 @@ def load_settings(
     load_dotenv_file: bool = True,
     config_path: str | Path | None = None,
 ) -> Settings:
-    """Load secrets and optional working-directory TOML once at startup."""
+    """Load startup credentials and operational configuration.
+
+    Args:
+        values: Credential mapping. When omitted, use the process environment after any
+            dotenv loading.
+        dotenv_path: Optional dotenv path passed to the dotenv loader.
+        load_dotenv_file: Whether to load dotenv before resolving credentials.
+        config_path: Explicit TOML path. When omitted, read ``config.toml`` from the
+            working directory if present.
+
+    Returns:
+        Validated settings ready for application startup.
+
+    Raises:
+        SettingsError: If credentials or options are invalid, the TOML file cannot be
+            read or parsed, or an explicitly supplied file is missing.
+    """
     if load_dotenv_file:
         load_dotenv(dotenv_path)
     path = Path("config.toml") if config_path is None else Path(config_path)
@@ -166,7 +250,16 @@ def load_settings(
 
 
 def runtime_config(settings: object | None = None) -> RuntimeConfig:
-    """Use injected settings or central defaults, including lightweight test adapters."""
+    """Extract operational options from an injected settings object.
+
+    Args:
+        settings: Object exposing runtime options as attributes, or ``None`` to use the
+            shared defaults.
+
+    Returns:
+        Runtime configuration with defaults for missing attributes. An object whose
+        type is exactly ``RuntimeConfig`` is returned directly.
+    """
     if settings is None:
         return DEFAULT_CONFIG
     if type(settings) is RuntimeConfig:
@@ -184,11 +277,30 @@ def runtime_config(settings: object | None = None) -> RuntimeConfig:
 def configured_auto_summary_channel_id(
     settings: RuntimeConfig | None = None,
 ) -> int | None:
-    """Return the configured destination without consulting process environment."""
+    """Look up the injected automatic-summary destination.
+
+    Args:
+        settings: Operational settings, or ``None`` to use defaults.
+
+    Returns:
+        Discord channel ID, or ``None`` when no channel is configured.
+    """
     return runtime_config(settings).auto_summary_channel_id
 
 
 def _required(values: Mapping[str, str | None], name: str) -> str:
+    """Read and trim a required credential.
+
+    Args:
+        values: Environment-style credential mapping.
+        name: Key to look up.
+
+    Returns:
+        Credential with surrounding whitespace removed.
+
+    Raises:
+        SettingsError: If the key is absent or its value is blank.
+    """
     value = values.get(name)
     if not value or not value.strip():
         raise SettingsError(f"{name} is required")
@@ -196,6 +308,19 @@ def _required(values: Mapping[str, str | None], name: str) -> str:
 
 
 def _config_value(name: str, value: object, label: str) -> object:
+    """Validate and normalize one TOML option against its runtime default.
+
+    Args:
+        name: Attribute name on the runtime configuration.
+        value: Raw value decoded from TOML.
+        label: Section-qualified option name for error messages.
+
+    Returns:
+        Value suitable for the runtime configuration.
+
+    Raises:
+        SettingsError: If the value has an unsupported type, range, or format.
+    """
     default = getattr(DEFAULT_CONFIG, name)
     if default is None:
         if type(value) is not int or value <= 0:

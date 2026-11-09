@@ -1,4 +1,4 @@
-"""NotebookLM topic caching, detail generation, and failure classification."""
+"""Generate, validate, and cache NotebookLM topics and detailed summaries."""
 
 import json
 import logging
@@ -31,19 +31,19 @@ _CITATION_RUN = re.compile(
 
 
 class SummaryServiceError(Exception):
-    """Base error raised by the NotebookLM summary service."""
+    """Base class for errors classified by the summary workflow."""
 
 
 class TransientSummaryError(SummaryServiceError):
-    """Raised when a summary can be retried safely."""
+    """Signal a generation failure eligible for retry."""
 
 
 class PermanentSummaryError(SummaryServiceError):
-    """Raised when a request is invalid or NotebookLM returned an unusable result."""
+    """Signal an invalid request or result that should end generation retries."""
 
 
 class InvalidSummaryResponse(TransientSummaryError):
-    """Raised when NotebookLM returns malformed topic data that may succeed on retry."""
+    """Signal malformed NotebookLM output eligible for an immediate retry."""
 
 
 async def _ask_notebook(
@@ -55,7 +55,26 @@ async def _ask_notebook(
     ref: VideoRef,
     topic_count: int,
 ) -> AskResult:
-    """Bound outgoing chat questions and classify invalid-argument rejections."""
+    """Send a bounded question in the notebook's current conversation.
+
+    Log the question's size and phase without logging its text.
+
+    Args:
+        client: Authenticated NotebookLM client.
+        notebook_id: ID of the notebook whose current conversation to use.
+        prompt: Question text within the 4,000-byte UTF-8 safety budget.
+        phase: Workflow label for logs and errors.
+        ref: Source reference for request logging.
+        topic_count: Number of topics to record in request metrics.
+
+    Returns:
+        NotebookLM answer and associated metadata.
+
+    Raises:
+        PermanentSummaryError: If the question exceeds the local byte budget or
+            NotebookLM rejects it with status 3.
+        notebooklm.NotebookLMError: If another NotebookLM request error propagates.
+    """
     character_count = len(prompt)
     byte_count = len(prompt.encode("utf-8"))
     log_event(
@@ -101,7 +120,21 @@ async def retry_invalid_summary_response[SummaryResult](
     *,
     retries: int = DEFAULT_CONFIG.invalid_summary_retries,
 ) -> SummaryResult:
-    """Apply the configured immediate retry budget to malformed responses."""
+    """Retry malformed output immediately within the specified budget.
+
+    Args:
+        operation: Asynchronous callable to run afresh on each attempt.
+        retries: Number of additional attempts after the first. Defaults to the
+            configured default retry budget.
+
+    Returns:
+        Result from the first successful call.
+
+    Raises:
+        InvalidSummaryResponse: If the final attempt still returns malformed output.
+
+    Other operation exceptions propagate immediately.
+    """
     for _ in range(retries):
         try:
             return await operation()
@@ -111,19 +144,45 @@ async def retry_invalid_summary_response[SummaryResult](
 
 
 class NotebookLMSummaryService:
-    """NotebookLM-backed summary generation with durable cache reuse."""
+    """Provide the workers with typed NotebookLM summaries and shared cache reuse."""
 
     def __init__(
         self, client: NotebookLMClient, *, config: RuntimeConfig | None = None
     ):
-        """Retain the authenticated NotebookLM client owned by the application."""
+        """Bind the summary service to an authenticated client and runtime options.
+
+        Args:
+            client: NotebookLM client whose lifecycle is managed by the application.
+            config: Output language and source preparation settings. Defaults to runtime
+                settings.
+        """
         self.client = client
         self.config = config
 
     async def summarize(
         self, ref: VideoRef, *, use_youtube_audio: bool = False
     ) -> list[Topic]:
-        """Generate all topic details and map backend failures to workflow errors."""
+        """Return detailed topics for a recording, reusing cached output when available.
+
+        Args:
+            ref: Media reference identifying the source and its cache entry.
+            use_youtube_audio: Whether to upload YouTube audio instead of attaching the
+                watch URL when a notebook is needed.
+
+        Returns:
+            Ordered topics containing names and generated details.
+
+        Raises:
+            TransientSummaryError: If source attachment, transport, or an OS operation
+                fails, or a NotebookLM answer needs to be retried.
+            PermanentSummaryError: If the request is invalid or generation produces
+                unusable data.
+            TwitchAudioError: If Twitch audio cannot be prepared.
+            XSpaceAudioError: If Space replay audio cannot be prepared.
+            GenericMediaError: If generic or fallback audio cannot be prepared.
+            notebooklm.NotebookLMError: If an unclassified NotebookLM error propagates.
+            pymongo.errors.PyMongoError: If a cache read or write fails.
+        """
         try:
             details = await get_topic_details_all(
                 self.client,
@@ -170,7 +229,16 @@ class NotebookLMSummaryService:
 
 
 def _topic_boundaries(topics: list[Topic], topic_index: int) -> dict[str, str]:
-    """Name the topics adjacent to ``topic_index`` for prompt context."""
+    """Describe the neighbors of a topic for a detail prompt.
+
+    Args:
+        topics: Chronologically ordered topic list.
+        topic_index: Valid zero-based index of the requested topic.
+
+    Returns:
+        Mapping with ``prev`` and ``next`` descriptions. Use the start or end of the
+            video where a neighbor is absent.
+    """
     return {
         "prev": topics[topic_index - 1].name
         if topic_index > 0
@@ -184,7 +252,18 @@ def _topic_boundaries(topics: list[Topic], topic_index: int) -> dict[str, str]:
 
 
 def _validated_topics(topics: Sequence[Topic]) -> list[Topic]:
-    """Validate names used both in persisted data and Discord select labels."""
+    """Validate and trim topic names for caching and Discord display.
+
+    Args:
+        topics: Candidate topics. Their names are trimmed in place during validation.
+
+    Returns:
+        Ordered list containing the validated topic objects.
+
+    Raises:
+        InvalidSummaryResponse: If the list is empty or a name is blank or exceeds 100
+            characters.
+    """
     if not topics:
         raise InvalidSummaryResponse("NotebookLM returned an empty topic list")
 
@@ -203,7 +282,17 @@ def _validated_topics(topics: Sequence[Topic]) -> list[Topic]:
 
 
 def _parse_topics(answer: str) -> list[Topic]:
-    """Decode NotebookLM's topic-list JSON and validate Discord-safe names."""
+    """Decode a NotebookLM topic-list response.
+
+    Args:
+        answer: JSON text containing a list of objects with string ``name`` fields.
+
+    Returns:
+        Ordered topics with validated, trimmed names.
+
+    Raises:
+        InvalidSummaryResponse: If the JSON, list structure, or topic names are invalid.
+    """
     try:
         payload = json.loads(answer)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -223,9 +312,30 @@ def _parse_topics(answer: str) -> list[Topic]:
 
 
 def _clean_topic_detail(answer: str) -> str:
-    """Remove citation runs and adjust whitespace only at each removal."""
+    """Strip numeric citation runs from generated detail text.
+
+    Preserve Markdown links and adjust whitespace around each removed citation run.
+
+    Args:
+        answer: Detail text from NotebookLM.
+
+    Returns:
+        Detail text with citation runs removed.
+
+    Raises:
+        InvalidSummaryResponse: If removing citations leaves only whitespace.
+    """
 
     def remove_citations(match: re.Match[str]) -> str:
+        """Choose replacement spacing for one matched citation run.
+
+        Args:
+            match: Citation run with adjacent horizontal whitespace captured.
+
+        Returns:
+            Replacement whitespace or an empty string, depending on punctuation and line
+                boundaries.
+        """
         before, after = match.groups()
         start, end = match.span()
         if end == len(answer):
@@ -255,14 +365,28 @@ async def _create_notebook_with_source(
     use_youtube_audio: bool = False,
     config: RuntimeConfig | None = None,
 ) -> "Notebook":
-    """Create a temporary notebook with the video source attached.
+    """Open a temporary notebook and attach the requested source.
 
-    The caller is responsible for deleting the returned notebook when it is
-    no longer needed. If the source cannot be added, the notebook is deleted
-    here before the error is re-raised.
+    Twitch, X Spaces, and generic media use a temporary audio upload. On source
+    attachment failure, attempt to delete the notebook before propagating the error.
 
-    ``use_youtube_audio`` uploads downloaded audio for YouTube references while
-    retaining the original reference for cache and concurrency coordination.
+    Args:
+        client: Authenticated NotebookLM client.
+        ref: Media reference used for the URL and source selection.
+        use_youtube_audio: Whether to upload downloaded YouTube audio while retaining
+            the original reference.
+        config: Download and upload settings. Defaults to runtime settings.
+
+    Returns:
+        Notebook with its source attached. The caller owns its deletion.
+
+    Raises:
+        UnsupportedVideoSource: If the reference cannot be turned into a source URL.
+        notebooklm.NotebookLMError: If notebook creation or source attachment fails.
+        TwitchAudioError: If Twitch VOD audio cannot be prepared.
+        XSpaceAudioError: If Space replay audio cannot be prepared.
+        GenericMediaError: If generic or fallback audio cannot be prepared.
+        OSError: If a file operation fails.
     """
     video_link = build_video_url(ref)
     options = {"config": config} if config is not None else {}
@@ -315,7 +439,21 @@ def _topic_prompt(
     *,
     output_language: str = DEFAULT_CONFIG.output_language,
 ) -> str:
-    """Build the prompt that asks for a detailed single-topic explanation."""
+    """Build a detailed-summary question for one topic.
+
+    Args:
+        topics: Chronological topic list providing the target and its immediate
+            neighbors.
+        topic_index: Valid zero-based index of the target topic.
+        output_language: Language requested for the generated prose. Defaults to
+            English.
+
+    Returns:
+        NotebookLM prompt scoped to the selected topic and its boundaries.
+
+    Raises:
+        IndexError: If topic indexing runs outside the list.
+    """
     boundaries = _topic_boundaries(topics, topic_index)
     return (
         f"Summarize topic {topic_index + 1} of {len(topics)} in chronological order. "
@@ -347,7 +485,16 @@ def _topic_list_prompt(
     *,
     output_language: str = DEFAULT_CONFIG.output_language,
 ) -> str:
-    """Build extraction or same-conversation coverage-review instructions."""
+    """Build instructions for topic extraction or coverage review.
+
+    Args:
+        candidates: Existing candidate list to select review mode, or ``None`` for
+            extraction. Review refers to the previous answer in the same conversation.
+        output_language: Language requested for topic names. Defaults to English.
+
+    Returns:
+        NotebookLM prompt requiring chronological JSON topic data.
+    """
     output_language = output_language.strip()
     requirements = (
         "Include every substantive discussion in chronological order, including "
@@ -383,12 +530,32 @@ async def _get_or_create_topic_list(
     use_youtube_audio: bool = False,
     config: RuntimeConfig | None = None,
 ) -> tuple[VideoSummary, "Notebook | None"]:
-    """
-    Get the topic list for a video, creating it if it doesn't exist.
-    :param client: The NotebookLMClient instance to use for interacting with the notebook service
-    :param ref: The video reference (source + id) for which to get or create the topic list
-    :return: The video object with its topic list, and the notebook used to generate
-             it (or None when the topics were already cached and no notebook was needed)
+    """Load cached topics or generate and save a reviewed list.
+
+    Look up topics by source, video ID, and trimmed, case-folded language. On a cache
+    miss, extract topics and review coverage in the same conversation before saving.
+
+    Args:
+        client: Authenticated NotebookLM client.
+        ref: Media reference identifying the source and cache key.
+        use_youtube_audio: Whether to upload audio if a YouTube notebook is needed.
+        config: Language and source preparation options. Defaults to runtime settings.
+
+    Returns:
+        Pair containing the cache record and the temporary notebook, or ``None`` for the
+            notebook on a cache hit. The caller owns deletion of a returned notebook.
+
+    Raises:
+        InvalidSummaryResponse: If cached or generated topic data is invalid.
+        PermanentSummaryError: If an extraction or review question is rejected as
+            invalid.
+        UnsupportedVideoSource: If the reference cannot be turned into a source URL.
+        notebooklm.NotebookLMError: If a NotebookLM request fails.
+        TwitchAudioError: If Twitch audio cannot be prepared.
+        XSpaceAudioError: If Space audio cannot be prepared.
+        GenericMediaError: If generic or fallback audio cannot be prepared.
+        pymongo.errors.PyMongoError: If a cache read or write fails.
+        OSError: If a file operation fails.
     """
     video_link = build_video_url(ref)
     output_language = runtime_config(config).output_language.strip()
@@ -460,7 +627,32 @@ async def get_topic_list(
     use_youtube_audio: bool = False,
     config: RuntimeConfig | None = None,
 ):
-    """Return cached topics or create them from a temporary NotebookLM notebook."""
+    """Return the ordered topics for one video and configured language.
+
+    On a cache miss, save the reviewed list and attempt to delete the temporary
+    notebook.
+
+    Args:
+        client: Authenticated NotebookLM client.
+        ref: Source and video identity to summarize.
+        use_youtube_audio: Whether to upload audio if a YouTube notebook is needed.
+        config: Language and source preparation options. Defaults to runtime settings.
+
+    Returns:
+        List of ``Topic`` objects in source order, including any cached details.
+
+    Raises:
+        InvalidSummaryResponse: If cached or generated topics are invalid.
+        PermanentSummaryError: If a generation question is invalid or exceeds the byte
+            budget.
+        UnsupportedVideoSource: If the reference cannot be turned into a source URL.
+        notebooklm.NotebookLMError: If a NotebookLM request fails.
+        TwitchAudioError: If Twitch audio cannot be prepared.
+        XSpaceAudioError: If Space audio cannot be prepared.
+        GenericMediaError: If generic or fallback audio cannot be prepared.
+        pymongo.errors.PyMongoError: If a cache read or write fails.
+        OSError: If a file operation fails.
+    """
     logger.info(f"Getting topics from {ref}")
     video, notebook = await _get_or_create_topic_list(
         client, ref, use_youtube_audio=use_youtube_audio, config=config
@@ -482,7 +674,35 @@ async def get_topic_details(
     use_youtube_audio: bool = False,
     config: RuntimeConfig | None = None,
 ):
-    """Return one topic's cached or newly generated detail for ``ref``."""
+    """Read or generate the explanation for a single topic.
+
+    Save newly generated detail in the language-specific cache and attempt to delete any
+    temporary notebook when done.
+
+    Args:
+        client: Authenticated NotebookLM client.
+        ref: Source and video identity to summarize.
+        topic_index: Zero-based index within the ordered topic list.
+        use_youtube_audio: Whether to upload audio if a YouTube notebook is needed.
+        config: Language and source preparation options. Defaults to runtime settings.
+
+    Returns:
+        Mapping with ``topic_name`` and ``detail`` strings for the selected topic.
+
+    Raises:
+        IndexError: If the topic index falls outside the topic list.
+        InvalidSummaryResponse: If topics are invalid or the generated detail contains
+            only citations.
+        PermanentSummaryError: If a generation question is rejected or exceeds the byte
+            budget.
+        UnsupportedVideoSource: If the reference cannot be turned into a source URL.
+        notebooklm.NotebookLMError: If a NotebookLM request fails.
+        TwitchAudioError: If Twitch audio cannot be prepared.
+        XSpaceAudioError: If Space audio cannot be prepared.
+        GenericMediaError: If generic or fallback audio cannot be prepared.
+        pymongo.errors.PyMongoError: If a cache read or write fails.
+        OSError: If a file operation fails.
+    """
     video, notebook = await _get_or_create_topic_list(
         client, ref, use_youtube_audio=use_youtube_audio, config=config
     )
@@ -537,7 +757,33 @@ async def get_topic_details_all(
     use_youtube_audio: bool = False,
     config: RuntimeConfig | None = None,
 ):
-    """Return every topic detail, generating and saving only missing details."""
+    """Return details for all topics, filling in missing explanations.
+
+    Reuse saved details, write newly generated details together, and attempt to delete
+    any temporary notebook when done.
+
+    Args:
+        client: Authenticated NotebookLM client.
+        ref: Source and video identity to summarize.
+        use_youtube_audio: Whether to upload audio if a YouTube notebook is needed.
+        config: Language and source preparation options. Defaults to runtime settings.
+
+    Returns:
+        Ordered list of mappings with ``topic_name`` and ``detail`` strings.
+
+    Raises:
+        InvalidSummaryResponse: If topics are invalid or a generated detail contains
+            only citations.
+        PermanentSummaryError: If a generation question is rejected or exceeds the byte
+            budget.
+        UnsupportedVideoSource: If the reference cannot be turned into a source URL.
+        notebooklm.NotebookLMError: If a NotebookLM request fails.
+        TwitchAudioError: If Twitch audio cannot be prepared.
+        XSpaceAudioError: If Space audio cannot be prepared.
+        GenericMediaError: If generic or fallback audio cannot be prepared.
+        pymongo.errors.PyMongoError: If a cache read or write fails.
+        OSError: If a file operation fails.
+    """
     video, notebook = await _get_or_create_topic_list(
         client, ref, use_youtube_audio=use_youtube_audio, config=config
     )
@@ -589,7 +835,12 @@ async def get_topic_details_all(
 
 
 async def _safe_delete_notebook(client: NotebookLMClient, notebook_id: str) -> None:
-    """Best-effort cleanup that logs failures without hiding the original error."""
+    """Attempt to delete a temporary notebook and log API failures.
+
+    Args:
+        client: Authenticated NotebookLM client.
+        notebook_id: Temporary notebook to remove.
+    """
     try:
         await client.notebooks.delete(notebook_id)
     except Exception:

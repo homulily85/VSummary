@@ -1,4 +1,4 @@
-"""Discord client composition and cog lifecycle management."""
+"""Composition and lifecycle of the Discord client and its shared services."""
 
 import discord
 from discord.ext import commands
@@ -13,15 +13,16 @@ from vsummary.util.video_work import VideoWorkCoordinator
 
 
 class Bot(commands.Bot):
-    """Application Discord client with shared external-service dependencies.
+    """Host the Discord extensions and provide their shared application services.
 
     Attributes:
-        notebook_client: Process-local authenticated NotebookLM client.
-        settings: Validated runtime configuration.
-        holodex: Shared Holodex client owned by the bot.
-        summary_service: Shared NotebookLM summary generator.
-        video_work: Per-video coordinator used by summary workers.
-        message_rate_limiter: Shared limiter for every Discord send.
+        notebook_client: Authenticated NotebookLM client supplied by the application.
+        settings: Injected settings or ``None`` when using runtime defaults.
+        holodex: Holodex client closed by the bot during shutdown.
+        summary_service: NotebookLM summary generator and cache interface.
+        discord_log_handler: Optional sink started when Discord is ready.
+        video_work: Process-local coordinator for per-video summary and cache work.
+        message_rate_limiter: Shared limiter used by Discord send helpers.
     """
 
     def __init__(
@@ -31,7 +32,14 @@ class Bot(commands.Bot):
         holodex=None,
         discord_log_handler: DiscordLogHandler | None = None,
     ):
-        """Create a bot and attach services that cogs consume by dependency lookup."""
+        """Initialize Discord and compose the services used by the cogs.
+
+        Args:
+            notebook_client: Authenticated NotebookLM client managed by the caller.
+            settings: Application settings. When omitted, use the runtime defaults.
+            holodex: Client to reuse and close at shutdown. When omitted, create one.
+            discord_log_handler: Optional handler for forwarding log events to Discord.
+        """
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix="/", intents=intents)
@@ -48,7 +56,11 @@ class Bot(commands.Bot):
         )
 
     async def close(self):
-        """Stop log delivery, close cogs and owned clients, then close Discord."""
+        """Stop Discord logging, close cogs and the Holodex client, and disconnect.
+
+        Shutdown awaits each close operation in order, so errors from a close operation
+        propagate to the caller.
+        """
         if self.discord_log_handler is not None:
             await self.discord_log_handler.stop()
         for cog in tuple(self.cogs.values()):
@@ -61,12 +73,18 @@ class Bot(commands.Bot):
         await super().close()
 
     async def on_ready(self):
-        """Start optional Discord logging only after the client is ready."""
+        """Start the optional Discord log sink after the gateway is ready."""
         if self.discord_log_handler is not None:
             await self.discord_log_handler.start(self)
 
     async def setup_hook(self):
-        """Load all cogs and synchronize their slash commands with Discord."""
+        """Load the four application extensions and sync their slash commands.
+
+        Raises:
+            discord.ext.commands.ExtensionError: If an extension cannot be loaded.
+            discord.HTTPException: If Discord rejects or cannot complete the command
+                sync.
+        """
         cogs = [
             "vsummary.cogs.misc.ping",
             "vsummary.cogs.manualsummary.manualsummary",

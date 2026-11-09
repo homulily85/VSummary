@@ -1,4 +1,4 @@
-"""Application startup, resource ownership, and console entry points."""
+"""Console entry points and ownership of the bot's external connections."""
 
 from __future__ import annotations
 
@@ -24,10 +24,20 @@ logger = logging.getLogger(__name__)
 
 
 async def async_main(settings: Settings | None = None):
-    """Start the bot after configuring logging and database-backed models.
+    """Configure and run the Discord bot until it exits.
 
-    The function owns the MongoDB client and NotebookLM context, so both are
-    closed when Discord exits or startup fails.
+    Load dotenv, configure logging, register MongoDB models, and open an authenticated
+    NotebookLM session. Close the bot and its external connections as their scopes exit.
+
+    Args:
+        settings: Validated settings to use. When omitted, load them from the
+            environment and the default TOML file.
+
+    Raises:
+        SystemExit: If settings or required logging configuration fails.
+        pymongo.errors.PyMongoError: If MongoDB initialization fails.
+        discord.LoginFailure: If Discord rejects the configured token.
+        notebooklm.AuthError: If the stored NotebookLM session cannot authenticate.
     """
     load_dotenv()
     if settings is None:
@@ -73,7 +83,12 @@ async def async_main(settings: Settings | None = None):
 
 
 def main():
-    """Synchronous entry point for the console script."""
+    """Run the bot on a new event loop as the console entry point.
+
+    Raises:
+        SystemExit: If startup rejects the settings or logging configuration.
+        RuntimeError: If called from a running event loop in the same thread.
+    """
     asyncio.run(async_main())
 
 

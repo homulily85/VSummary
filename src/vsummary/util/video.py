@@ -1,4 +1,4 @@
-"""Source-agnostic parsing and URL construction for supported video inputs."""
+"""Normalize media identifiers and resolve them back to public URLs."""
 
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -9,25 +9,49 @@ from vsummary.util.youtube import InvalidYouTubeInputError, to_video_url
 
 
 class UnsupportedVideoSource(ValueError):
-    """Raised when a video reference comes from an unsupported source."""
+    """Signal media input that cannot be represented by a supported source."""
 
 
 @dataclass(frozen=True)
 class VideoRef:
-    """A normalized video reference identified by source and video_id."""
+    """Identify media by source and a source-specific key.
+
+    Attributes:
+        source: Source key such as ``youtube``, ``twitch``, ``x_space``, or ``yt_dlp``.
+        video_id: Non-empty source-local ID, or the normalized URL hash for generic
+            media.
+        url: Stored URL when required to reopen the media, as with generic sources.
+    """
 
     source: str
     video_id: str
     url: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self):
-        """Reject references without a source-local video ID."""
+        """Require the source-local identifier when constructing a reference.
+
+        Raises:
+            ValueError: If the video ID is empty.
+        """
         if not self.video_id:
             raise ValueError("video_id is required")
 
 
 def parse_non_space_video_source(value: str) -> VideoRef:
-    """Parse a Twitch, YouTube, or generic public media reference."""
+    """Classify a Twitch VOD, YouTube video, or generic HTTP(S) URL locally.
+
+    Args:
+        value: User input containing a supported URL or a bare YouTube video ID.
+
+    Returns:
+        Source reference. Generic media uses the SHA-256 hash of its normalized URL as
+            the ID and retains that URL.
+
+    Raises:
+        UnsupportedVideoSource: If the input is empty or cannot be normalized as a
+            supported reference.
+        ValueError: If initial URL parsing rejects a malformed host.
+    """
     if not value.strip():
         raise UnsupportedVideoSource("Video reference cannot be empty.")
 
@@ -63,7 +87,18 @@ def parse_non_space_video_source(value: str) -> VideoRef:
 
 
 def build_video_url(ref: VideoRef) -> str:
-    """Build the public URL for a normalized video reference."""
+    """Construct a public URL from a normalized media reference.
+
+    Args:
+        ref: Reference with a supported source and its source-local ID or stored URL.
+
+    Returns:
+        Canonical platform URL, or the stored URL for generic media.
+
+    Raises:
+        UnsupportedVideoSource: If the source is unknown or a generic reference lacks
+            its URL.
+    """
     if ref.source == "youtube":
         return f"https://www.youtube.com/watch?v={ref.video_id}"
     if ref.source == "twitch":
@@ -77,7 +112,19 @@ def build_video_url(ref: VideoRef) -> str:
 
 
 def normalize_public_url(value: str) -> str:
-    """Normalize an HTTP media URL and reject local or credentialed addresses."""
+    """Normalize a generic HTTP(S) media URL without performing DNS resolution.
+
+    Args:
+        value: Candidate URL, optionally surrounded by whitespace.
+
+    Returns:
+        URL with a lowercase scheme and host, default ports and fragment removed, and
+            the query preserved.
+
+    Raises:
+        UnsupportedVideoSource: If the URL is malformed, lacks a supported scheme or
+            host, contains credentials, or names a local host or non-public IP address.
+    """
     try:
         parsed = urlsplit(value.strip())
         host = parsed.hostname

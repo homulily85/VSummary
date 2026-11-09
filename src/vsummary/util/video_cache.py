@@ -1,14 +1,23 @@
-"""Cached summary deletion."""
+"""Deletion of cached topic lists and details by video."""
 
 from vsummary.model.video import VideoSummary
 from vsummary.util.video import VideoRef
 
 
 async def delete_cached_summary(ref: VideoRef) -> int:
-    """Delete all language and legacy caches for one exact source/video identity.
+    """Delete all summary caches for one source and video ID, including legacy records.
 
-    Callers coordinate with generation using the shared per-video lock. Durable
-    jobs and their saved delivery payloads are stored separately and retained.
+    Callers use the shared video lock to coordinate deletion with generation. The
+    deletion targets the summary cache collection.
+
+    Args:
+        ref: Exact source and video identity to clear.
+
+    Returns:
+        Number of cache documents deleted across all languages.
+
+    Raises:
+        pymongo.errors.PyMongoError: If MongoDB cannot complete the deletion.
     """
     result = await VideoSummary.get_pymongo_collection().delete_many(
         {"source": ref.source, "video_id": ref.video_id}

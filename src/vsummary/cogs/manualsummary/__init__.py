@@ -1,1 +1,1 @@
-"""Durable worker for user-requested summary jobs."""
+"""Background processing and delivery for user-requested summaries."""

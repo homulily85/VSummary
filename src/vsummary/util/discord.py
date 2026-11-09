@@ -1,4 +1,4 @@
-"""Discord-sized message formatting and process-wide send throttling."""
+"""Message splitting and shared rate limiting for Discord sends."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ DISCORD_MESSAGE_LIMIT = 2000
 
 
 class DiscordMessageRateLimiter:
-    """Serialize outbound messages and leave a safe gap between sends."""
+    """Coordinate sends through one lock and reserve a minimum interval between them."""
 
     def __init__(
         self,
@@ -23,7 +23,16 @@ class DiscordMessageRateLimiter:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ):
-        """Create a limiter with injectable time functions for deterministic tests."""
+        """Create a limiter with injectable timing functions.
+
+        Args:
+            minimum_interval_seconds: Positive gap between reserved send times.
+            clock: Monotonic clock returning seconds.
+            sleep: Asynchronous function used to wait for a send slot.
+
+        Raises:
+            ValueError: If the minimum interval is zero or negative.
+        """
         if minimum_interval_seconds <= 0:
             raise ValueError("minimum_interval_seconds must be positive")
         self.minimum_interval_seconds = minimum_interval_seconds
@@ -33,7 +42,16 @@ class DiscordMessageRateLimiter:
         self._next_send_at = 0.0
 
     async def send(self, sender, content: str, **kwargs: Any) -> Any:
-        """Send one message after the global interval reserved for the last send."""
+        """Reserve a send slot and await the sender while holding the limiter lock.
+
+        Args:
+            sender: Asynchronous callback that sends one Discord message.
+            content: Message body passed as the callback's first argument.
+            **kwargs: Additional keyword arguments forwarded to the sender.
+
+        Returns:
+            Result returned by the sender. Exceptions from the sender propagate.
+        """
         async with self._lock:
             delay = self._next_send_at - self._clock()
             if delay > 0:
@@ -43,7 +61,17 @@ class DiscordMessageRateLimiter:
 
 
 async def send_limited(bot: Bot, sender, content: str, **kwargs: Any) -> Any:
-    """Send through the bot's shared limiter, if the caller provides one."""
+    """Send a message using the bot's limiter when one is installed.
+
+    Args:
+        bot: Bot exposing the shared Discord message limiter.
+        sender: Asynchronous message callback.
+        content: Body of the message.
+        **kwargs: Additional keyword arguments forwarded to the sender.
+
+    Returns:
+        Result returned by the sender. Exceptions from the sender propagate.
+    """
     limiter = bot.message_rate_limiter
     if limiter is None:
         return await sender(content, **kwargs)
@@ -51,7 +79,22 @@ async def send_limited(bot: Bot, sender, content: str, **kwargs: Any) -> Any:
 
 
 def split_message(text: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
-    """Split text into non-empty Discord-sized chunks without losing content."""
+    """Split a message into ordered chunks that fit the Discord character limit.
+
+    Prefer a newline or sentence boundary before cutting at the limit. Trim whitespace
+    at chunk boundaries.
+
+    Args:
+        text: Message to split.
+        limit: Maximum characters per chunk, defaulting to Discord's message limit.
+
+    Returns:
+        Non-empty chunks in send order. Return an empty list for empty input or for
+        whitespace-only input with a positive limit.
+
+    Raises:
+        ValueError: If the limit is non-positive and the input string is non-empty.
+    """
     if not text:
         return []
     if limit <= 0:

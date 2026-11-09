@@ -1,1 +1,1 @@
-"""Slash-command adapter for manual summary requests."""
+"""Discord commands for requesting summaries, inspecting jobs, and clearing cached output."""

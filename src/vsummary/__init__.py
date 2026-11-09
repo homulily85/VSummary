@@ -1,1 +1,1 @@
-"""VSummary Discord bot package."""
+"""Discord bot for generating video and audio summaries with NotebookLM."""

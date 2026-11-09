@@ -1,4 +1,4 @@
-"""Persistent, effective-dated topic policies for automatic summaries."""
+"""Read and append effective-dated topic decisions for automatic summaries."""
 
 from __future__ import annotations
 
@@ -13,7 +13,17 @@ DEFAULT_POLICY_EFFECTIVE_AT = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 def normalize_topic_id(topic_id: str) -> tuple[str, str]:
-    """Return display and case-insensitive lookup forms of a non-blank topic ID."""
+    """Normalize the display ID and lookup key of a Holodex topic.
+
+    Args:
+        topic_id: User-supplied topic ID.
+
+    Returns:
+        Pair containing the trimmed display ID and its case-folded lookup key.
+
+    Raises:
+        ValueError: If the topic ID is blank.
+    """
     display = topic_id.strip()
     if not display:
         raise ValueError("Topic ID cannot be empty.")
@@ -24,7 +34,21 @@ async def policy_ignores_video(
     topic_id: str | None,
     published_at: datetime,
 ) -> bool:
-    """Query the latest topic policy strictly before video publication."""
+    """Resolve a topic policy at the time a video was published.
+
+    Args:
+        topic_id: Holodex topic ID, or ``None`` if unknown.
+        published_at: Timezone-aware video publication time when a topic is supplied.
+
+    Returns:
+        Whether the last decision strictly before publication was to ignore the topic.
+            Return ``False`` when the topic or decision is absent.
+
+    Raises:
+        ValueError: If a supplied topic is blank or its publication time lacks a
+            timezone.
+        pymongo.errors.PyMongoError: If MongoDB cannot read the policy.
+    """
     if topic_id is None:
         return False
     if published_at.tzinfo is None:
@@ -41,7 +65,14 @@ async def policy_ignores_video(
 
 
 async def get_ignored_auto_summary_topics() -> list[str]:
-    """Return topics whose latest policy is ignored, ordered by display ID."""
+    """List topics whose most recent stored decision is to ignore them.
+
+    Returns:
+        Display IDs sorted by display ID.
+
+    Raises:
+        pymongo.errors.PyMongoError: If MongoDB cannot aggregate the policy history.
+    """
     topics = await AutoSummaryTopicPolicy.aggregate(
         [
             {"$sort": {"topic_key": -1, "effective_at": -1}},
@@ -62,7 +93,13 @@ async def get_ignored_auto_summary_topics() -> list[str]:
 
 
 async def ensure_default_auto_summary_topic_policies() -> None:
-    """Seed missing built-in ignored-topic policies without overwriting user changes."""
+    """Insert epoch-dated ignore decisions for built-in topics without a history.
+
+    Treat duplicate inserts from concurrent seeders as already applied.
+
+    Raises:
+        pymongo.errors.PyMongoError: If another MongoDB read or write error occurs.
+    """
     default_topics = {
         normalize_topic_id(topic_id)[1]: topic_id for topic_id in DEFAULT_IGNORED_TOPICS
     }
@@ -90,7 +127,21 @@ async def set_auto_summary_topic_policy(
     ignored: bool,
     effective_at: datetime | None = None,
 ) -> tuple[bool, AutoSummaryTopicPolicy | None]:
-    """Append a policy transition unless the topic already has the desired state."""
+    """Append an allow or ignore decision when it changes the current state.
+
+    Args:
+        topic_id: Holodex topic ID to update.
+        ignored: Whether to ignore the topic.
+        effective_at: Timezone-aware activation time. Defaults to the current UTC time.
+
+    Returns:
+        Pair containing whether a record was inserted and the new or existing record.
+            The record is ``None`` when allowing a topic with no history.
+
+    Raises:
+        ValueError: If the topic is blank or the activation time lacks a timezone.
+        pymongo.errors.PyMongoError: If MongoDB cannot read or insert the policy.
+    """
     display, topic_key = normalize_topic_id(topic_id)
     effective_at = effective_at or datetime.now(UTC)
     if effective_at.tzinfo is None:

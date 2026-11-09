@@ -1,4 +1,4 @@
-"""Download public Twitch VOD audio for NotebookLM uploads."""
+"""Prepare public Twitch VOD audio as M4A for NotebookLM."""
 
 import asyncio
 import logging
@@ -17,15 +17,30 @@ logger = logging.getLogger(__name__)
 
 
 class TwitchAudioError(RuntimeError):
-    """A Twitch VOD could not be made into an uploadable audio source."""
+    """Signal a failure while preparing an uploadable Twitch audio file."""
 
 
 class TwitchAudioUnavailableError(TwitchAudioError):
-    """A VOD is private, restricted, or otherwise unsupported."""
+    """Signal inaccessible Twitch audio or an unsupported conversion or size."""
 
 
 def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) -> Path:
-    """Download, transcode, size-check, and return one temporary Twitch M4A file."""
+    """Download a Twitch VOD and validate its converted M4A file.
+
+    Args:
+        url: Public Twitch VOD URL.
+        directory: Directory for the audio file.
+        config: Download format, bitrate, and size limit. Defaults to runtime settings.
+
+    Returns:
+        Path to the single M4A file in the output directory.
+
+    Raises:
+        TwitchAudioUnavailableError: If FFmpeg is missing, yt-dlp cannot access or
+            convert the recording, or the audio exceeds the size limit.
+        TwitchAudioError: If the expected single M4A output is missing or ambiguous.
+        OSError: If the file cannot be inspected on disk.
+    """
     config = runtime_config(config)
     if shutil.which("ffmpeg") is None:
         raise TwitchAudioUnavailableError("ffmpeg is required to process Twitch audio")
@@ -76,7 +91,22 @@ def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) 
 async def download_twitch_audio(
     ref: VideoRef, *, config: RuntimeConfig | None = None
 ) -> AsyncIterator[Path]:
-    """Download a public Twitch VOD to a temporary M4A audio file."""
+    """Prepare a public Twitch VOD in a temporary directory.
+
+    Args:
+        ref: Normalized Twitch VOD reference.
+        config: Audio settings. Defaults to runtime settings.
+
+    Yields:
+        Path to the converted M4A file, available until the context exits.
+
+    Raises:
+        ValueError: If the reference is for another source.
+        TwitchAudioUnavailableError: If the audio cannot be accessed or converted, or
+            exceeds the size limit.
+        TwitchAudioError: If the downloader does not produce one M4A file.
+        OSError: If a temporary-file operation fails.
+    """
     if ref.source != "twitch":
         raise ValueError("Twitch audio can only be downloaded for Twitch references")
     with tempfile.TemporaryDirectory(prefix="vsummary-twitch-") as directory:

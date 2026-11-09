@@ -1,4 +1,4 @@
-"""Prepare one public yt-dlp media item for NotebookLM."""
+"""Validation, metadata lookup, and M4A extraction for generic public media."""
 
 import asyncio
 import shutil
@@ -18,16 +18,27 @@ from vsummary.util.video_metadata import VideoMetadata
 
 
 class GenericMediaError(RuntimeError):
-    """A temporary failure while preparing media."""
+    """Signal a host lookup, extraction, or preparation failure."""
 
 
 class GenericMediaUnavailableError(GenericMediaError):
-    """The requested URL cannot produce one uploadable recording."""
+    """Signal media that cannot produce a supported, uploadable recording."""
 
 
 def _options(
     directory: str | None = None, *, config: RuntimeConfig | None = None
 ) -> dict:
+    """Build the yt-dlp options for inspection or audio conversion.
+
+    Args:
+        directory: Destination directory for M4A output, or ``None`` to omit conversion
+            options.
+        config: Operational settings for format selection and bitrate. Defaults to
+            runtime settings.
+
+    Returns:
+        yt-dlp option mapping.
+    """
     config = runtime_config(config)
     options = {
         "quiet": True,
@@ -48,7 +59,17 @@ def _options(
 
 
 def _ensure_public_host(url: str) -> None:
-    """Reject hostnames that resolve to non-public network addresses."""
+    """Resolve the media hostname and require public addresses.
+
+    Args:
+        url: Candidate public HTTP(S) URL.
+
+    Raises:
+        UnsupportedVideoSource: If the URL fails local validation.
+        GenericMediaError: If DNS resolution fails.
+        GenericMediaUnavailableError: If no addresses resolve or any address is
+            non-public.
+    """
     normalized = normalize_public_url(url)
     parsed = urlsplit(normalized)
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -65,6 +86,18 @@ def _ensure_public_host(url: str) -> None:
 
 
 def _require_one_finished_media(info: object) -> dict:
+    """Validate that extracted metadata describes one completed recording.
+
+    Args:
+        info: Raw metadata returned by yt-dlp.
+
+    Returns:
+        Original metadata dictionary after validation.
+
+    Raises:
+        GenericMediaUnavailableError: If metadata lacks an ID, represents multiple
+            items, or indicates an upcoming, live, or unfinished item.
+    """
     if not isinstance(info, dict):
         raise GenericMediaUnavailableError("The URL does not contain accessible media.")
     if info.get("_type") in {"playlist", "multi_video"} or "entries" in info:
@@ -82,7 +115,21 @@ def _require_one_finished_media(info: object) -> dict:
 
 
 def inspect_media(url: str) -> VideoMetadata | None:
-    """Validate one accessible recording and return available display metadata."""
+    """Check access to one public recording and extract its display metadata.
+
+    Args:
+        url: Public media URL to inspect without downloading audio.
+
+    Returns:
+        Trimmed title with an optional channel name, or ``None`` if the recording has no
+            usable title.
+
+    Raises:
+        UnsupportedVideoSource: If the URL fails local validation.
+        GenericMediaUnavailableError: If the host is non-public or the recording is
+            inaccessible or unsupported.
+        GenericMediaError: If DNS resolution or another inspection operation fails.
+    """
     _ensure_public_host(url)
     try:
         with yt_dlp.YoutubeDL(_options()) as downloader:
@@ -108,11 +155,41 @@ def inspect_media(url: str) -> VideoMetadata | None:
 
 
 async def inspect_generic_media(ref: VideoRef) -> VideoMetadata | None:
-    """Check media without blocking the Discord event loop."""
+    """Inspect a media reference in a worker thread.
+
+    Args:
+        ref: Reference that can be converted to a public media URL.
+
+    Returns:
+        Available display metadata, or ``None`` if the recording has no usable title.
+
+    Raises:
+        UnsupportedVideoSource: If the reference or its URL is unsupported.
+        GenericMediaUnavailableError: If the recording cannot be accessed or used.
+        GenericMediaError: If host resolution or inspection fails.
+    """
     return await asyncio.to_thread(inspect_media, build_video_url(ref))
 
 
 def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) -> Path:
+    """Download a single finished item and transcode its audio to M4A.
+
+    Args:
+        url: Public media URL.
+        directory: Directory for the audio file.
+        config: Download format, bitrate, and size limit. Defaults to runtime settings.
+
+    Returns:
+        Path to the single M4A file in the output directory.
+
+    Raises:
+        UnsupportedVideoSource: If the URL fails local validation.
+        GenericMediaUnavailableError: If the host or recording is unsupported, FFmpeg is
+            missing, or the size limit is exceeded.
+        GenericMediaError: If host resolution, download, or conversion fails, or if
+            output is missing or ambiguous.
+        OSError: If the output cannot be inspected on disk.
+    """
     config = runtime_config(config)
     _ensure_public_host(url)
     if shutil.which("ffmpeg") is None:
@@ -143,7 +220,23 @@ def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) 
 async def download_generic_audio(
     ref: VideoRef, *, config: RuntimeConfig | None = None
 ) -> AsyncIterator[Path]:
-    """Download one public media item into a temporary M4A file."""
+    """Prepare generic media or YouTube fallback audio in a temporary directory.
+
+    Args:
+        ref: Generic or YouTube reference to download.
+        config: Audio settings. Defaults to runtime settings.
+
+    Yields:
+        Path to the M4A file, available until the context exits.
+
+    Raises:
+        ValueError: If the reference is for a different source.
+        UnsupportedVideoSource: If the reference lacks a supported URL.
+        GenericMediaUnavailableError: If the media cannot be used, FFmpeg is missing, or
+            the audio exceeds the size limit.
+        GenericMediaError: If resolution or audio preparation fails.
+        OSError: If a temporary-file operation fails.
+    """
     if ref.source not in {"yt_dlp", "youtube"}:
         raise ValueError("Generic audio requires a yt-dlp or YouTube reference.")
     with tempfile.TemporaryDirectory(prefix="vsummary-media-") as directory:

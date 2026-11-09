@@ -1,1 +1,1 @@
-"""Small operational Discord cogs."""
+"""Discord commands for checking bot health."""

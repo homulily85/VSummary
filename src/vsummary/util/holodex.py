@@ -1,4 +1,4 @@
-"""Typed Holodex API access with request pacing and bounded retries."""
+"""Asynchronous Holodex requests, response validation, and retry pacing."""
 
 from __future__ import annotations
 
@@ -32,28 +32,33 @@ DEFAULT_IGNORED_TOPICS = {
 
 
 class HolodexError(Exception):
-    """Base error for Holodex API failures."""
+    """Base class for errors reported by the Holodex client."""
 
 
 class ChannelNotFoundError(HolodexError):
-    """Raised when the Holodex channel endpoint returns 404."""
+    """Signal that Holodex returned HTTP 404 for a channel lookup."""
 
 
 class TransientHolodexError(HolodexError):
-    """Raised for timeouts, connection failures, and server errors."""
+    """Signal exhausted retries for a transport failure or retryable HTTP response."""
 
 
 class PermanentHolodexError(HolodexError):
-    """Raised for non-retryable API responses."""
+    """Signal a Holodex failure that the client cannot resolve by retrying."""
 
 
 class MalformedHolodexResponse(PermanentHolodexError):
-    """Raised when Holodex returns a response with an invalid shape."""
+    """Signal that a Holodex response could not be decoded or validated."""
 
 
 @dataclass(frozen=True)
 class HolodexChannel:
-    """Minimal channel data needed to create an automatic subscription."""
+    """Carry the Holodex channel fields needed for a subscription.
+
+    Attributes:
+        id: Holodex channel identifier.
+        name: Channel display name.
+    """
 
     id: str
     name: str
@@ -61,7 +66,16 @@ class HolodexChannel:
 
 @dataclass(frozen=True)
 class HolodexVideo:
-    """Normalized past-stream data returned by Holodex channel endpoints."""
+    """Carry a past stream returned by a Holodex channel listing.
+
+    Attributes:
+        id: YouTube video identifier.
+        title: Video display title.
+        topic_id: Holodex topic identifier, if supplied.
+        available_at: Publication timestamp normalized to UTC.
+        channel_name: Channel display name.
+        duration: Stream duration in seconds.
+    """
 
     id: str
     title: str
@@ -72,12 +86,16 @@ class HolodexVideo:
 
     @property
     def video_id(self) -> str:
-        """Expose ``id`` under the naming used by summary models and workflows."""
+        """YouTube video identifier under the name used by summary workflows."""
         return self.id
 
 
 class HolodexClient:
-    """Async Holodex client with shared request pacing and bounded retries."""
+    """Reuse one asynchronous HTTP client for Holodex requests.
+
+    Serialize requests within the client, space their starts, and honor rate limits
+    across callers.
+    """
 
     def __init__(
         self,
@@ -86,7 +104,14 @@ class HolodexClient:
         timeout: float = 15.0,
         retries: int = 2,
     ):
-        """Create a client with a single timeout and retry policy for every request."""
+        """Initialize the request pool, rate limiter, and retry budget.
+
+        Args:
+            transport: Optional HTTPX transport. By default, use HTTPX networking.
+            timeout: Per-request HTTPX timeout in seconds.
+            retries: Additional attempts for transient failures. Negative values act as
+                zero.
+        """
         self._retries = max(0, retries)
         self._request_lock = asyncio.Lock()
         self._next_request_at = float("-inf")
@@ -98,13 +123,28 @@ class HolodexClient:
         )
 
     async def aclose(self):
-        """Close the underlying reusable HTTP connection pool."""
+        """Close the shared asynchronous HTTP connection pool."""
         await self._client.aclose()
 
     async def _request(
         self, method: str, path: str, *, retries: int | None = None, **kwargs
     ) -> httpx.Response:
-        """Request Holodex, retrying transient transport and server failures."""
+        """Send a paced request and retry transient failures within the budget.
+
+        Args:
+            method: HTTP request method.
+            path: Endpoint path relative to the Holodex API base URL.
+            retries: Additional attempts, or ``None`` to use the client's budget.
+            **kwargs: HTTPX request options, such as query parameters.
+
+        Returns:
+            HTTP response after handling retryable status codes. Endpoint methods
+                interpret other statuses.
+
+        Raises:
+            TransientHolodexError: If transport failures or HTTP 408, 429, or 5xx
+                responses exhaust the budget.
+        """
         retry_limit = self._retries if retries is None else max(0, retries)
         clock = asyncio.get_running_loop().time
         for attempt in range(retry_limit + 1):
@@ -170,7 +210,20 @@ class HolodexClient:
         raise AssertionError("unreachable")
 
     async def fetch_channel(self, channel_id: str) -> HolodexChannel:
-        """Fetch one channel or raise a typed error for its response status."""
+        """Fetch the ID and display name for one Holodex channel.
+
+        Args:
+            channel_id: Holodex channel identifier.
+
+        Returns:
+            Channel details used when following the channel.
+
+        Raises:
+            ChannelNotFoundError: If the channel endpoint returns HTTP 404.
+            TransientHolodexError: If transient request failures exhaust retries.
+            PermanentHolodexError: If another non-retryable HTTP error is returned.
+            MalformedHolodexResponse: If the response lacks usable channel fields.
+        """
         response = await self._request("GET", f"/channels/{channel_id}")
         if response.status_code == 404:
             raise ChannelNotFoundError(f"Channel '{channel_id}' not found on Holodex.")
@@ -189,7 +242,22 @@ class HolodexClient:
     async def fetch_channel_videos(
         self, channel_id: str, limit: int = 1, offset: int = 0
     ) -> list[HolodexVideo]:
-        """Fetch and validate one newest-first page of past channel streams."""
+        """Read one page of past streams in the order returned by Holodex.
+
+        Args:
+            channel_id: Channel whose past streams to query.
+            limit: Maximum number of streams requested in the page.
+            offset: Number of results to skip from the start of the listing.
+
+        Returns:
+            Validated stream records in the endpoint's newest-first order.
+
+        Raises:
+            TransientHolodexError: If transient request failures exhaust retries.
+            PermanentHolodexError: If a non-retryable HTTP error is returned.
+            MalformedHolodexResponse: If the response is not a valid list of stream
+                records.
+        """
         response = await self._request(
             "GET",
             f"/channels/{channel_id}/videos",
@@ -216,7 +284,21 @@ class HolodexClient:
             ) from exc
 
     async def get_video_topic(self, video_id: str) -> str | None:
-        """Fetch the current topic of one video, preserving API failures."""
+        """Read the current topic of a video in one Holodex request.
+
+        Args:
+            video_id: YouTube ID expected in the Holodex response.
+
+        Returns:
+            Trimmed topic ID, or ``None`` if it is missing or blank.
+
+        Raises:
+            TransientHolodexError: If the request fails with a transient error.
+            PermanentHolodexError: If the video is missing or another non-retryable HTTP
+                error occurs.
+            MalformedHolodexResponse: If the response has an unexpected ID or invalid
+                topic data.
+        """
         response = await self._request("GET", f"/videos/{video_id}", retries=0)
         if response.status_code == 404:
             raise PermanentHolodexError(f"Video '{video_id}' not found on Holodex")
@@ -246,10 +328,21 @@ class HolodexClient:
         *,
         page_size: int = 50,
     ) -> list[HolodexVideo]:
-        """Return every past stream published after ``since``.
+        """Page through past streams until reaching the publication cutoff.
 
-        Holodex returns newest videos first. Pagination stops as soon as the
-        first older item is encountered, avoiding a full channel history scan.
+        Args:
+            channel_id: Channel to scan in newest-first order.
+            since: Exclusive, timezone-aware lower bound on publication time.
+            page_size: Positive maximum number of streams to request per page.
+
+        Returns:
+            Streams published strictly after the cutoff, in newest-first order.
+
+        Raises:
+            ValueError: If the cutoff lacks a timezone or the page size is non-positive.
+            TransientHolodexError: If a page request exhausts its retry budget.
+            PermanentHolodexError: If a page request returns a non-retryable HTTP error.
+            MalformedHolodexResponse: If a page cannot be decoded or validated.
         """
         if since.tzinfo is None:
             raise ValueError("since must be timezone-aware")
@@ -270,7 +363,15 @@ class HolodexClient:
 
 
 def _retry_delay(response: httpx.Response, attempt: int) -> float:
-    """Honor a valid Retry-After response header before exponential backoff."""
+    """Choose the retry delay from the response header or exponential backoff.
+
+    Args:
+        response: HTTP response that may specify a ``Retry-After`` delay or date.
+        attempt: Zero-based index of the failed attempt.
+
+    Returns:
+        Non-negative delay in seconds, falling back to two raised to the attempt index.
+    """
     value = response.headers.get("Retry-After")
     if value:
         try:
@@ -290,7 +391,17 @@ def _retry_delay(response: httpx.Response, attempt: int) -> float:
 
 
 def _parse_video(video: dict) -> HolodexVideo:
-    """Map a raw Holodex video object to the strictly typed workflow shape."""
+    """Decode one Holodex stream item into the workflow's video record.
+
+    Args:
+        video: Raw JSON object from a channel listing.
+
+    Returns:
+        Video record with UTC publication time and a duration in seconds.
+
+    Raises:
+        MalformedHolodexResponse: If required fields are missing or cannot be parsed.
+    """
     try:
         channel = video["channel"]
         return HolodexVideo(
@@ -306,7 +417,19 @@ def _parse_video(video: dict) -> HolodexVideo:
 
 
 def _parse_duration(value) -> int:
-    """Parse a non-negative Holodex duration expressed in seconds."""
+    """Convert the Holodex duration field to non-negative seconds.
+
+    Args:
+        value: Raw duration field, convertible to an integer.
+
+    Returns:
+        Duration as an integer number of seconds.
+
+    Raises:
+        MalformedHolodexResponse: If conversion fails with a type or value error, or the
+            result is negative.
+        OverflowError: If the input is numeric infinity.
+    """
     try:
         duration = int(value)
     except (TypeError, ValueError) as exc:
@@ -317,7 +440,17 @@ def _parse_duration(value) -> int:
 
 
 def _parse_iso(value: str) -> datetime:
-    """Parse a timezone-aware ISO timestamp and normalize it to UTC."""
+    """Convert an ISO timestamp from Holodex to UTC.
+
+    Args:
+        value: ISO timestamp with an explicit timezone offset.
+
+    Returns:
+        Timezone-aware datetime in UTC.
+
+    Raises:
+        MalformedHolodexResponse: If the timestamp cannot be parsed or lacks a timezone.
+    """
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as exc:
