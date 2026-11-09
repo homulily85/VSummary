@@ -57,7 +57,7 @@ async def async_main(settings: Settings | None = None):
         )
         logger.info("Connected to MongoDB!")
 
-        async with NotebookLMClient.from_storage() as notebook_client:
+        async with NotebookLMClient.from_storage(keepalive=600) as notebook_client:
             bot = Bot(
                 notebook_client=notebook_client,
                 settings=settings,

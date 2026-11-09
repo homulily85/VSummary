@@ -1,0 +1,115 @@
+name: Docker image
+
+on:
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  IMAGE_REPOSITORY: homulily85/vsummary
+
+jobs:
+  docker:
+    runs-on: ubuntu-26.04
+    services:
+      mongo:
+        image: mongo:9.0
+        ports:
+          - 27017/tcp
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping: 1})'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          python-version: '3.14'
+
+      - name: Install locked dependencies
+        run: uv sync --locked
+
+      - name: Validate stable release tag
+        id: release_version
+        if: ${{ github.event_name == 'release' && !github.event.release.prerelease }}
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(uv run --no-sync python docker/release_version.py "$RELEASE_TAG")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests and Ruff
+        env:
+          MONGODB_TEST_URI: mongodb://127.0.0.1:${{ job.services.mongo.ports['27017'] }}/
+        run: |
+          uv run --no-sync pytest
+          uv run --no-sync ruff check .
+          uv run --no-sync ruff format --check .
+
+      - name: Build Linux AMD64 image
+        run: docker build --platform linux/amd64 --tag vsummary:ci .
+
+      - name: Smoke test the built image
+        run: |
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' vsummary:ci)" = linux/amd64
+          docker run --rm --network none vsummary:ci sh -ec '
+            test "$(id -u)" -ne 0
+            command -v vsummary
+            notebooklm --version
+            ffmpeg -version >/dev/null
+            ffprobe -version >/dev/null
+            deno --version
+            python -c "import vsummary.main, yt_dlp_ejs"
+            test -z "$(find /app -name .env -o -name master_token.json -o -name storage_state.json)"
+          '
+          status=0
+          output=$(docker run --rm --network none vsummary:ci 2>&1) || status=$?
+          test "$status" -eq 1
+          grep -F 'requires a readable, non-empty master_token.json' <<< "$output"
+
+      - name: Sign in to Docker Hub
+        if: ${{ steps.release_version.outcome == 'success' }}
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Publish the tested image
+        if: ${{ steps.release_version.outcome == 'success' }}
+        env:
+          VERSION: ${{ steps.release_version.outputs.version }}
+        run: |
+          docker tag vsummary:ci "$IMAGE_REPOSITORY:$VERSION"
+          docker push "$IMAGE_REPOSITORY:$VERSION"
+          docker tag vsummary:ci "$IMAGE_REPOSITORY:latest"
+          docker push "$IMAGE_REPOSITORY:latest"
+
+      - name: Verify public release tags
+        if: ${{ steps.release_version.outcome == 'success' }}
+        env:
+          VERSION: ${{ steps.release_version.outputs.version }}
+        run: |
+          docker_config=$(mktemp -d)
+          trap 'rm -rf -- "$docker_config"' EXIT
+          version_digest=$(docker --config "$docker_config" buildx imagetools inspect \
+            "$IMAGE_REPOSITORY:$VERSION" --format '{{.Manifest.Digest}}')
+          latest_digest=$(docker --config "$docker_config" buildx imagetools inspect \
+            "$IMAGE_REPOSITORY:latest" --format '{{.Manifest.Digest}}')
+          [[ "$version_digest" == sha256:* && "$version_digest" == "$latest_digest" ]]
+          docker --config "$docker_config" pull "$IMAGE_REPOSITORY:$VERSION"

@@ -18,6 +18,9 @@ dependencies = [
     "yt-dlp==2026.10.26",
 ]
 
+[project.optional-dependencies]
+docker = ["yt-dlp-ejs==0.8.0"]
+
 [dependency-groups]
 dev = [
     "notebooklm-py[browser]==0.8.6",

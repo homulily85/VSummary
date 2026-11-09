@@ -41,6 +41,7 @@ the destination with `discord.auto_summary_channel_id` in `config.toml`.
 ## Documentation
 
 - [Installation, configuration, and deployment](docs/installation.md)
+- [Install from Docker Hub](docs/installation.md#run-with-docker)
 - [Slash command reference](docs/commands.md)
 - [System architecture and operations](docs/system.md)
 
