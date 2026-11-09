@@ -2905,7 +2905,8 @@ async def test_startup_initializes_workers_without_running_offline_migration(
     migrate = AsyncMock(side_effect=AssertionError("Migration must run offline"))
 
     @asynccontextmanager
-    async def notebook_session():
+    async def notebook_session(*, keepalive=None):
+        assert keepalive == 600
         events.append("notebook")
         yield object()
 

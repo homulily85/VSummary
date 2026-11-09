@@ -1,5 +1,8 @@
 # Installation and configuration
 
+For a container deployment, follow [Run with Docker](#run-with-docker). The
+numbered steps below cover a local Python installation.
+
 ## 1. Prerequisites
 
 - Python 3.12 or later.
@@ -245,3 +248,119 @@ to this bot, and follow the upstream guide for any future authentication changes
 ```bash
 uv run vsummary
 ```
+
+## Run with Docker
+
+Use Docker Engine or Docker Desktop with Linux containers on AMD64. Pull the
+published `homulily85/vsummary` image from Docker Hub. It includes the Python
+runtime and audio tools. Have a reachable MongoDB deployment and
+[create and invite your Discord bot](#3-create-and-invite-the-discord-bot)
+before starting the container. For an existing database from before 1.6,
+complete the [offline migration](migration-1.6.md) first.
+
+### Set up Google authentication
+
+On a workstation with a browser, install the same `notebooklm-py` version as
+the bot. Use a Google account dedicated to VSummary.
+
+```bash
+uv tool install 'notebooklm-py[browser,headless]==0.8.6'
+notebooklm --profile default login --master-token --account YOUR_GOOGLE_EMAIL
+```
+
+Sign in through the browser window. The CLI saves `master_token.json` under
+`~/.notebooklm/profiles/default/`, or under the corresponding path in
+`NOTEBOOKLM_HOME` if set. Run this command with `NOTEBOOKLM_AUTH_JSON` unset.
+See the [upstream login guide](https://github.com/teng-lin/notebooklm-py/blob/v0.8.6/docs/installation.md#alternative-master-token-auth-no-cookie-file-to-ship-survives-expiry)
+for browser setup and troubleshooting.
+
+On the Docker host, choose a deployment directory and run the remaining
+commands there. Copy the master token securely from the workstation. The
+`install` command below uses the default source path when the workstation is
+also the Docker host.
+
+```bash
+(umask 077; mkdir -p .notebooklm/profiles/default logs)
+chmod 700 .notebooklm .notebooklm/profiles .notebooklm/profiles/default
+install -m 600 ~/.notebooklm/profiles/default/master_token.json \
+  .notebooklm/profiles/default/master_token.json
+```
+
+The container creates `storage_state.json` alongside the master token on first
+start. NotebookLM uses that file for the active Google cookies and updates it
+as the session refreshes. Both files grant access to the Google account. Keep
+them private, keep their mode at `0600`, and give each running bot its own
+profile directory. If a master token leaks, revoke its corresponding session
+in your Google Account security settings. See the
+[upstream cookie lifecycle guide](https://github.com/teng-lin/notebooklm-py/blob/v0.8.6/docs/auth-cookie-lifecycle.md).
+
+### Pull and start the container
+
+Create a `.env` file with these two lines and replace the placeholders. Set
+the file's permissions to `0600`. Keep Google credentials in the profile
+directory.
+
+```dotenv
+DISCORD_TOKEN=YOUR_DISCORD_BOT_TOKEN
+MONGODB_URI=YOUR_MONGODB_CONNECTION_STRING
+```
+
+Create an empty `config.toml` with `touch config.toml` to use defaults, or
+copy the [example configuration](../config.example.toml) and edit it. Keep
+the configured file log under `/app/logs` for persistence.
+
+`MONGODB_URI` must use an address reachable from the container. If MongoDB is
+on the Docker host, use `host.docker.internal` in the URI. With Docker Engine
+on Linux, add `--add-host=host.docker.internal:host-gateway` to `docker run` and
+ensure MongoDB listens on an address reachable from the Docker bridge.
+
+On Linux or WSL, run from the deployment directory as a regular user who owns the
+mounted files and directories:
+
+```bash
+export VSUMMARY_IMAGE=homulily85/vsummary:1.6.0
+docker pull "$VSUMMARY_IMAGE"
+docker run -d --name vsummary --init --restart unless-stopped \
+  --user "$(id -u):$(id -g)" \
+  --env-file .env \
+  --mount "type=bind,src=$PWD/config.toml,dst=/app/config.toml,readonly" \
+  --mount "type=bind,src=$PWD/logs,dst=/app/logs" \
+  --mount "type=bind,src=$PWD/.notebooklm,dst=/var/lib/vsummary/notebooklm" \
+  "$VSUMMARY_IMAGE"
+```
+
+### Check and maintain the container
+
+```bash
+docker logs -f vsummary
+docker exec vsummary notebooklm auth check --test --passive
+```
+
+Use `/ping` in Discord to check that the bot is online. Use
+`docker stop vsummary` and `docker start vsummary` to stop and resume with the
+existing settings. After changing `config.toml` in place, restart the bot. To
+upgrade, set `VSUMMARY_IMAGE` to the new versioned image and pull it. Stop and
+remove the old container with `docker stop vsummary` and `docker rm vsummary`,
+then repeat `docker run` with the same mounts. Use the same recreation steps
+after changing `.env`. The host retains the profile and logs.
+
+If Google revokes the master token, stop the bot and repeat the workstation
+login. Replace the mounted `master_token.json`, remove the old
+`storage_state.json` for that profile, and start the container so it can mint a
+new session.
+
+### Build locally and publish releases
+
+For development, build from a source checkout with
+`docker build -t vsummary:local .`. Use `vsummary:local` as `VSUMMARY_IMAGE`
+and go straight to the `docker run` step.
+
+Before the first publish, create the public Docker Hub repository
+`homulily85/vsummary`. In the GitHub repository's Actions settings, set the
+variable `DOCKERHUB_USERNAME` to `homulily85` and add `DOCKERHUB_TOKEN` as a
+secret with Docker Hub Read & Write access.
+
+Publish a stable GitHub Release from `main` with a tag such as `v1.6.0` that
+matches the project version. The Docker workflow tests the image, pushes its
+version tag, then updates `latest`. It verifies that both tags resolve to the
+same digest and that the versioned image can be pulled anonymously.

@@ -1,0 +1,16 @@
+**
+!pyproject.toml
+!uv.lock
+!src/
+!src/**
+!docker/
+!docker/start-vsummary.sh
+
+**/.env*
+**/.notebooklm
+**/master_token.json
+**/storage_state.json
+**/config.toml
+**/logs
+**/__pycache__
+**/*.egg-info
