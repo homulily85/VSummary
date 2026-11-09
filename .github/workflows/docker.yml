@@ -18,11 +18,10 @@ env:
 
 jobs:
   docker:
-    # MongoDB 8.0 rejects the 7.0 kernels on the Ubuntu 24.04 and 26.04 runners.
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
     services:
       mongo:
-        image: mongo:8.0
+        image: mongo:9.0
         ports:
           - 27017/tcp
         options: >-
