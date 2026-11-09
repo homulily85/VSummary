@@ -9,21 +9,21 @@ description = "Discord bot for summarizing videos using NotebookLM"
 requires-python = ">=3.12"
 
 dependencies = [
-    "python-dotenv==1.2.4",
-    "discord.py",
-    "beanie==2.2.0",
-    "httpx",
-    "notebooklm-py[headless]==0.8.6",
-    "rich",
-    "yt-dlp==2026.10.26",
+    "python-dotenv>=1.2.4",
+    "discord.py>=2.7.1",
+    "beanie>=2.2.0",
+    "httpx>=0.28.1",
+    "notebooklm-py[headless]>=0.8.6",
+    "rich>=15.0.0",
+    "yt-dlp>=2026.10.26",
 ]
 
 [project.optional-dependencies]
-docker = ["yt-dlp-ejs==0.8.0"]
+docker = ["yt-dlp-ejs>=0.8.0"]
 
 [dependency-groups]
 dev = [
-    "notebooklm-py[browser]==0.8.6",
+    "notebooklm-py[browser]>=0.8.6",
     "ruff>=0.16",
     "pre-commit>=4.6.1",
     "pytest>=9.1.1",
