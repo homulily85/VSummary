@@ -46,6 +46,7 @@ from vsummary.util.summarizer import (
     retry_invalid_summary_response,
 )
 from vsummary.util.video import VideoRef
+from vsummary.util.video_metadata import VideoMetadata
 
 if TYPE_CHECKING:
     from vsummary.bot import Bot
@@ -357,6 +358,12 @@ class Autosummary(commands.Cog):
                     notebooklm.NotebookLMError: If another NotebookLM error propagates.
                     pymongo.errors.PyMongoError: If a cache operation fails.
                 """
+                if self.config.wiki_enabled and job.title:
+                    generation_options["metadata_hint"] = VideoMetadata(
+                        job.title,
+                        job.channel_name,
+                        channel_id=job.channel_id,
+                    )
                 return await self.summary_service.summarize(ref, **generation_options)
 
             try:
