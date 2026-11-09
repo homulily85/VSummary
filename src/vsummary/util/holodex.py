@@ -1,4 +1,4 @@
-"""Typed Holodex API access with bounded HTTP retries and response validation."""
+"""Typed Holodex API access with request pacing and bounded retries."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from math import isfinite
 
 import httpx
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 HOLODEX_BASE_URL = "https://holodex.net"
 HOLODEX_API_URL = f"{HOLODEX_BASE_URL}/api/v2"
+_REQUEST_INTERVAL_SECONDS = 2.0
 REFERER = f"{HOLODEX_BASE_URL}"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -75,7 +77,7 @@ class HolodexVideo:
 
 
 class HolodexClient:
-    """Async Holodex client with a single timeout and retry policy."""
+    """Async Holodex client with shared request pacing and bounded retries."""
 
     def __init__(
         self,
@@ -86,6 +88,8 @@ class HolodexClient:
     ):
         """Create a client with a single timeout and retry policy for every request."""
         self._retries = max(0, retries)
+        self._request_lock = asyncio.Lock()
+        self._next_request_at = float("-inf")
         self._client = httpx.AsyncClient(
             base_url=HOLODEX_API_URL,
             headers={"referer": REFERER, "user-agent": USER_AGENT},
@@ -102,9 +106,20 @@ class HolodexClient:
     ) -> httpx.Response:
         """Request Holodex, retrying transient transport and server failures."""
         retry_limit = self._retries if retries is None else max(0, retries)
+        clock = asyncio.get_running_loop().time
         for attempt in range(retry_limit + 1):
+            rate_limit_delay = None
             try:
-                response = await self._client.request(method, path, **kwargs)
+                async with self._request_lock:
+                    while (wait := self._next_request_at - clock()) > 0:
+                        await asyncio.sleep(wait)
+                    self._next_request_at = clock() + _REQUEST_INTERVAL_SECONDS
+                    response = await self._client.request(method, path, **kwargs)
+                    if response.status_code == 429:
+                        rate_limit_delay = _retry_delay(response, attempt)
+                        self._next_request_at = max(
+                            self._next_request_at, clock() + rate_limit_delay
+                        )
             except (
                 httpx.TimeoutException,
                 httpx.NetworkError,
@@ -131,7 +146,11 @@ class HolodexClient:
                     raise TransientHolodexError(
                         f"Holodex returned HTTP {response.status_code}"
                     )
-                delay = _retry_delay(response, attempt)
+                delay = (
+                    _retry_delay(response, attempt)
+                    if rate_limit_delay is None
+                    else rate_limit_delay
+                )
                 log_event(
                     logger,
                     logging.WARNING,
@@ -144,7 +163,8 @@ class HolodexClient:
                     retry_delay_seconds=delay,
                     http_status=response.status_code,
                 )
-                await asyncio.sleep(delay)
+                if rate_limit_delay is None:
+                    await asyncio.sleep(delay)
                 continue
             return response
         raise AssertionError("unreachable")
@@ -254,15 +274,18 @@ def _retry_delay(response: httpx.Response, attempt: int) -> float:
     value = response.headers.get("Retry-After")
     if value:
         try:
-            return max(0.0, float(value))
+            delay = float(value)
         except ValueError:
             try:
                 retry_at = parsedate_to_datetime(value)
                 if retry_at.tzinfo is None:
                     retry_at = retry_at.replace(tzinfo=UTC)
                 return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
-            except (TypeError, ValueError):
+            except (OverflowError, TypeError, ValueError):
                 pass
+        else:
+            if isfinite(delay) and delay >= 0:
+                return delay
     return float(2**attempt)
 
 

@@ -156,6 +156,7 @@ async def test_workers_claim_only_their_job_type(database, monkeypatch):
     auto_worker.notebook = None
     auto_worker.worker_id = "auto-worker"
     manual_worker = ManualSummary.__new__(ManualSummary)
+    manual_worker.settings = None
     manual_worker.worker_id = "manual-worker"
     claimed_auto = await auto_worker._claim_due_jobs()
     assert [job.id for job in claimed_auto] == [auto["_id"]]
