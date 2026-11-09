@@ -25,6 +25,9 @@ output_language = "English"
 [youtube]
 yt_dlp_fallback_enabled = false
 
+[wiki]
+enabled = false
+
 [media]
 max_audio_mib = 190
 bitrate_kbps = 64

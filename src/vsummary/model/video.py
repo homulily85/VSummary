@@ -34,12 +34,20 @@ class VideoSummary(Document):
         output_language: Trimmed, case-folded language key. Untagged legacy records use
             ``None`` and are excluded from language-specific lookups.
         topics: Ordered topic list with any generated details.
+        wiki_version: Verification pipeline version, or zero for an unverified cache.
+        verification_id: Snapshot used to build the correction table, if available.
+        wiki_corrections: Serialized corrections to reuse when generating details.
+        wiki_references: NotebookLM references saved by topic index.
     """
 
     source: str
     video_id: str
     output_language: str | None = None
     topics: list[Topic] = Field(default_factory=list)
+    wiki_version: int = 0
+    verification_id: str | None = None
+    wiki_corrections: str = ""
+    wiki_references: dict[str, list[dict]] = Field(default_factory=dict)
 
     class Settings:
         """Configure the unique index for the source, video, and language cache key."""
