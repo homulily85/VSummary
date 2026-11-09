@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from discord.ext import commands, tasks
-from pydantic import TypeAdapter
 
 from vsummary.model.channel import JobStatus, ManualSummaryOperation, SummaryJob
 from vsummary.services.summary_jobs import SummaryJobService
@@ -41,7 +40,6 @@ if TYPE_CHECKING:
     from vsummary.bot import Bot
 
 logger = logging.getLogger(__name__)
-_WIKI_METADATA = TypeAdapter(VideoMetadata)
 
 
 class ManualSummary(commands.Cog):
@@ -152,11 +150,6 @@ class ManualSummary(commands.Cog):
             channel_name=metadata.channel_name if metadata else None,
             operation=operation,
             topic_index=topic_index,
-            **(
-                {"wiki_metadata": _WIKI_METADATA.dump_python(metadata, mode="json")}
-                if ref.source == "youtube" and self.config.wiki_enabled and metadata
-                else {}
-            ),
             discord_channel_id=channel_id,
             requester_id=requester_id,
             next_attempt_at=datetime.now(UTC),
@@ -251,13 +244,6 @@ class ManualSummary(commands.Cog):
             if metadata is not None:
                 job.title = metadata.title
                 job.channel_name = metadata.channel_name
-
-        if (
-            self.config.wiki_enabled
-            and ref.source == "youtube"
-            and metadata is not None
-        ):
-            generation_options["metadata_hint"] = metadata
 
         async def generate_delivery_chunks():
             """Generate and format the output requested by the enclosing job.
@@ -478,21 +464,15 @@ class ManualSummary(commands.Cog):
 
     @staticmethod
     def _stored_metadata(job: SummaryJob) -> VideoMetadata | None:
-        """Recover the metadata snapshot or display fields saved with a job.
+        """Recover display metadata already saved with a job.
 
         Args:
-            job: Manual job with optional video metadata.
+            job: Manual job with an optional title and channel name.
 
         Returns:
-            The wiki snapshot when available, or the saved title and channel.
-            Return None when neither a snapshot nor a title was saved.
-
-        Raises:
-            pydantic.ValidationError: If the saved wiki snapshot is invalid.
+            Metadata with the saved title and optional channel, or ``None`` without a
+                title.
         """
-        snapshot = getattr(job, "wiki_metadata", None)
-        if snapshot:
-            return _WIKI_METADATA.validate_python(snapshot)
         title = job.title
         channel_name = job.channel_name
         if isinstance(title, str) and title:

@@ -39,7 +39,6 @@ class RuntimeConfig:
         transcript_delay_seconds: Time after a stream ends before it can be summarized.
         output_language: Language requested for generated topics and details.
         youtube_yt_dlp_fallback_enabled: Whether eligible jobs may try YouTube audio.
-        wiki_enabled: Whether to verify YouTube names using the internal wiki.
         max_audio_mib: Maximum size of a prepared audio file, in mebibytes.
         audio_bitrate_kbps: Target bitrate for transcoded audio, in kilobits per second.
         audio_download_format: yt-dlp format selector used for downloads.
@@ -69,7 +68,6 @@ class RuntimeConfig:
     transcript_delay_seconds: float = 7200.0
     output_language: str = "English"
     youtube_yt_dlp_fallback_enabled: bool = False
-    wiki_enabled: bool = False
     max_audio_mib: float = 190.0
     audio_bitrate_kbps: int = 64
     audio_download_format: str = "bestaudio/best"
@@ -149,7 +147,6 @@ _CONFIG_SECTIONS = {
     "autosummary": {"transcript_delay_seconds": "transcript_delay_seconds"},
     "summary": {"output_language": "output_language"},
     "youtube": {"yt_dlp_fallback_enabled": "youtube_yt_dlp_fallback_enabled"},
-    "wiki": {"enabled": "wiki_enabled"},
     "media": {
         "max_audio_mib": "max_audio_mib",
         "bitrate_kbps": "audio_bitrate_kbps",

@@ -145,7 +145,6 @@ class SummaryJob(Document):
         discord_channel_id: Destination Discord channel ID required by manual jobs.
         channel_name: Display channel name, required by automatic jobs.
         title: Video title, required by automatic jobs.
-        wiki_metadata: Optional YouTube metadata snapshot from manual enqueue.
         available_at: UTC Holodex publication time for automatic jobs.
         operation: Requested output shape for a manual job.
         topic_index: Optional zero-based topic index for a single-topic request.
@@ -175,7 +174,6 @@ class SummaryJob(Document):
     discord_channel_id: int | None = None
     channel_name: str | None = None
     title: str | None = None
-    wiki_metadata: dict | None = None
     available_at: datetime | None = None
     operation: ManualSummaryOperation | None = None
     topic_index: int | None = Field(default=None, ge=0)

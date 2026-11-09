@@ -111,25 +111,6 @@ paragraphs, up to 450 words per topic. There is no minimum word count or fixed
 paragraph count. These are generation instructions; responses are not
 automatically truncated, and coverage and length compliance depend on NotebookLM.
 
-### Internal YouTube wiki
-
-Set `enabled = true` under `[wiki]` in `config.toml` to verify names
-during summary generation for all YouTube channels. The verifier accepts
-YouTube channel profiles linked in the video's metadata as research sources.
-
-The verifier checks names against dated MongoDB facts before using Fast Research.
-It can search up to three times per video, import two results per query,
-and spend up to 120 seconds in the research phase. It checks quotations against
-the source text and keeps versioned evidence. The summary notebook receives
-only the accepted name corrections. A failed search or unconfirmed name leaves
-the existing summary behavior in place.
-
-Wiki collections and verification logs are for operators. `/deletecache`
-clears a video's summary and verification snapshots. Shared entity records and
-their evidence can still help verify later videos. Completed summaries use the
-snapshot they were generated with. Review name accuracy, false corrections,
-and latency on a small set of current and historical videos.
-
 ## Persistent data and state
 
 | Collection/model | Purpose | Important invariants |
