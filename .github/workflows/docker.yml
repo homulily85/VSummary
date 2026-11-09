@@ -18,7 +18,8 @@ env:
 
 jobs:
   docker:
-    runs-on: ubuntu-latest
+    # MongoDB 8.0 cannot start on the Ubuntu 26.04 runner's kernel.
+    runs-on: ubuntu-24.04
     services:
       mongo:
         image: mongo:8.0
