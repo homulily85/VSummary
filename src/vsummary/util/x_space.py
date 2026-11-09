@@ -104,15 +104,6 @@ def parse_x_space_input(value: str) -> XSpaceInput | None:
     return None
 
 
-async def resolve_x_space(value: str) -> VideoRef:
-    """Resolve a user URL to a downloadable, archived X Space reference."""
-    parsed = parse_x_space_input(value)
-    if parsed is None:
-        raise XSpaceResolutionError("This is not a supported X Space URL.")
-
-    return await resolve_parsed_x_space(parsed)
-
-
 async def resolve_parsed_x_space(x_input: XSpaceInput) -> VideoRef:
     """Check the recording for an already recognized X URL."""
     logger.info("Resolving X Space from %s URL.", x_input.kind.value)

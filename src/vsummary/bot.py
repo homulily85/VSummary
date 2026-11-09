@@ -7,6 +7,8 @@ from notebooklm import NotebookLMClient
 from vsummary.logging import DiscordLogHandler
 from vsummary.settings import Settings, runtime_config
 from vsummary.util.discord import DiscordMessageRateLimiter
+from vsummary.util.holodex import HolodexClient
+from vsummary.util.summarizer import NotebookLMSummaryService
 from vsummary.util.video_work import VideoWorkCoordinator
 
 
@@ -16,7 +18,8 @@ class Bot(commands.Bot):
     Attributes:
         notebook_client: Process-local authenticated NotebookLM client.
         settings: Validated runtime configuration.
-        holodex: Optional shared Holodex client owned by the application.
+        holodex: Shared Holodex client owned by the bot.
+        summary_service: Shared NotebookLM summary generator.
         video_work: Per-video coordinator used by summary workers.
         message_rate_limiter: Shared limiter for every Discord send.
     """
@@ -34,7 +37,10 @@ class Bot(commands.Bot):
         super().__init__(command_prefix="/", intents=intents)
         self.notebook_client = notebook_client
         self.settings = settings
-        self.holodex = holodex
+        self.holodex = holodex if holodex is not None else HolodexClient()
+        self.summary_service = NotebookLMSummaryService(
+            notebook_client, config=runtime_config(settings)
+        )
         self.discord_log_handler = discord_log_handler
         self.video_work = VideoWorkCoordinator()
         self.message_rate_limiter = DiscordMessageRateLimiter(

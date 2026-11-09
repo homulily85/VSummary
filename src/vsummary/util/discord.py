@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vsummary.bot import Bot
 
 DISCORD_MESSAGE_LIMIT = 2000
 
@@ -39,9 +42,9 @@ class DiscordMessageRateLimiter:
             return await sender(content, **kwargs)
 
 
-async def send_limited(bot, sender, content: str, **kwargs: Any) -> Any:
+async def send_limited(bot: Bot, sender, content: str, **kwargs: Any) -> Any:
     """Send through the bot's shared limiter, if the caller provides one."""
-    limiter = getattr(bot, "message_rate_limiter", None)
+    limiter = bot.message_rate_limiter
     if limiter is None:
         return await sender(content, **kwargs)
     return await limiter.send(sender, content, **kwargs)
@@ -76,10 +79,3 @@ def split_message(text: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
         remaining = remaining[split_at:].lstrip()
 
     return chunks
-
-
-async def send_chunked(sender, text: str, **kwargs) -> None:
-    """Send every non-empty chunk of ``text`` through an async sender."""
-    chunks = split_message(text)
-    for index, chunk in enumerate(chunks):
-        await sender(chunk, **kwargs if index == 0 else {})

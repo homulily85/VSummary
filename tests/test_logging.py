@@ -13,6 +13,7 @@ from vsummary.logging import (
     configure_logging,
 )
 from vsummary.settings import Settings
+from vsummary.util.video_work import VideoWorkCoordinator
 
 
 @pytest.fixture
@@ -152,8 +153,16 @@ async def test_discord_sink_queues_warning_after_ready_and_redacts_and_truncates
     handler.handle(warning)
 
     target = SimpleNamespace(send=AsyncMock())
-    await handler.start(SimpleNamespace(get_channel=lambda channel_id: target))
-    await handler.drain()
+    await handler.start(
+        SimpleNamespace(
+            fetch_channel=None,
+            message_rate_limiter=None,
+            settings=None,
+            video_work=VideoWorkCoordinator(),
+            get_channel=lambda channel_id: target,
+        )
+    )
+    await asyncio.wait_for(handler.queue.join(), timeout=1)
     await handler.stop()
 
     target.send.assert_awaited_once()
@@ -176,6 +185,9 @@ async def test_discord_sink_disables_itself_for_an_invalid_channel_without_loggi
     handler = DiscordLogHandler(channel_id=123)
     await handler.start(
         SimpleNamespace(
+            message_rate_limiter=None,
+            settings=None,
+            video_work=VideoWorkCoordinator(),
             get_channel=lambda channel_id: None,
             fetch_channel=AsyncMock(side_effect=RuntimeError("missing channel")),
         )
@@ -202,7 +214,15 @@ async def test_discord_sink_reports_events_dropped_while_its_queue_is_full():
 
     handler = DiscordLogHandler(channel_id=123, queue_size=1)
     logger = logging.getLogger("vsummary.tests.discord")
-    await handler.start(SimpleNamespace(get_channel=lambda channel_id: SlowTarget()))
+    await handler.start(
+        SimpleNamespace(
+            fetch_channel=None,
+            message_rate_limiter=None,
+            settings=None,
+            video_work=VideoWorkCoordinator(),
+            get_channel=lambda channel_id: SlowTarget(),
+        )
+    )
     handler.handle(
         logger.makeRecord(logger.name, logging.WARNING, __file__, 0, "first", (), None)
     )
@@ -214,7 +234,7 @@ async def test_discord_sink_reports_events_dropped_while_its_queue_is_full():
             )
         )
     release_first_send.set()
-    await handler.drain()
+    await asyncio.wait_for(handler.queue.join(), timeout=1)
     await handler.stop()
 
     assert any("dropped 1 event(s)" in message for message in sent)

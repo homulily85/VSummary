@@ -5,19 +5,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
 import httpx
 
 from vsummary.logging import log_event
-from vsummary.settings import DEFAULT_CONFIG
 
 logger = logging.getLogger(__name__)
 
 HOLODEX_BASE_URL = "https://holodex.net"
 HOLODEX_API_URL = f"{HOLODEX_BASE_URL}/api/v2"
-REFERER = f"{HOLODEX_BASE_URL}/channel/UCQ0UDLQCjY0rmuxCDE38FGg"
+REFERER = f"{HOLODEX_BASE_URL}"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
@@ -28,20 +27,6 @@ DEFAULT_IGNORED_TOPICS = {
     "shorts",
     "Music_Cover",
 }
-TRANSCRIPT_READY_DELAY = timedelta(seconds=DEFAULT_CONFIG.transcript_delay_seconds)
-MAX_RETRIES = DEFAULT_CONFIG.source_retry_limit
-
-
-def exponential_backoff_hours(retry_count: int) -> float:
-    """Return the one-based exponential source-job retry delay in hours."""
-    return DEFAULT_CONFIG.retry_delay_seconds(retry_count) / 3600
-
-
-def is_transcript_ready(available_at: datetime) -> bool:
-    """Return whether a stream has passed the transcript-availability delay."""
-    if available_at.tzinfo is None:
-        raise ValueError("available_at must be timezone-aware")
-    return datetime.now(UTC) - available_at > TRANSCRIPT_READY_DELAY
 
 
 class HolodexError(Exception):
@@ -108,21 +93,9 @@ class HolodexClient:
             timeout=httpx.Timeout(timeout),
         )
 
-    async def __aenter__(self):
-        """Return this client for use as an asynchronous context manager."""
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        """Close the underlying HTTP client when its context exits."""
-        await self.aclose()
-
     async def aclose(self):
         """Close the underlying reusable HTTP connection pool."""
         await self._client.aclose()
-
-    async def close(self):
-        """Provide a compatibility alias for :meth:`aclose`."""
-        await self.aclose()
 
     async def _request(
         self, method: str, path: str, *, retries: int | None = None, **kwargs
@@ -274,76 +247,6 @@ class HolodexClient:
             if len(page) < page_size or len(newer) != len(page):
                 return videos
             offset += len(page)
-
-    async def get_channel(self, channel_id: str) -> HolodexChannel | None:
-        """Legacy helper returning ``None`` for ordinary HTTP failures."""
-        try:
-            return await self.fetch_channel(channel_id)
-        except ChannelNotFoundError:
-            raise
-        except (PermanentHolodexError, TransientHolodexError) as exc:
-            log_event(
-                logger,
-                logging.ERROR,
-                "Error fetching channel %s: %s",
-                channel_id,
-                exc,
-                channel_id=channel_id,
-                error_type=type(exc).__name__,
-            )
-            return None
-
-    async def get_channel_videos(
-        self, channel_id: str, limit: int = 1, offset: int = 0
-    ) -> list[HolodexVideo]:
-        """Legacy helper returning an empty list for ordinary HTTP failures."""
-        try:
-            return await self.fetch_channel_videos(channel_id, limit, offset)
-        except (PermanentHolodexError, TransientHolodexError) as exc:
-            log_event(
-                logger,
-                logging.ERROR,
-                "Error fetching videos for channel %s: %s",
-                channel_id,
-                exc,
-                channel_id=channel_id,
-                error_type=type(exc).__name__,
-            )
-            return []
-
-
-class HolodexGateway:
-    """Strict typed gateway used by workflows."""
-
-    def __init__(self, client: HolodexClient | None = None, **client_kwargs):
-        """Wrap a client, creating one when the caller does not provide it."""
-        self.client = client or HolodexClient(**client_kwargs)
-
-    async def close(self) -> None:
-        """Close the gateway's underlying HTTP client."""
-        await self.client.aclose()
-
-    async def get_channel(self, channel_id: str) -> HolodexChannel:
-        """Return a channel while preserving strict typed client failures."""
-        return await self.client.fetch_channel(channel_id)
-
-    async def get_video_topic(self, video_id: str) -> str | None:
-        """Return the latest Holodex topic for one video."""
-        return await self.client.get_video_topic(video_id)
-
-    async def get_channel_videos(
-        self, channel_id: str, limit: int = 1, offset: int = 0
-    ) -> list[HolodexVideo]:
-        """Return one page of validated past streams for a channel."""
-        return await self.client.fetch_channel_videos(channel_id, limit, offset)
-
-    async def get_channel_videos_since(
-        self, channel_id: str, since: datetime, *, page_size: int = 50
-    ) -> list[HolodexVideo]:
-        """Return all validated past streams newer than a UTC lower bound."""
-        return await self.client.fetch_channel_videos_since(
-            channel_id, since, page_size=page_size
-        )
 
 
 def _retry_delay(response: httpx.Response, attempt: int) -> float:

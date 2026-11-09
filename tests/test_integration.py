@@ -22,7 +22,6 @@ from vsummary.cogs.manualsummary.manualsummary import ManualSummary
 from vsummary.cogs.misc.ping import Ping
 from vsummary.cogs.summarizer.summarizer import Summarizer
 from vsummary.model.channel import (
-    AutoSummaryTopicPolicy,
     JobStatus,
     ManualSummaryOperation,
     SummaryJob,
@@ -33,6 +32,8 @@ from vsummary.util.holodex import (
     ChannelNotFoundError,
     HolodexChannel,
     HolodexVideo,
+    PermanentHolodexError,
+    TransientHolodexError,
 )
 from vsummary.util.summarizer import (
     InvalidSummaryResponse,
@@ -163,6 +164,10 @@ class FakeVideoRecord:
 
 
 class FakeSummaryJob:
+    source = "youtube"
+    failure_notice = False
+    id = None
+    youtube_audio_fallback = False
     video_id = QueryField()
     channel_id = QueryField()
     status = QueryField()
@@ -262,7 +267,16 @@ class FakeFollowedChannel:
 
 def make_autosummary(bot=None):
     cog = Autosummary.__new__(Autosummary)
-    cog.bot = bot or SimpleNamespace(notebook_client=object())
+    cog.settings = None
+    cog.summary_service = SimpleNamespace(summarize=AsyncMock())
+    cog.notebook = None
+    cog.bot = bot or SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+    )
     cog.holodex = AsyncMock()
     cog.holodex.get_video_topic = AsyncMock(return_value=None)
     cog.notebook = cog.bot.notebook_client
@@ -512,13 +526,18 @@ async def test_workers_do_not_retry_or_download_audio_for_status_3(operation, st
             )
         ]
     )
-    bot = SimpleNamespace(notebook_client=client, video_work=VideoWorkCoordinator())
+    bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        notebook_client=client,
+        video_work=VideoWorkCoordinator(),
+    )
     config = RuntimeConfig(source_retry_limit=1, youtube_yt_dlp_fallback_enabled=True)
     if operation == "automatic":
         cog = make_autosummary(bot)
         cog.summary_service = NotebookLMSummaryService(client, config=config)
         cog._save_item = AsyncMock(return_value=True)
-        cog._post_failure = AsyncMock()
         job = FakeSummaryJob(
             video_id=VIDEO_ID,
             channel_id="UC1",
@@ -542,9 +561,9 @@ async def test_workers_do_not_retry_or_download_audio_for_status_3(operation, st
         assert not await cog._generate_for_job(job)
     else:
         await cog._generate(job)
-    assert job.status is JobStatus.FAILED
+    assert job.status is JobStatus.READY_TO_DELIVER
     assert job.retry_count == 1
-    assert not getattr(job, "youtube_audio_fallback", False)
+    assert not job.youtube_audio_fallback
     assert len(client.prompts) == phase_index + 1
     assert client.deleted == ["notebook-1"]
     if stage == "topic_detail":
@@ -619,7 +638,13 @@ async def test_workers_preserve_retry_policy_for_topic_review(
             cleaned.append(ref)
 
     monkeypatch.setattr(summarizer_util, "download_generic_audio", fake_download)
-    bot = SimpleNamespace(notebook_client=client, video_work=VideoWorkCoordinator())
+    bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        notebook_client=client,
+        video_work=VideoWorkCoordinator(),
+    )
     config = RuntimeConfig(
         youtube_yt_dlp_fallback_enabled=True, output_language="Japanese"
     )
@@ -627,7 +652,6 @@ async def test_workers_preserve_retry_policy_for_topic_review(
         cog = make_autosummary(bot)
         cog.summary_service = NotebookLMSummaryService(client, config=config)
         cog._save_item = AsyncMock(return_value=True)
-        cog._post_failure = AsyncMock()
         job = FakeSummaryJob(
             video_id=VIDEO_ID,
             channel_id="UC1",
@@ -658,11 +682,7 @@ async def test_workers_preserve_retry_policy_for_topic_review(
         await cog._generate(job)
 
     if outcome == "recovered":
-        assert job.status is (
-            JobStatus.READY_TO_DELIVER
-            if operation == "automatic"
-            else JobStatus.DELIVERING
-        )
+        assert job.status is JobStatus.READY_TO_DELIVER
         assert job.retry_count == 0
         assert [topic.name for topic in FakeVideoRecord.records[0].topics] == [
             "Audience questions"
@@ -685,7 +705,7 @@ async def test_workers_preserve_retry_policy_for_topic_review(
             assert job.next_attempt_at > datetime.now(UTC)
             assert len(client.prompts) == 4
         else:
-            assert job.status is JobStatus.FAILED
+            assert job.status is JobStatus.READY_TO_DELIVER
             assert job.retry_count == config.source_retry_limit + 1
             assert len(client.prompts) == 2
     notebook_ids = [notebook.id for notebook in client.created]
@@ -837,6 +857,9 @@ async def test_current_language_applies_to_generation_but_not_saved_delivery(aut
 
     def make_worker(language):
         bot = SimpleNamespace(
+            fetch_channel=None,
+            message_rate_limiter=None,
+            settings=None,
             notebook_client=client,
             video_work=VideoWorkCoordinator(),
             get_channel=lambda _: target,
@@ -1271,7 +1294,14 @@ async def test_deletecache_normalizes_direct_references_without_availability_che
         summarizer_module, "delete_cached_summary", delete, raising=False
     )
     monkeypatch.setattr(summarizer_module, "resolve_parsed_x_space", resolver)
-    bot = SimpleNamespace(notebook_client=FakeNotebookClient(), get_cog=AsyncMock())
+    bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=FakeNotebookClient(),
+        get_cog=AsyncMock(),
+    )
     interaction = FakeInteraction()
 
     await Summarizer.deletecache.callback(Summarizer(bot), interaction, video)
@@ -1305,7 +1335,12 @@ async def test_deletecache_reports_count_or_missing_cache_through_rate_limiter(
         return await sender(content, **kwargs)
 
     limiter = SimpleNamespace(send=AsyncMock(side_effect=send))
-    bot = SimpleNamespace(message_rate_limiter=limiter)
+    bot = SimpleNamespace(
+        fetch_channel=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        message_rate_limiter=limiter,
+    )
     interaction = FakeInteraction()
     await Summarizer.deletecache.callback(Summarizer(bot), interaction, VIDEO_ID)
 
@@ -1343,7 +1378,13 @@ async def test_deletecache_resolves_x_posts_using_existing_media_fallback(
     parser = Mock(wraps=summarizer_module.parse_x_space_input)
     monkeypatch.setattr(summarizer_module, "parse_x_space_input", parser)
     await Summarizer.deletecache.callback(
-        Summarizer(SimpleNamespace()), FakeInteraction(), value
+        Summarizer(
+            SimpleNamespace(
+                video_work=VideoWorkCoordinator(), message_rate_limiter=None
+            )
+        ),
+        FakeInteraction(),
+        value,
     )
     parser.assert_called_once()
 
@@ -1370,7 +1411,11 @@ async def test_deletecache_requests_direct_space_url_when_post_cannot_be_resolve
     interaction = FakeInteraction()
 
     await Summarizer.deletecache.callback(
-        Summarizer(SimpleNamespace()),
+        Summarizer(
+            SimpleNamespace(
+                video_work=VideoWorkCoordinator(), message_rate_limiter=None
+            )
+        ),
         interaction,
         "https://x.com/example/status/1234567890123456789",
     )
@@ -1401,7 +1446,13 @@ async def test_deletecache_rejects_invalid_references_without_deleting(
     interaction = FakeInteraction()
 
     await Summarizer.deletecache.callback(
-        Summarizer(SimpleNamespace()), interaction, video
+        Summarizer(
+            SimpleNamespace(
+                video_work=VideoWorkCoordinator(), message_rate_limiter=None
+            )
+        ),
+        interaction,
+        video,
     )
 
     delete.assert_not_awaited()
@@ -1416,7 +1467,12 @@ async def test_deletecache_reports_database_failure_and_releases_lock(
     fake_cache_collection.delete_many.side_effect = OperationFailure(
         "database unavailable"
     )
-    bot = SimpleNamespace(video_work=VideoWorkCoordinator())
+    bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+    )
     interaction = FakeInteraction()
 
     await Summarizer.deletecache.callback(Summarizer(bot), interaction, VIDEO_ID)
@@ -1425,7 +1481,6 @@ async def test_deletecache_reports_database_failure_and_releases_lock(
         ("Could not delete the cached summary. Please try again.", {"ephemeral": True})
     ]
     assert "Could not delete cached summary" in caplog.text
-    assert bot.video_work.tracked_video_count == 0
     async with asyncio.timeout(0.1):
         async with bot.video_work.for_video(VIDEO_REF):
             pass
@@ -1450,6 +1505,9 @@ async def test_deletecache_waits_for_generation_and_preserves_jobs_and_delivery(
     monkeypatch.setattr(client.chat, "ask", blocked_ask)
     target = FakeChannelTarget()
     bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
         notebook_client=client,
         video_work=VideoWorkCoordinator(),
         get_channel=lambda _: target,
@@ -1492,7 +1550,6 @@ async def test_deletecache_waits_for_generation_and_preserves_jobs_and_delivery(
     assert queued_job.model_dump() == queued_before
     assert target.messages == []
     assert len(client.prompts) == 3
-    assert bot.video_work.tracked_video_count == 0
 
     assert await automatic._deliver_for_job(job)
     assert job.status is JobStatus.COMPLETED
@@ -1508,6 +1565,10 @@ async def test_deletecache_waits_for_generation_and_preserves_jobs_and_delivery(
 async def test_topics_command_queues_youtube_topics_without_a_picker():
     manual_summary = SimpleNamespace(enqueue=AsyncMock())
     bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
         notebook_client=object(),
         get_cog=lambda name: manual_summary if name == "ManualSummary" else None,
     )
@@ -1531,7 +1592,15 @@ async def test_topics_command_queues_youtube_topics_without_a_picker():
 
 @pytest.mark.asyncio
 async def test_topics_command_reports_invalid_video_input():
-    cog = Summarizer(SimpleNamespace(notebook_client=object()))
+    cog = Summarizer(
+        SimpleNamespace(
+            fetch_channel=None,
+            message_rate_limiter=None,
+            settings=None,
+            video_work=VideoWorkCoordinator(),
+            notebook_client=object(),
+        )
+    )
     interaction = FakeInteraction()
 
     await Summarizer.topics.callback(cog, interaction, "not-a-url")
@@ -1545,7 +1614,9 @@ async def test_topics_command_reports_invalid_video_input():
 @pytest.mark.asyncio
 async def test_topics_command_queues_generic_media_url():
     manual_summary = SimpleNamespace(enqueue=AsyncMock())
-    cog = Summarizer(SimpleNamespace(get_cog=lambda _: manual_summary))
+    cog = Summarizer(
+        SimpleNamespace(message_rate_limiter=None, get_cog=lambda _: manual_summary)
+    )
     interaction = FakeInteraction()
 
     await Summarizer.topics.callback(cog, interaction, "https://vimeo.com/123")
@@ -1567,7 +1638,9 @@ async def test_detail_reports_generic_media_preflight_failure():
             side_effect=GenericMediaError("Could not resolve the media host.")
         )
     )
-    cog = Summarizer(SimpleNamespace(get_cog=lambda _: manual_summary))
+    cog = Summarizer(
+        SimpleNamespace(message_rate_limiter=None, get_cog=lambda _: manual_summary)
+    )
     interaction = FakeInteraction()
 
     await Summarizer.detail.callback(cog, interaction, "https://vimeo.com/123", 1)
@@ -1580,7 +1653,9 @@ async def test_x_post_without_space_falls_back_to_generic_media(monkeypatch):
     from vsummary.util.x_space import XPostWithoutSpaceError
 
     manual_summary = SimpleNamespace(enqueue=AsyncMock())
-    cog = Summarizer(SimpleNamespace(get_cog=lambda _: manual_summary))
+    cog = Summarizer(
+        SimpleNamespace(message_rate_limiter=None, get_cog=lambda _: manual_summary)
+    )
     interaction = FakeInteraction()
     monkeypatch.setattr(
         summarizer_module,
@@ -1613,6 +1688,10 @@ async def test_topics_command_resolves_an_archived_x_space_before_enqueueing(
 ):
     manual_summary = SimpleNamespace(enqueue=AsyncMock())
     bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
         notebook_client=object(),
         get_cog=lambda name: manual_summary if name == "ManualSummary" else None,
     )
@@ -1643,6 +1722,10 @@ async def test_detail_command_reports_unarchived_x_space_without_queueing(monkey
     manual_summary = SimpleNamespace(enqueue=AsyncMock())
     cog = Summarizer(
         SimpleNamespace(
+            fetch_channel=None,
+            message_rate_limiter=None,
+            settings=None,
+            video_work=VideoWorkCoordinator(),
             notebook_client=object(),
             get_cog=lambda name: manual_summary if name == "ManualSummary" else None,
         )
@@ -1719,7 +1802,14 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
     monkeypatch.setattr(summarizer_module, "SummaryJob", auto_jobs)
     interaction = FakeInteraction()
 
-    await Summarizer.queue.callback(Summarizer(SimpleNamespace()), interaction)
+    await Summarizer.queue.callback(
+        Summarizer(
+            SimpleNamespace(
+                video_work=VideoWorkCoordinator(), message_rate_limiter=None
+            )
+        ),
+        interaction,
+    )
 
     assert interaction.response.deferred == [{"thinking": True}]
     assert interaction.followup.messages == [
@@ -1807,6 +1897,10 @@ async def test_detail_command_queues_youtube_summary_for_durable_delivery():
     manual_summary = SimpleNamespace(enqueue=AsyncMock())
     cog = Summarizer(
         SimpleNamespace(
+            fetch_channel=None,
+            message_rate_limiter=None,
+            settings=None,
+            video_work=VideoWorkCoordinator(),
             notebook_client=object(),
             get_cog=lambda name: manual_summary if name == "ManualSummary" else None,
         )
@@ -1849,6 +1943,10 @@ async def test_detail_command_reports_unsupported_source_without_queueing():
     manual_summary = SimpleNamespace(enqueue=AsyncMock())
     cog = Summarizer(
         SimpleNamespace(
+            fetch_channel=None,
+            message_rate_limiter=None,
+            settings=None,
+            video_work=VideoWorkCoordinator(),
             notebook_client=object(),
             get_cog=lambda name: manual_summary if name == "ManualSummary" else None,
         )
@@ -1865,7 +1963,13 @@ async def test_detail_command_reports_unsupported_source_without_queueing():
 
 @pytest.mark.asyncio
 async def test_manual_detail_job_preserves_invalid_topic_index_response(monkeypatch):
-    bot = SimpleNamespace(notebook_client=object(), video_work=VideoWorkCoordinator())
+    bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        notebook_client=object(),
+        video_work=VideoWorkCoordinator(),
+    )
     manual_detail = make_manual_summary(bot)
     job = make_manual_detail_job(topic_index=3)
     monkeypatch.setattr(
@@ -1874,9 +1978,13 @@ async def test_manual_detail_job_preserves_invalid_topic_index_response(monkeypa
         AsyncMock(side_effect=IndexError),
     )
 
+    monkeypatch.setattr(
+        manualsummary_module, "get_video_metadata", AsyncMock(return_value=None)
+    )
+
     await manual_detail._generate(job)
 
-    assert job.status is JobStatus.DELIVERING
+    assert job.status is JobStatus.READY_TO_DELIVER
     assert job.delivery_chunks == ["Invalid topic index: 4"]
 
 
@@ -1904,6 +2012,9 @@ async def test_manual_detail_waits_for_auto_summary_and_reuses_cached_details(
 
     client = BlockingNotebookClient()
     bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
         notebook_client=client,
         video_work=VideoWorkCoordinator(),
     )
@@ -1938,7 +2049,7 @@ async def test_manual_detail_waits_for_auto_summary_and_reuses_cached_details(
     assert await automatic_task
     await detail_task
 
-    assert job.status is JobStatus.DELIVERING
+    assert job.status is JobStatus.READY_TO_DELIVER
     assert job.delivery_chunks == [
         (
             "**Video:** A stream\n**Channel:** Test Channel\n\n"
@@ -1960,6 +2071,9 @@ async def test_auto_summary_waits_for_an_earlier_manual_detail_job(monkeypatch):
         return {"topic_name": "Introduction", "detail": "Details"}
 
     bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
         notebook_client=object(),
         video_work=VideoWorkCoordinator(),
     )
@@ -1978,6 +2092,10 @@ async def test_auto_summary_waits_for_an_earlier_manual_detail_job(monkeypatch):
         next_attempt_at=datetime.now(UTC),
     )
     monkeypatch.setattr(manualsummary_module, "get_topic_details", blocked_detail)
+
+    monkeypatch.setattr(
+        manualsummary_module, "get_video_metadata", AsyncMock(return_value=None)
+    )
 
     detail_task = asyncio.create_task(manual_detail._generate(job))
     await detail_started.wait()
@@ -2005,6 +2123,9 @@ async def test_notebooklm_error_in_manual_detail_releases_work_for_auto_summary(
         raise SourceAddError("no transcript")
 
     bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
         notebook_client=object(),
         video_work=VideoWorkCoordinator(),
     )
@@ -2023,6 +2144,10 @@ async def test_notebooklm_error_in_manual_detail_releases_work_for_auto_summary(
         next_attempt_at=datetime.now(UTC),
     )
     monkeypatch.setattr(manualsummary_module, "get_topic_details", failing_detail)
+
+    monkeypatch.setattr(
+        manualsummary_module, "get_video_metadata", AsyncMock(return_value=None)
+    )
 
     detail_task = asyncio.create_task(manual_detail._generate(job))
     await detail_started.wait()
@@ -2056,6 +2181,7 @@ async def test_bot_setup_loads_all_cogs_and_syncs_commands(monkeypatch):
         "vsummary.cogs.autosummary.autosummary",
     ]
     sync.assert_awaited_once_with()
+    await bot.close()
 
 
 @pytest.mark.asyncio
@@ -2069,13 +2195,16 @@ async def test_ping_command_reports_latency_in_milliseconds():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [TransientHolodexError, PermanentHolodexError])
 async def test_autosummary_add_channel_handles_success_duplicate_and_api_errors(
     monkeypatch,
+    caplog,
+    error_type,
 ):
     channel = HolodexChannel(id="UC123", name="Test Channel")
     cog = make_autosummary()
     interaction = FakeInteraction()
-    cog.holodex.get_channel = AsyncMock(return_value=channel)
+    cog.holodex.fetch_channel = AsyncMock(return_value=channel)
     FakeFollowedChannel.find_one_result = None
 
     await Autosummary.addchannel.callback(cog, interaction, "UC123")
@@ -2097,7 +2226,7 @@ async def test_autosummary_add_channel_handles_success_duplicate_and_api_errors(
     ]
 
     not_found_interaction = FakeInteraction()
-    cog.holodex.get_channel = AsyncMock(side_effect=ChannelNotFoundError())
+    cog.holodex.fetch_channel = AsyncMock(side_effect=ChannelNotFoundError())
 
     await Autosummary.addchannel.callback(cog, not_found_interaction, "missing")
 
@@ -2106,13 +2235,16 @@ async def test_autosummary_add_channel_handles_success_duplicate_and_api_errors(
     ]
 
     error_interaction = FakeInteraction()
-    cog.holodex.get_channel = AsyncMock(return_value=None)
+    cog.holodex.fetch_channel = AsyncMock(side_effect=error_type("lookup failed"))
 
     await Autosummary.addchannel.callback(cog, error_interaction, "broken")
 
     assert error_interaction.followup.messages == [
         ("An error occurred while fetching channel 'broken' from Holodex.", {})
     ]
+
+    assert "Error fetching channel broken: lookup failed" in caplog.messages
+    cog.holodex.fetch_channel.assert_awaited_once_with("broken")
 
 
 @pytest.mark.asyncio
@@ -2126,7 +2258,11 @@ async def test_autosummary_remove_channel_deletes_pending_videos_and_handles_mis
 
     assert followed.deleted is True
     assert FakeSummaryJob.deleted_queries == [
-        {"job_type": "auto", "channel_id": "UC123"}
+        {
+            "job_type": "auto",
+            "channel_id": "UC123",
+            "status": {"$in": ["queued", "ready_to_deliver"]},
+        }
     ]
     assert interaction.followup.messages == [
         ("Removed channel 'UC123' and its pending videos.", {})
@@ -2183,14 +2319,17 @@ async def test_autosummary_list_channels_splits_messages_at_discord_limit():
 @pytest.mark.asyncio
 async def test_autosummary_poll_and_process_loops_delegate_each_due_item():
     cog = make_autosummary()
-    FakeFollowedChannel.records = [FakeFollowedChannel("UC1", "First")]
+    channel = FakeFollowedChannel("UC1", "First")
+    FakeFollowedChannel.records = [channel]
     videos = [HolodexVideo("video", "Title", None, datetime.now(UTC), "First")]
-    cog.holodex.get_channel_videos = AsyncMock(return_value=videos)
+    cog.holodex.fetch_channel_videos_since = AsyncMock(return_value=videos)
     cog._enqueue_new_video = AsyncMock()
 
     await cog.check_new_videos()
 
-    cog.holodex.get_channel_videos.assert_awaited_once_with("UC1")
+    cog.holodex.fetch_channel_videos_since.assert_awaited_once_with(
+        "UC1", channel.added_at, page_size=50
+    )
     cog._enqueue_new_video.assert_awaited_once_with(
         videos[0], FakeFollowedChannel.records[0]
     )
@@ -2206,6 +2345,7 @@ async def test_autosummary_poll_and_process_loops_delegate_each_due_item():
     FakeSummaryJob.records = [due_item]
     cog._claim_due_jobs = AsyncMock(return_value=[due_item])
     cog._process_pending_video = AsyncMock()
+    cog._get_auto_summary_channel = AsyncMock(return_value=object())
 
     await cog.process_due_videos()
 
@@ -2219,14 +2359,14 @@ async def test_autosummary_poll_continues_after_one_channel_fails():
     second = FakeFollowedChannel("UC2", "Second")
     FakeFollowedChannel.records = [first, second]
     video = HolodexVideo("video", "Title", None, datetime.now(UTC), "Second")
-    cog.holodex.get_channel_videos = AsyncMock(
+    cog.holodex.fetch_channel_videos_since = AsyncMock(
         side_effect=[RuntimeError("Holodex unavailable"), [video]]
     )
     cog._enqueue_new_video = AsyncMock()
 
     await cog.check_new_videos()
 
-    assert cog.holodex.get_channel_videos.await_count == 2
+    assert cog.holodex.fetch_channel_videos_since.await_count == 2
     cog._enqueue_new_video.assert_awaited_once_with(video, second)
 
 
@@ -2234,6 +2374,9 @@ async def test_autosummary_poll_continues_after_one_channel_fails():
 async def test_poll_loop_waits_for_discord_ready_before_first_run():
     bot = SimpleNamespace(wait_until_ready=AsyncMock())
     cog = Autosummary.__new__(Autosummary)
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
     cog.bot = bot
 
     await cog.before_poll_loop()
@@ -2242,15 +2385,60 @@ async def test_poll_loop_waits_for_discord_ready_before_first_run():
 
 
 def test_autosummary_poll_interval_comes_from_settings():
-    bot = SimpleNamespace(notebook_client=None)
     settings = Settings(
         discord_token="token",
         mongodb_uri="mongodb://localhost",
         poll_interval_minutes=7,
     )
-    cog = Autosummary(bot, holodex=object(), settings=settings, start_polling=False)
+    bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+        settings=settings,
+        holodex=SimpleNamespace(aclose=AsyncMock()),
+        summary_service=object(),
+    )
+    cog = Autosummary(bot, start_polling=False)
+
+    assert cog.settings is bot.settings
+    assert cog.holodex is bot.holodex
+    assert cog.summary_service is bot.summary_service
 
     assert cog.poll_loop.minutes == 7
+
+
+@pytest.mark.asyncio
+async def test_autosummary_leaves_shared_holodex_open_on_unload():
+    bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+        settings=None,
+        holodex=SimpleNamespace(aclose=AsyncMock()),
+        summary_service=object(),
+    )
+    cog = Autosummary(bot, start_polling=False)
+
+    cog.cog_unload()
+    await cog.close()
+
+    bot.holodex.aclose.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bot_creates_shared_services_and_closes_holodex():
+    bot = Bot(notebook_client=object())
+    holodex = bot.holodex
+    try:
+        assert holodex is not None
+        assert bot.summary_service.client is bot.notebook_client
+        assert bot.summary_service.config is not None
+    finally:
+        await bot.close()
+    assert holodex._client.is_closed
+    assert bot.holodex is None
 
 
 def test_manual_poll_and_lease_interval_come_from_config():
@@ -2318,7 +2506,7 @@ async def test_autosummary_poll_only_enqueues_videos_released_after_channel_was_
         ),
         HolodexVideo("after", "After", None, added_at + timedelta(seconds=1), "First"),
     ]
-    cog.holodex.get_channel_videos = AsyncMock(return_value=videos)
+    cog.holodex.fetch_channel_videos_since = AsyncMock(return_value=videos)
     cog._enqueue_new_video = AsyncMock()
 
     await cog.check_new_videos()
@@ -2331,18 +2519,7 @@ async def test_autosummary_enqueue_skips_ignored_and_duplicate_videos(monkeypatc
     cog = make_autosummary()
     channel = FakeFollowedChannel("UC1", "Test")
     monkeypatch.setattr(
-        autosummary_module,
-        "get_auto_summary_topic_policies",
-        AsyncMock(
-            return_value=[
-                AutoSummaryTopicPolicy.model_construct(
-                    topic_id="shorts",
-                    topic_key="shorts",
-                    ignored=True,
-                    effective_at=datetime(1970, 1, 1, tzinfo=UTC),
-                )
-            ]
-        ),
+        autosummary_module, "policy_ignores_video", AsyncMock(return_value=True)
     )
     ignored = HolodexVideo(
         id="ignored",
@@ -2386,24 +2563,7 @@ async def test_autosummary_only_enqueues_unignored_topic_videos_published_after_
     channel = FakeFollowedChannel("UC1", "Test")
     removed_at = datetime.now(UTC)
     monkeypatch.setattr(
-        autosummary_module,
-        "get_auto_summary_topic_policies",
-        AsyncMock(
-            return_value=[
-                AutoSummaryTopicPolicy.model_construct(
-                    topic_id="shorts",
-                    topic_key="shorts",
-                    ignored=True,
-                    effective_at=datetime(1970, 1, 1, tzinfo=UTC),
-                ),
-                AutoSummaryTopicPolicy.model_construct(
-                    topic_id="shorts",
-                    topic_key="shorts",
-                    ignored=False,
-                    effective_at=removed_at,
-                ),
-            ]
-        ),
+        autosummary_module, "policy_ignores_video", AsyncMock(side_effect=[True, False])
     )
     before_removal = HolodexVideo(
         "before", "Before", "shorts", removed_at - timedelta(seconds=1), "Test"
@@ -2492,6 +2652,10 @@ async def test_autosummary_enqueue_sets_ready_and_delayed_attempt_times(monkeypa
 async def test_autosummary_processes_success_and_posts_summary(monkeypatch):
     target = FakeChannelTarget()
     bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
         notebook_client=object(),
         get_channel=lambda channel_id: target if channel_id == 123 else None,
     )
@@ -2506,8 +2670,8 @@ async def test_autosummary_processes_success_and_posts_summary(monkeypatch):
     )
     cog.settings = RuntimeConfig(auto_summary_channel_id=123)
     monkeypatch.setattr(
-        autosummary_module,
-        "get_topic_details_all",
+        cog.summary_service,
+        "summarize",
         AsyncMock(
             return_value=[
                 {"topic_name": "Intro", "detail": "Details"},
@@ -2529,7 +2693,14 @@ async def test_autosummary_retries_then_marks_video_failed_and_posts_failure(
     monkeypatch,
 ):
     target = FakeChannelTarget()
-    bot = SimpleNamespace(notebook_client=object(), get_channel=lambda _: target)
+    bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+        get_channel=lambda _: target,
+    )
     cog = make_autosummary(bot)
     cog.settings = RuntimeConfig(auto_summary_channel_id=123)
 
@@ -2560,6 +2731,9 @@ async def test_autosummary_retries_then_marks_video_failed_and_posts_failure(
     )
     await cog._handle_source_error(failed_item)
 
+    assert failed_item.status is JobStatus.READY_TO_DELIVER
+    assert target.messages == []
+    await cog._deliver_for_job(failed_item)
     assert failed_item.status is JobStatus.FAILED
     assert len(target.messages) == 1
     assert "Failed to generate a summary after 5 attempts" in target.messages[0]
@@ -2570,7 +2744,14 @@ async def test_autosummary_channel_lookup_skips_missing_or_invalid_configuration
     monkeypatch,
 ):
     cog = make_autosummary(
-        SimpleNamespace(notebook_client=object(), get_channel=lambda _: None)
+        SimpleNamespace(
+            fetch_channel=None,
+            message_rate_limiter=None,
+            settings=None,
+            video_work=VideoWorkCoordinator(),
+            notebook_client=object(),
+            get_channel=lambda _: None,
+        )
     )
 
     monkeypatch.delenv("AUTO_SUMMARY_CHANNEL_ID", raising=False)
@@ -2708,3 +2889,24 @@ async def test_startup_initializes_workers_without_running_offline_migration(
     bot.start.assert_awaited_once_with("token")
     bot.close.assert_awaited_once()
     mongo_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("topics", [[], ["Art", "shorts"]])
+async def test_listignoredtopics_uses_current_ignored_topics(monkeypatch, topics):
+    cog = make_autosummary()
+    interaction = FakeInteraction()
+    get_topics = AsyncMock(return_value=topics)
+    monkeypatch.setattr(
+        autosummary_module, "get_ignored_auto_summary_topics", get_topics
+    )
+
+    await Autosummary.listignoredtopics.callback(cog, interaction)
+
+    get_topics.assert_awaited_once_with()
+    assert interaction.response.sent == (
+        "Ignored auto-summary topics:\n- `Art`\n- `shorts`"
+        if topics
+        else "No topics are ignored for automatic summaries."
+    )
+    assert interaction.response.sent_kwargs == {"ephemeral": True}

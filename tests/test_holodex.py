@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -6,7 +6,6 @@ import pytest
 from vsummary.util.holodex import (
     DEFAULT_IGNORED_TOPICS,
     HOLODEX_API_URL,
-    MAX_RETRIES,
     REFERER,
     USER_AGENT,
     ChannelNotFoundError,
@@ -14,23 +13,26 @@ from vsummary.util.holodex import (
     MalformedHolodexResponse,
     PermanentHolodexError,
     TransientHolodexError,
-    exponential_backoff_hours,
-    is_transcript_ready,
 )
 
 CHANNEL_ID = "UCQ0UDLQCjY0rmuxCDE38FGg"
 VIDEO_ID = "abcdefghijk"
 
 
-@pytest.mark.parametrize(
-    "retry_count, expected", [(1, 1), (2, 2), (3, 4), (4, 8), (5, 16)]
-)
-def test_exponential_backoff_hours(retry_count, expected):
-    assert exponential_backoff_hours(retry_count) == expected
+@pytest.fixture
+async def make_client():
+    clients = []
 
+    def create(**kwargs):
+        client = HolodexClient(**kwargs)
+        clients.append(client)
+        return client
 
-def test_max_retries_matches_documented_backoff_window():
-    assert exponential_backoff_hours(MAX_RETRIES) == 16
+    try:
+        yield create
+    finally:
+        for client in clients:
+            await client.aclose()
 
 
 @pytest.mark.parametrize(
@@ -45,24 +47,16 @@ def test_default_ignored_topics_exclude_other_topics(topic_id):
     assert topic_id not in DEFAULT_IGNORED_TOPICS
 
 
-def test_is_transcript_ready_after_two_hours():
-    assert is_transcript_ready(datetime.now(UTC) - timedelta(hours=3))
-
-
-def test_is_transcript_not_ready_within_two_hours():
-    assert not is_transcript_ready(datetime.now(UTC) - timedelta(hours=1))
-
-
 @pytest.mark.asyncio
-async def test_get_channel_parses_response_and_sends_browser_headers():
+async def test_fetch_channel_parses_response_and_sends_browser_headers(make_client):
     seen = {}
 
     async def handler(request):
         seen["request"] = request
         return httpx.Response(200, json={"id": CHANNEL_ID, "name": "Test Channel"})
 
-    async with HolodexClient(transport=httpx.MockTransport(handler)) as client:
-        channel = await client.get_channel(CHANNEL_ID)
+    client = make_client(transport=httpx.MockTransport(handler))
+    channel = await client.fetch_channel(CHANNEL_ID)
 
     assert channel.id == CHANNEL_ID
     assert channel.name == "Test Channel"
@@ -72,26 +66,27 @@ async def test_get_channel_parses_response_and_sends_browser_headers():
 
 
 @pytest.mark.asyncio
-async def test_get_channel_raises_for_not_found():
+async def test_fetch_channel_raises_for_not_found(make_client):
     async def handler(request):
         return httpx.Response(404)
 
-    async with HolodexClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(ChannelNotFoundError):
-            await client.get_channel(CHANNEL_ID)
+    client = make_client(transport=httpx.MockTransport(handler))
+    with pytest.raises(ChannelNotFoundError):
+        await client.fetch_channel(CHANNEL_ID)
 
 
 @pytest.mark.asyncio
-async def test_get_channel_returns_none_for_other_http_errors():
+async def test_fetch_channel_raises_for_other_http_errors(make_client):
     async def handler(request):
         return httpx.Response(500)
 
-    async with HolodexClient(transport=httpx.MockTransport(handler)) as client:
-        assert await client.get_channel(CHANNEL_ID) is None
+    client = make_client(transport=httpx.MockTransport(handler))
+    with pytest.raises(TransientHolodexError):
+        await client.fetch_channel(CHANNEL_ID)
 
 
 @pytest.mark.asyncio
-async def test_get_channel_videos_parses_items_and_query_parameters():
+async def test_fetch_channel_videos_parses_items_and_query_parameters(make_client):
     seen = {}
     available_at = "2026-08-09T12:30:00+00:00"
 
@@ -111,8 +106,8 @@ async def test_get_channel_videos_parses_items_and_query_parameters():
             ],
         )
 
-    async with HolodexClient(transport=httpx.MockTransport(handler)) as client:
-        videos = await client.get_channel_videos(CHANNEL_ID, limit=7)
+    client = make_client(transport=httpx.MockTransport(handler))
+    videos = await client.fetch_channel_videos(CHANNEL_ID, limit=7)
 
     assert len(videos) == 1
     assert videos[0].id == VIDEO_ID
@@ -130,39 +125,40 @@ async def test_get_channel_videos_parses_items_and_query_parameters():
 
 
 @pytest.mark.asyncio
-async def test_get_channel_videos_returns_empty_list_for_http_errors():
+async def test_fetch_channel_videos_raises_for_http_errors(make_client):
     async def handler(request):
         return httpx.Response(503)
 
-    async with HolodexClient(transport=httpx.MockTransport(handler)) as client:
-        assert await client.get_channel_videos(CHANNEL_ID) == []
+    client = make_client(transport=httpx.MockTransport(handler))
+    with pytest.raises(TransientHolodexError):
+        await client.fetch_channel_videos(CHANNEL_ID)
 
 
 @pytest.mark.asyncio
-async def test_get_video_topic_refreshes_one_video_from_holodex():
+async def test_get_video_topic_refreshes_one_video_from_holodex(make_client):
     seen = []
 
     async def handler(request):
         seen.append(request.url)
         return httpx.Response(200, json={"id": VIDEO_ID, "topic_id": "shorts"})
 
-    async with HolodexClient(transport=httpx.MockTransport(handler)) as client:
-        assert await client.get_video_topic(VIDEO_ID) == "shorts"
+    client = make_client(transport=httpx.MockTransport(handler))
+    assert await client.get_video_topic(VIDEO_ID) == "shorts"
 
     assert seen == [httpx.URL(f"{HOLODEX_API_URL}/videos/{VIDEO_ID}")]
 
 
 @pytest.mark.asyncio
-async def test_get_video_topic_allows_missing_topic():
+async def test_get_video_topic_allows_missing_topic(make_client):
     async def handler(request):
         return httpx.Response(200, json={"id": VIDEO_ID, "topic_id": None})
 
-    async with HolodexClient(transport=httpx.MockTransport(handler)) as client:
-        assert await client.get_video_topic(VIDEO_ID) is None
+    client = make_client(transport=httpx.MockTransport(handler))
+    assert await client.get_video_topic(VIDEO_ID) is None
 
 
 @pytest.mark.asyncio
-async def test_topic_lookup_makes_one_http_attempt_per_call():
+async def test_topic_lookup_makes_one_http_attempt_per_call(make_client):
     requests = []
 
     async def handler(request):
@@ -171,29 +167,25 @@ async def test_topic_lookup_makes_one_http_attempt_per_call():
             return httpx.Response(503)
         return httpx.Response(200, json={"id": VIDEO_ID, "topic_id": "shorts"})
 
-    async with HolodexClient(
-        transport=httpx.MockTransport(handler), retries=1
-    ) as client:
-        with pytest.raises(TransientHolodexError):
-            await client.get_video_topic(VIDEO_ID)
+    client = make_client(transport=httpx.MockTransport(handler), retries=1)
+    with pytest.raises(TransientHolodexError):
+        await client.get_video_topic(VIDEO_ID)
 
     assert len(requests) == 1
 
 
 @pytest.mark.asyncio
-async def test_strict_gateway_raises_typed_timeout_error():
+async def test_strict_gateway_raises_typed_timeout_error(make_client):
     async def handler(request):
         raise httpx.ReadTimeout("timed out")
 
-    async with HolodexClient(
-        transport=httpx.MockTransport(handler), retries=0
-    ) as client:
-        with pytest.raises(TransientHolodexError):
-            await client.fetch_channel(CHANNEL_ID)
+    client = make_client(transport=httpx.MockTransport(handler), retries=0)
+    with pytest.raises(TransientHolodexError):
+        await client.fetch_channel(CHANNEL_ID)
 
 
 @pytest.mark.asyncio
-async def test_strict_gateway_rejects_invalid_timestamps():
+async def test_strict_gateway_rejects_invalid_timestamps(make_client):
     async def handler(request):
         return httpx.Response(
             200,
@@ -207,15 +199,15 @@ async def test_strict_gateway_rejects_invalid_timestamps():
             ],
         )
 
-    async with HolodexClient(
-        transport=httpx.MockTransport(handler), retries=0
-    ) as client:
-        with pytest.raises(MalformedHolodexResponse):
-            await client.fetch_channel_videos(CHANNEL_ID)
+    client = make_client(transport=httpx.MockTransport(handler), retries=0)
+    with pytest.raises(MalformedHolodexResponse):
+        await client.fetch_channel_videos(CHANNEL_ID)
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_response_is_retried_using_retry_after_header(monkeypatch):
+async def test_rate_limit_response_is_retried_using_retry_after_header(
+    make_client, monkeypatch
+):
     attempts = 0
     sleeps = []
 
@@ -230,10 +222,8 @@ async def test_rate_limit_response_is_retried_using_retry_after_header(monkeypat
         sleeps.append(delay)
 
     monkeypatch.setattr("vsummary.util.holodex.asyncio.sleep", fake_sleep)
-    async with HolodexClient(
-        transport=httpx.MockTransport(handler), retries=1
-    ) as client:
-        channel = await client.fetch_channel(CHANNEL_ID)
+    client = make_client(transport=httpx.MockTransport(handler), retries=1)
+    channel = await client.fetch_channel(CHANNEL_ID)
 
     assert channel.id == CHANNEL_ID
     assert attempts == 2
@@ -241,7 +231,7 @@ async def test_rate_limit_response_is_retried_using_retry_after_header(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_pagination_collects_all_videos_newer_than_followed_at():
+async def test_pagination_collects_all_videos_newer_than_followed_at(make_client):
     seen_offsets = []
     since = datetime(2026, 8, 9, 10, tzinfo=UTC)
 
@@ -263,20 +253,18 @@ async def test_pagination_collects_all_videos_newer_than_followed_at():
         }
         return httpx.Response(200, json=pages[offset])
 
-    async with HolodexClient(transport=httpx.MockTransport(handler)) as client:
-        videos = await client.fetch_channel_videos_since(CHANNEL_ID, since, page_size=2)
+    client = make_client(transport=httpx.MockTransport(handler))
+    videos = await client.fetch_channel_videos_since(CHANNEL_ID, since, page_size=2)
 
     assert [video.id for video in videos] == ["newest", "newer", "new"]
     assert seen_offsets == [0, 2]
 
 
 @pytest.mark.asyncio
-async def test_non_retryable_client_error_is_permanent():
+async def test_non_retryable_client_error_is_permanent(make_client):
     async def handler(request):
         return httpx.Response(400)
 
-    async with HolodexClient(
-        transport=httpx.MockTransport(handler), retries=1
-    ) as client:
-        with pytest.raises(PermanentHolodexError, match="HTTP 400"):
-            await client.fetch_channel(CHANNEL_ID)
+    client = make_client(transport=httpx.MockTransport(handler), retries=1)
+    with pytest.raises(PermanentHolodexError, match="HTTP 400"):
+        await client.fetch_channel(CHANNEL_ID)

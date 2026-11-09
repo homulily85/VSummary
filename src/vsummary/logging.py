@@ -10,13 +10,16 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.logging import RichHandler
 
 from vsummary.settings import DEFAULT_CONFIG, Settings, runtime_config
 from vsummary.util.discord import send_limited
 from vsummary.util.video import UnsupportedVideoSource, VideoRef, build_video_url
+
+if TYPE_CHECKING:
+    from vsummary.bot import Bot
 
 DISCORD_MESSAGE_LIMIT = 2_000
 _HANDLER_MARKER = "_vsummary_logging_handler"
@@ -82,7 +85,7 @@ class DiscordLogHandler(logging.Handler):
             return
         self._enqueue(message)
 
-    async def start(self, bot: Any) -> None:
+    async def start(self, bot: Bot) -> None:
         """Resolve the configured channel and start delivery after Discord is ready."""
         if self.disabled or self._task is not None:
             return
@@ -92,7 +95,7 @@ class DiscordLogHandler(logging.Handler):
             self._disable(f"could not resolve channel {self.channel_id}: {exc}")
             return
         if channel is None:
-            fetch_channel = getattr(bot, "fetch_channel", None)
+            fetch_channel = bot.fetch_channel
             if fetch_channel is not None:
                 try:
                     channel = await fetch_channel(self.channel_id)
@@ -119,11 +122,6 @@ class DiscordLogHandler(logging.Handler):
                 pass
         self._channel = None
         self._bot = None
-
-    async def drain(self) -> None:
-        """Wait until messages currently queued for a live sink have been sent."""
-        if not self.disabled and self._task is not None:
-            await self.queue.join()
 
     def format_record(self, record: logging.LogRecord) -> str:
         """Render UTC and viewer-local timestamps, a video link, and a concise error."""

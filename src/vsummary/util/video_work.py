@@ -1,5 +1,7 @@
 """In-memory coordination for cache work belonging to one video."""
 
+from __future__ import annotations
+
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -26,11 +28,6 @@ class VideoWorkCoordinator:
         """Initialize an empty registry of per-video locks."""
         self._states: dict[tuple[str, str], _VideoWorkState] = {}
 
-    @property
-    def tracked_video_count(self) -> int:
-        """Number of videos that currently have active or waiting work."""
-        return len(self._states)
-
     @asynccontextmanager
     async def for_video(self, ref: VideoRef):
         """Acquire exclusive work access for ``ref`` until the context exits."""
@@ -52,12 +49,3 @@ class VideoWorkCoordinator:
             state.users -= 1
             if state.users == 0 and self._states.get(key) is state:
                 del self._states[key]
-
-
-def get_video_work_coordinator(bot) -> VideoWorkCoordinator:
-    """Return the coordinator shared by a bot, including lightweight test bots."""
-    coordinator = getattr(bot, "video_work", None)
-    if coordinator is None:
-        coordinator = VideoWorkCoordinator()
-        bot.video_work = coordinator
-    return coordinator

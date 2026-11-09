@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
-from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from discord.ext import commands, tasks
-from pymongo import ReturnDocument
 
 from vsummary.model.channel import JobStatus, ManualSummaryOperation, SummaryJob
+from vsummary.services.summary_jobs import SummaryJobService
+from vsummary.services.summary_retry import delivery_failure, source_failure
 from vsummary.settings import RuntimeConfig, Settings, runtime_config
 from vsummary.util.discord import send_limited, split_message
 from vsummary.util.generic_media import (
@@ -34,8 +34,10 @@ from vsummary.util.video_metadata import (
     VideoMetadataError,
     get_video_metadata,
 )
-from vsummary.util.video_work import get_video_work_coordinator
 from vsummary.util.x_space import XSpaceAudioError, XSpaceAudioUnavailableError
+
+if TYPE_CHECKING:
+    from vsummary.bot import Bot
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +46,11 @@ class ManualSummary(commands.Cog):
     """Run manual video requests independently of expiring Discord interactions."""
 
     def __init__(
-        self, bot, *, settings: Settings | None = None, start_worker: bool = True
+        self, bot: Bot, *, settings: Settings | None = None, start_worker: bool = True
     ):
         """Bind shared services and optionally begin the configured worker loop."""
         self.bot = bot
-        self.settings = settings or getattr(bot, "settings", None)
+        self.settings = settings if settings is not None else bot.settings
         self.worker_id = uuid.uuid4().hex
         self.worker_loop.change_interval(
             seconds=self.config.manual_poll_interval_seconds
@@ -57,9 +59,14 @@ class ManualSummary(commands.Cog):
             self.worker_loop.start()
 
     @property
+    def jobs(self):
+        """Bind shared job mechanics to this worker's current settings."""
+        return SummaryJobService("manual", self.worker_id, self.config, logger)
+
+    @property
     def config(self) -> RuntimeConfig:
         """Return injected operational settings or the centralized defaults."""
-        return runtime_config(getattr(self, "settings", None))
+        return runtime_config(self.settings)
 
     def _lease_duration(self) -> timedelta:
         return timedelta(seconds=self.config.job_lease_seconds)
@@ -90,7 +97,7 @@ class ManualSummary(commands.Cog):
         channel_id: int,
         requester_id: int,
         topic_index: int | None = None,
-    ):
+    ) -> SummaryJob:
         """Persist a new manual job with optional source metadata for delivery."""
         metadata = (
             await inspect_generic_media(ref)
@@ -125,101 +132,24 @@ class ManualSummary(commands.Cog):
                 )
 
     async def _claim_due_jobs(self):
-        """Atomically claim scheduled jobs and expired generation or delivery leases."""
-        now = datetime.now(UTC)
-        claimed = []
-        collection = SummaryJob.get_pymongo_collection()
-        for query, status in (
-            (
-                {"status": JobStatus.QUEUED.value, "next_attempt_at": {"$lte": now}},
-                JobStatus.GENERATING,
-            ),
-            (
-                {
-                    "status": JobStatus.READY_TO_DELIVER.value,
-                    "next_attempt_at": {"$lte": now},
-                },
-                JobStatus.DELIVERING,
-            ),
-            (
-                {
-                    "status": JobStatus.GENERATING.value,
-                    "lease_expires_at": {"$lte": now},
-                },
-                JobStatus.GENERATING,
-            ),
-            (
-                {
-                    "status": JobStatus.DELIVERING.value,
-                    "lease_expires_at": {"$lte": now},
-                },
-                JobStatus.DELIVERING,
-            ),
-        ):
-            query["job_type"] = "manual"
-            while record := await collection.find_one_and_update(
-                query,
-                {
-                    "$set": {
-                        "status": status.value,
-                        "claimed_by": self.worker_id,
-                        "claimed_at": now,
-                        "lease_expires_at": now + self._lease_duration(),
-                    }
-                },
-                return_document=ReturnDocument.AFTER,
-            ):
-                claimed.append(SummaryJob.model_validate(record))
-        return claimed
+        return await self.jobs.claim_due_jobs()
 
     async def _process(self, job):
-        """Advance a claimed job through its generation and delivery phase."""
-        if job.status == JobStatus.GENERATING:
-            async with self._renew_generation_lease(job):
+        async with self.jobs.maintain_lease(job):
+            if job.status == JobStatus.GENERATING:
                 await self._generate(job)
-        if job.status == JobStatus.DELIVERING and job.claimed_by == self.worker_id:
-            await self._deliver(job)
+            if (
+                job.status in {JobStatus.READY_TO_DELIVER, JobStatus.DELIVERING}
+                and job.claimed_by == self.worker_id
+            ):
+                await self._deliver(job)
 
-    @asynccontextmanager
-    async def _renew_generation_lease(self, job):
-        """Keep a long download from being claimed by another worker."""
-
-        async def renew():
-            while True:
-                await asyncio.sleep(self._lease_duration().total_seconds() / 3)
-                try:
-                    await SummaryJob.get_pymongo_collection().update_one(
-                        {
-                            "_id": job.id,
-                            "job_type": "manual",
-                            "claimed_by": self.worker_id,
-                        },
-                        {
-                            "$set": {
-                                "lease_expires_at": datetime.now(UTC)
-                                + self._lease_duration()
-                            }
-                        },
-                    )
-                except Exception:
-                    logger.exception("Could not renew manual summary lease")
-
-        task = asyncio.create_task(renew())
-        try:
-            yield
-        finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-
-    async def _generate(self, job):
+    async def _generate(self, job: SummaryJob):
         """Build and persist delivery chunks, retrying source failures durably."""
-        use_youtube_audio = job.source == "youtube" and getattr(
-            job, "youtube_audio_fallback", False
-        )
+        use_youtube_audio = job.source == "youtube" and job.youtube_audio_fallback
         if use_youtube_audio and not self.config.youtube_yt_dlp_fallback_enabled:
-            job.status = JobStatus.FAILED
             job.last_error = "YouTube audio fallback is disabled."
+            self.jobs.prepare_failure(job, job.last_error)
             self._release(job)
             await self._save(job)
             return
@@ -229,7 +159,7 @@ class ManualSummary(commands.Cog):
         ref = VideoRef(
             source=job.source,
             video_id=job.video_id,
-            url=getattr(job, "source_url", None),
+            url=job.source_url,
         )
         metadata = self._stored_metadata(job)
         if job.operation != ManualSummaryOperation.TOPICS:
@@ -270,7 +200,7 @@ class ManualSummary(commands.Cog):
             ]
 
         try:
-            async with get_video_work_coordinator(self.bot).for_video(ref):
+            async with self.bot.video_work.for_video(ref):
                 job.delivery_chunks = (
                     await generate_delivery_chunks()
                     if use_youtube_audio
@@ -302,116 +232,58 @@ class ManualSummary(commands.Cog):
         except Exception as exc:  # noqa: BLE001 - source backends vary
             await self._fail(job, exc, allow_youtube_fallback=True)
             return
-        job.status = JobStatus.DELIVERING
+        job.status = JobStatus.READY_TO_DELIVER
+        job.generated_at = datetime.now(UTC)
         job.delivery_chunk_index = 0
         job.last_error = None
         if not await self._save(job):
             job.claimed_by = None
 
     async def _deliver(self, job):
-        """Send unconfirmed chunks and checkpoint progress after every successful send."""
-        try:
-            channel = self.bot.get_channel(
+        async def resolve_channel():
+            return self.bot.get_channel(
                 job.discord_channel_id
             ) or await self.bot.fetch_channel(job.discord_channel_id)
+
+        async def send(channel, chunk):
             if (
                 job.operation == ManualSummaryOperation.TOPICS
                 and job.delivery_chunk_index == 0
-                and not getattr(job, "failure_notice", False)
+                and not job.failure_notice
             ):
-                await send_limited(
-                    self.bot,
-                    channel.send,
-                    "Here are the topics mentioned in the video:\n"
-                    + job.delivery_chunks[0],
-                )
-                job.delivery_chunk_index = 1
-                if not await self._save(job):
-                    return
-            for chunk in job.delivery_chunks[job.delivery_chunk_index :]:
-                await send_limited(self.bot, channel.send, chunk)
-                job.delivery_chunk_index += 1
-                if not await self._save(job):
-                    return
-            job.status = (
-                JobStatus.FAILED
-                if getattr(job, "failure_notice", False)
-                else JobStatus.COMPLETED
-            )
-            self._release(job)
-            await self._save(job)
-        except Exception as exc:  # noqa: BLE001 - Discord channel delivery varies
-            await self._delivery_failure(job, exc)
+                chunk = "Here are the topics mentioned in the video:\n" + chunk
+            await send_limited(self.bot, channel.send, chunk)
+
+        return await self.jobs.deliver(job, resolve_channel, send, self._save)
 
     async def _fail(self, job, exc, *, permanent=False, allow_youtube_fallback=False):
-        """Record a source failure and either fail or requeue the job with backoff."""
         logger.error(
             "Manual summary failed: %s",
             exc,
             exc_info=(type(exc), exc, exc.__traceback__),
-            extra={
-                "context": {
-                    "source": job.source,
-                    "video_id": job.video_id,
-                }
-            },
+            extra={"context": {"source": job.source, "video_id": job.video_id}},
         )
-        job.retry_count += 1
-        job.last_error = str(exc)
-        retry_limit = self.config.source_retry_limit
-        fallback_active = getattr(job, "youtube_audio_fallback", False)
-        if (
-            allow_youtube_fallback
-            and not permanent
-            and not fallback_active
-            and job.source == "youtube"
-            and job.retry_count >= retry_limit
-            and self.config.youtube_yt_dlp_fallback_enabled
-        ):
-            job.youtube_audio_fallback = True
-            job.status = JobStatus.QUEUED
-            job.next_attempt_at = datetime.now(UTC)
-            self._release(job)
-            await self._save(job)
-            logger.info("Queued final YouTube audio fallback for %s.", job.video_id)
-            return
-        terminal = permanent or fallback_active or job.retry_count >= retry_limit
+        terminal = source_failure(
+            job,
+            exc,
+            self.config,
+            permanent=permanent,
+            allow_youtube_fallback=allow_youtube_fallback,
+        )
         if terminal:
-            if job.source == "yt_dlp":
-                job.failure_notice = True
-                job.delivery_chunks = [
-                    f"Could not summarize the requested media: {str(exc)[:1500]}"
-                ]
-                job.delivery_chunk_index = 0
-                job.status = JobStatus.READY_TO_DELIVER
-                job.next_attempt_at = datetime.now(UTC)
-            else:
-                job.status = JobStatus.FAILED
-        else:
-            job.status = JobStatus.QUEUED
-            job.next_attempt_at = datetime.now(UTC) + timedelta(
-                seconds=self.config.retry_delay_seconds(job.retry_count)
+            self.jobs.prepare_failure(
+                job, f"Could not summarize the requested media: {str(exc)[:1500]}"
             )
         self._release(job)
-        await self._save(job)
+        return await self._save(job)
 
     async def _delivery_failure(self, job, exc):
-        """Record a Discord failure while preserving generated chunks for redelivery."""
-        job.delivery_retry_count += 1
-        job.last_error = str(exc)
-        if job.delivery_retry_count >= self.config.delivery_retry_limit:
-            job.status = JobStatus.FAILED
-        else:
-            job.status = JobStatus.READY_TO_DELIVER
-            job.next_attempt_at = datetime.now(UTC) + timedelta(
-                seconds=self.config.retry_delay_seconds(job.delivery_retry_count)
-            )
+        delivery_failure(job, exc, self.config)
         self._release(job)
-        await self._save(job)
+        return await self._save(job)
 
     def _release(self, job):
-        """Clear this worker's lease fields before a completed, failed, or queued save."""
-        job.claimed_by = job.claimed_at = job.lease_expires_at = None
+        SummaryJobService.release(job)
 
     @staticmethod
     def _format_detail(detail, metadata) -> str:
@@ -425,10 +297,10 @@ class ManualSummary(commands.Cog):
         return f"{heading}\n\n{message}"
 
     @staticmethod
-    def _stored_metadata(job) -> VideoMetadata | None:
+    def _stored_metadata(job: SummaryJob) -> VideoMetadata | None:
         """Return complete metadata previously persisted on a job, if any."""
-        title = getattr(job, "title", None)
-        channel_name = getattr(job, "channel_name", None)
+        title = job.title
+        channel_name = job.channel_name
         if isinstance(title, str) and title:
             return VideoMetadata(
                 title=title,
@@ -452,14 +324,7 @@ class ManualSummary(commands.Cog):
             return None
 
     async def _save(self, job):
-        """Persist a job only while this worker still owns its lease."""
-        values = job.model_dump(mode="python", by_alias=True, exclude={"id"})
-        values.pop("_id", None)
-        result = await SummaryJob.get_pymongo_collection().update_one(
-            {"_id": job.id, "job_type": "manual", "claimed_by": self.worker_id},
-            {"$set": values},
-        )
-        return result.matched_count == 1
+        return await self.jobs.save_owned(job)
 
 
 async def setup(bot):

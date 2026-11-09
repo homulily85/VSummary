@@ -21,7 +21,6 @@ from vsummary.util.video import (
     parse_non_space_video_source,
 )
 from vsummary.util.video_cache import delete_cached_summary
-from vsummary.util.video_work import get_video_work_coordinator
 from vsummary.util.x_space import (
     XPostWithoutSpaceError,
     XSpaceInput,
@@ -125,7 +124,7 @@ class Summarizer(commands.Cog):
         name="detail", description="Get details about a specific topic in the video."
     )
     @app_commands.describe(
-        video=("A YouTube ID or a public URL for one finished video or audio item."),
+        video="A YouTube ID or a public URL for a finished video or an audio item.",
         topic_index="The index of the topic to get details for (1-based).",
     )
     async def detail(
@@ -183,7 +182,7 @@ class Summarizer(commands.Cog):
             return
 
         try:
-            async with get_video_work_coordinator(self.bot).for_video(ref):
+            async with self.bot.video_work.for_video(ref):
                 deleted_count = await delete_cached_summary(ref)
         except PyMongoError:
             logger.exception(

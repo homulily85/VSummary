@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -11,12 +12,13 @@ from typing import Any
 from dotenv import load_dotenv
 from pydantic import ValidationError
 from pymongo import AsyncMongoClient, IndexModel
-from pymongo.errors import PyMongoError
+from pymongo.errors import OperationFailure, PyMongoError
 
 from vsummary.model.channel import FollowedChannel, SummaryJob
-from vsummary.model.video import VideoSummary
+from vsummary.model.video import VIDEO_LANGUAGE_CACHE_INDEX, VideoSummary
 from vsummary.settings import DATABASE_NAME
-from vsummary.util.video_cache import migrate_video_cache_indexes
+
+logger = logging.getLogger(__name__)
 
 TARGETS = {
     "Channel": "FollowedChannel",
@@ -144,7 +146,19 @@ async def ensure_indexes(database) -> None:
                 for index in indexes
             ]
         )
-    await migrate_video_cache_indexes(database["VideoSummary"])
+    cache_collection = database["VideoSummary"]
+    await cache_collection.create_indexes([VIDEO_LANGUAGE_CACHE_INDEX])
+    for name, index in (await cache_collection.index_information()).items():
+        if index.get("unique") and list(index.get("key", [])) == [
+            ("source", 1),
+            ("video_id", 1),
+        ]:
+            try:
+                await cache_collection.drop_index(name)
+            except OperationFailure as exc:
+                if exc.code != 27:
+                    raise
+            logger.info("Removed obsolete video cache index %s.", name)
     collection = database["SummaryJob"]
     for name, index in (await collection.index_information()).items():
         if (

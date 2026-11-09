@@ -50,7 +50,7 @@ def test_parse_x_space_input_accepts_status_urls_with_mobile_hosts_and_queries(v
 
 
 @pytest.mark.asyncio
-async def test_resolve_x_space_normalizes_a_status_url_to_its_archived_space(
+async def test_resolve_parsed_x_space_normalizes_a_status_url_to_its_archived_space(
     monkeypatch, caplog
 ):
     from vsummary.util import x_space
@@ -67,8 +67,10 @@ async def test_resolve_x_space_normalizes_a_status_url_to_its_archived_space(
     )
 
     with caplog.at_level("INFO", logger=x_space.__name__):
-        ref = await x_space.resolve_x_space(
-            "https://twitter.com/example/status/1234567890123456789?s=20"
+        ref = await x_space.resolve_parsed_x_space(
+            x_space.parse_x_space_input(
+                "https://twitter.com/example/status/1234567890123456789?s=20"
+            )
         )
 
     assert ref == VideoRef(source="x_space", video_id=SPACE_ID)
@@ -84,7 +86,7 @@ async def test_resolve_x_space_normalizes_a_status_url_to_its_archived_space(
         ("post_live", "ended but has not been archived yet"),
     ],
 )
-async def test_resolve_x_space_rejects_non_archived_states(
+async def test_resolve_parsed_x_space_rejects_non_archived_states(
     monkeypatch, live_status, message
 ):
     from vsummary.util import x_space
@@ -101,11 +103,15 @@ async def test_resolve_x_space_rejects_non_archived_states(
     )
 
     with pytest.raises(x_space.XSpaceResolutionError, match=message):
-        await x_space.resolve_x_space(f"https://x.com/i/spaces/{SPACE_ID}")
+        await x_space.resolve_parsed_x_space(
+            x_space.parse_x_space_input(f"https://x.com/i/spaces/{SPACE_ID}")
+        )
 
 
 @pytest.mark.asyncio
-async def test_resolve_x_space_rejects_an_ended_space_without_a_replay(monkeypatch):
+async def test_resolve_parsed_x_space_rejects_an_ended_space_without_a_replay(
+    monkeypatch,
+):
     from vsummary.util import x_space
 
     monkeypatch.setattr(
@@ -122,11 +128,15 @@ async def test_resolve_x_space_rejects_an_ended_space_without_a_replay(monkeypat
     with pytest.raises(
         x_space.XSpaceResolutionError, match="ended but is not archived"
     ):
-        await x_space.resolve_x_space(f"https://x.com/i/spaces/{SPACE_ID}")
+        await x_space.resolve_parsed_x_space(
+            x_space.parse_x_space_input(f"https://x.com/i/spaces/{SPACE_ID}")
+        )
 
 
 @pytest.mark.asyncio
-async def test_resolve_x_space_rejects_a_status_post_without_a_space(monkeypatch):
+async def test_resolve_parsed_x_space_rejects_a_status_post_without_a_space(
+    monkeypatch,
+):
     from vsummary.util import x_space
 
     monkeypatch.setattr(
@@ -142,13 +152,17 @@ async def test_resolve_x_space_rejects_a_status_post_without_a_space(monkeypatch
     with pytest.raises(
         x_space.XPostWithoutSpaceError, match="post does not contain an X Space"
     ):
-        await x_space.resolve_x_space(
-            "https://x.com/example/status/1234567890123456789"
+        await x_space.resolve_parsed_x_space(
+            x_space.parse_x_space_input(
+                "https://x.com/example/status/1234567890123456789"
+            )
         )
 
 
 @pytest.mark.asyncio
-async def test_resolve_x_space_translates_yt_dlp_replay_disabled_errors(monkeypatch):
+async def test_resolve_parsed_x_space_translates_yt_dlp_replay_disabled_errors(
+    monkeypatch,
+):
     from vsummary.util import x_space
 
     monkeypatch.setattr(
@@ -162,7 +176,9 @@ async def test_resolve_x_space_translates_yt_dlp_replay_disabled_errors(monkeypa
     with pytest.raises(
         x_space.XSpaceResolutionError, match="ended but is not archived"
     ):
-        await x_space.resolve_x_space(f"https://x.com/i/spaces/{SPACE_ID}")
+        await x_space.resolve_parsed_x_space(
+            x_space.parse_x_space_input(f"https://x.com/i/spaces/{SPACE_ID}")
+        )
 
 
 def test_download_x_space_audio_has_no_duration_limit_but_rejects_oversized_audio(

@@ -69,12 +69,12 @@ async def test_completed_and_failed_work_is_removed_from_coordinator():
     ref = VideoRef(source="youtube", video_id="video")
 
     async with coordinator.for_video(ref):
-        assert coordinator.tracked_video_count == 1
+        assert len(coordinator._states) == 1
 
-    assert coordinator.tracked_video_count == 0
+    assert not coordinator._states
 
     with pytest.raises(RuntimeError, match="failed"):
         async with coordinator.for_video(ref):
             raise RuntimeError("failed")
 
-    assert coordinator.tracked_video_count == 0
+    assert not coordinator._states

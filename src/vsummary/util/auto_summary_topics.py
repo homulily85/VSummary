@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from pymongo.errors import DuplicateKeyError
@@ -21,49 +20,58 @@ def normalize_topic_id(topic_id: str) -> tuple[str, str]:
     return display, display.casefold()
 
 
-def policy_ignores_video(
-    policies: Sequence[AutoSummaryTopicPolicy],
+async def policy_ignores_video(
     topic_id: str | None,
     published_at: datetime,
 ) -> bool:
-    """Return the topic policy state effective strictly before video publication."""
+    """Query the latest topic policy strictly before video publication."""
     if topic_id is None:
         return False
     if published_at.tzinfo is None:
         raise ValueError("published_at must be timezone-aware")
     _, topic_key = normalize_topic_id(topic_id)
-    effective = [
-        policy
-        for policy in policies
-        if policy.topic_key == topic_key and policy.effective_at < published_at
-    ]
-    return (
-        max(effective, key=lambda policy: policy.effective_at).ignored
-        if effective
-        else False
+    policy = await (
+        AutoSummaryTopicPolicy.find(
+            {"topic_key": topic_key, "effective_at": {"$lt": published_at}}
+        )
+        .sort("-effective_at")
+        .first_or_none()
     )
+    return policy.ignored if policy is not None else False
 
 
-def current_topic_policies(
-    policies: Sequence[AutoSummaryTopicPolicy],
-) -> dict[str, AutoSummaryTopicPolicy]:
-    """Return the latest policy record for each normalized topic ID."""
-    current: dict[str, AutoSummaryTopicPolicy] = {}
-    for policy in policies:
-        previous = current.get(policy.topic_key)
-        if previous is None or policy.effective_at > previous.effective_at:
-            current[policy.topic_key] = policy
-    return current
+async def get_ignored_auto_summary_topics() -> list[str]:
+    """Return topics whose latest policy is ignored, ordered by display ID."""
+    topics = await AutoSummaryTopicPolicy.aggregate(
+        [
+            {"$sort": {"topic_key": -1, "effective_at": -1}},
+            {
+                "$group": {
+                    "_id": "$topic_key",
+                    "topic_id": {"$first": "$topic_id"},
+                    "ignored": {"$first": "$ignored"},
+                }
+            },
+            # Filter after grouping so an older ignore cannot override an allow.
+            {"$match": {"ignored": True}},
+            {"$sort": {"topic_id": 1}},
+            {"$project": {"_id": 0, "topic_id": 1}},
+        ]
+    ).to_list()
+    return [topic["topic_id"] for topic in topics]
 
 
 async def ensure_default_auto_summary_topic_policies() -> None:
     """Seed missing built-in ignored-topic policies without overwriting user changes."""
-    for topic_id in DEFAULT_IGNORED_TOPICS:
-        _, topic_key = normalize_topic_id(topic_id)
-        existing = await AutoSummaryTopicPolicy.find_one(
-            AutoSummaryTopicPolicy.topic_key == topic_key
-        )
-        if existing is not None:
+    default_topics = {
+        normalize_topic_id(topic_id)[1]: topic_id for topic_id in DEFAULT_IGNORED_TOPICS
+    }
+    existing = await AutoSummaryTopicPolicy.find(
+        {"topic_key": {"$in": list(default_topics)}}
+    ).to_list()
+    existing_keys = {policy.topic_key for policy in existing}
+    for topic_key, topic_id in default_topics.items():
+        if topic_key in existing_keys:
             continue
         try:
             await AutoSummaryTopicPolicy(
@@ -74,12 +82,6 @@ async def ensure_default_auto_summary_topic_policies() -> None:
             ).insert()
         except DuplicateKeyError:
             continue
-
-
-async def get_auto_summary_topic_policies() -> list[AutoSummaryTopicPolicy]:
-    """Seed defaults if needed, then return the full topic-policy history."""
-    await ensure_default_auto_summary_topic_policies()
-    return await AutoSummaryTopicPolicy.find().to_list()
 
 
 async def set_auto_summary_topic_policy(
@@ -94,8 +96,11 @@ async def set_auto_summary_topic_policy(
     if effective_at.tzinfo is None:
         raise ValueError("effective_at must be timezone-aware")
     effective_at = effective_at.astimezone(UTC)
-    policies = await get_auto_summary_topic_policies()
-    current = current_topic_policies(policies).get(topic_key)
+    current = await (
+        AutoSummaryTopicPolicy.find({"topic_key": topic_key})
+        .sort("-effective_at")
+        .first_or_none()
+    )
     if (current is None and not ignored) or (
         current is not None and current.ignored is ignored
     ):

@@ -151,6 +151,9 @@ async def test_workers_claim_only_their_job_type(database, monkeypatch):
         classmethod(lambda cls: database.SummaryJob),
     )
     auto_worker = Autosummary.__new__(Autosummary)
+    auto_worker.settings = None
+    auto_worker.summary_service = None
+    auto_worker.notebook = None
     auto_worker.worker_id = "auto-worker"
     manual_worker = ManualSummary.__new__(ManualSummary)
     manual_worker.worker_id = "manual-worker"
@@ -195,3 +198,78 @@ async def test_real_interruption_can_be_resumed(database, monkeypatch):
     await migrate(database, apply=True)
     assert await database.SummaryJob.count_documents({}) == 2
     assert (await migrate(database, apply=True)).writes == []
+
+
+async def test_ignored_topics_use_latest_policy_per_topic(database, monkeypatch):
+    from vsummary.util import auto_summary_topics
+
+    collection = database.AutoSummaryTopicPolicy
+    initial = datetime(2026, 9, 20, tzinfo=UTC)
+    later = initial + timedelta(days=1)
+    await collection.insert_many(
+        [
+            {
+                "topic_key": key,
+                "topic_id": display,
+                "ignored": ignored,
+                "effective_at": at,
+            }
+            for key, display, ignored, at in [
+                ("shorts", "shorts", False, later),
+                ("shorts", "SHORTS", True, initial),
+                ("music", "Music", True, later),
+                ("music", "music", False, initial),
+                ("art", "Art", True, initial),
+            ]
+        ]
+    )
+
+    class PolicyCollection:
+        @staticmethod
+        def aggregate(pipeline):
+            class Query:
+                async def to_list(self):
+                    return await (await collection.aggregate(pipeline)).to_list(None)
+
+            return Query()
+
+    monkeypatch.setattr(auto_summary_topics, "AutoSummaryTopicPolicy", PolicyCollection)
+
+    assert await auto_summary_topics.get_ignored_auto_summary_topics() == [
+        "Art",
+        "Music",
+    ]
+
+
+async def test_video_topic_policy_uses_latest_transition_before_publication(database):
+    from beanie import init_beanie
+
+    from vsummary.model.channel import AutoSummaryTopicPolicy
+    from vsummary.util.auto_summary_topics import policy_ignores_video
+
+    await init_beanie(database=database, document_models=[AutoSummaryTopicPolicy])
+    initial = datetime(2026, 9, 20, tzinfo=UTC)
+    allowed = initial + timedelta(days=1)
+    ignored_again = allowed + timedelta(days=1)
+    # Insert out of order to ensure the query selects by effective_at.
+    for topic, ignored, at in [
+        ("shorts", True, ignored_again),
+        ("shorts", True, initial),
+        ("shorts", False, allowed),
+        ("music", True, initial),
+    ]:
+        await AutoSummaryTopicPolicy(
+            topic_id=topic, topic_key=topic, ignored=ignored, effective_at=at
+        ).insert()
+
+    for published_at, expected in [
+        (initial - timedelta(seconds=1), False),
+        (initial, False),
+        (initial + timedelta(seconds=1), True),
+        (allowed, True),
+        (allowed + timedelta(seconds=1), False),
+        (ignored_again, False),
+        (ignored_again + timedelta(seconds=1), True),
+    ]:
+        assert await policy_ignores_video(" SHORTS ", published_at) is expected
+    assert not await policy_ignores_video("unknown", ignored_again)

@@ -1,12 +1,12 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 import vsummary.cogs.autosummary.autosummary as autosummary_module
 from vsummary.cogs.autosummary.autosummary import Autosummary
-from vsummary.model.channel import AutoSummaryTopicPolicy, JobStatus, SummaryJob
+from vsummary.model.channel import JobStatus, SummaryJob
 from vsummary.model.video import Topic
 from vsummary.settings import RuntimeConfig
 from vsummary.util.holodex import TransientHolodexError
@@ -15,9 +15,42 @@ from vsummary.util.summarizer import (
     PermanentSummaryError,
     TransientSummaryError,
 )
+from vsummary.util.video_work import VideoWorkCoordinator
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel_id", [None, "invalid", 123])
+async def test_auto_jobs_wait_until_destination_can_be_resolved(channel_id):
+    cog = Autosummary.__new__(Autosummary)
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = SimpleNamespace(auto_summary_channel_id=channel_id)
+    cog.bot = SimpleNamespace(get_channel=Mock(return_value=None))
+    job = object()
+    cog._claim_due_jobs = AsyncMock(return_value=[job])
+    cog._process_pending_video = AsyncMock()
+
+    await cog.process_due_videos()
+
+    cog._claim_due_jobs.assert_not_awaited()
+    cog._process_pending_video.assert_not_awaited()
+
+    cog.settings.auto_summary_channel_id = 123
+    cog.bot.get_channel.return_value = object()
+
+    await cog.process_due_videos()
+
+    cog._claim_due_jobs.assert_awaited_once()
+    cog._process_pending_video.assert_awaited_once_with(job)
 
 
 class FakeJob:
+    source = "youtube"
+    failure_notice = False
+    id = None
+    youtube_audio_fallback = False
+    delivery_chunks = ()
+    delivery_chunk_index = 0
     status = JobStatus.QUEUED
 
     def __init__(self):
@@ -52,7 +85,18 @@ def fake_job_persistence(monkeypatch):
 
 def make_youtube_fallback_job(*, enabled=True, retry_count=1):
     cog = Autosummary.__new__(Autosummary)
-    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+    )
     cog.settings = SimpleNamespace(
         source_retry_limit=2,
         delivery_retry_limit=3,
@@ -64,7 +108,6 @@ def make_youtube_fallback_job(*, enabled=True, retry_count=1):
         summarize=AsyncMock(side_effect=TransientSummaryError("no transcript"))
     )
     cog._save_item = AsyncMock(return_value=True)
-    cog._post_failure = AsyncMock()
     job = SummaryJob.model_construct(
         job_type="auto",
         video_id="dQw4w9WgXcQ",
@@ -120,7 +163,7 @@ async def test_auto_summary_queues_one_persisted_audio_fallback_after_native_ret
     assert job.youtube_audio_fallback is True
     assert job.retry_count == 2
     assert before <= job.next_attempt_at <= datetime.now(UTC)
-    cog._post_failure.assert_not_awaited()
+    assert not job.failure_notice
     cog._save_item.assert_awaited_once_with(job)
     assert SummaryJob.model_construct(**job.model_dump()).youtube_audio_fallback is True
 
@@ -129,9 +172,9 @@ async def test_auto_summary_queues_one_persisted_audio_fallback_after_native_ret
 @pytest.mark.parametrize(
     ("enabled", "retry_count", "permanent", "expected_status"),
     [
-        (False, 1, False, JobStatus.FAILED),
+        (False, 1, False, JobStatus.READY_TO_DELIVER),
         (True, 0, False, JobStatus.QUEUED),
-        (True, 1, True, JobStatus.FAILED),
+        (True, 1, True, JobStatus.READY_TO_DELIVER),
     ],
 )
 async def test_auto_summary_only_schedules_audio_fallback_for_eligible_failures(
@@ -157,7 +200,8 @@ async def test_holodex_failure_does_not_trigger_youtube_audio_fallback():
 
     assert not await cog._generate_for_job(job)
 
-    assert job.status is JobStatus.FAILED
+    assert job.status is JobStatus.READY_TO_DELIVER
+    assert job.failure_notice
     assert job.youtube_audio_fallback is False
     cog.summary_service.summarize.assert_not_awaited()
 
@@ -205,23 +249,30 @@ async def test_auto_audio_fallback_failure_is_terminal_without_generation_retrie
 
     assert not await cog._generate_for_job(job)
 
-    assert job.status is JobStatus.FAILED
+    assert job.status is JobStatus.READY_TO_DELIVER
+    assert job.failure_notice
     assert job.retry_count == 3
     cog.summary_service.summarize.assert_awaited_once()
-    cog._post_failure.assert_awaited_once_with(job)
+    assert job.failure_notice
+    assert job.delivery_chunks
 
 
 @pytest.mark.asyncio
-async def test_auto_pending_audio_fallback_stops_when_setting_is_disabled():
+@pytest.mark.parametrize("last_error", ["summary source unavailable", None])
+async def test_auto_pending_audio_fallback_stops_when_setting_is_disabled(last_error):
     cog, job = make_youtube_fallback_job(enabled=False, retry_count=2)
     job.youtube_audio_fallback = True
+    job.last_error = last_error
 
     assert not await cog._generate_for_job(job)
 
-    assert job.status is JobStatus.FAILED
+    assert job.status is JobStatus.READY_TO_DELIVER
+    assert job.failure_notice
     assert job.retry_count == 2
+    assert job.last_error == "YouTube audio fallback is disabled."
     cog.summary_service.summarize.assert_not_awaited()
-    cog._post_failure.assert_awaited_once_with(job)
+    assert job.failure_notice
+    assert job.delivery_chunks
 
 
 @pytest.mark.asyncio
@@ -231,9 +282,7 @@ async def test_auto_terminal_failure_notice_mentions_the_audio_fallback():
     target = SimpleNamespace(send=AsyncMock())
     cog.bot.get_channel = lambda _: target
 
-    await Autosummary._post_failure(cog, job)
-
-    message = target.send.await_args.args[0]
+    message = cog._failure_message(job)
     assert "2 normal attempts" in message
     assert "one yt-dlp audio fallback attempt" in message
     assert "no transcript could be fetched" not in message
@@ -257,7 +306,19 @@ async def test_delivery_failure_keeps_persisted_summary_and_does_not_regenerate(
 ):
     target = SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("discord down")))
     cog = Autosummary.__new__(Autosummary)
-    cog.bot = SimpleNamespace(get_channel=lambda _: target, notebook_client=object())
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        get_channel=lambda _: target,
+        notebook_client=object(),
+    )
     cog.settings = SimpleNamespace(auto_summary_channel_id=123, delivery_retry_limit=3)
     cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value=None))
     cog.summary_service = SimpleNamespace(
@@ -304,6 +365,11 @@ async def test_claim_due_jobs_uses_current_beanie_collection_api(monkeypatch):
 
     cog = Autosummary.__new__(Autosummary)
     cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.worker_id = "worker"
 
     claimed = await cog._claim_due_jobs()
 
@@ -338,6 +404,11 @@ async def test_claim_due_jobs_reclaims_an_expired_delivery_lease(monkeypatch):
     )
 
     cog = Autosummary.__new__(Autosummary)
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
     cog.worker_id = "new-worker"
 
     claimed = await cog._claim_due_jobs()
@@ -359,7 +430,18 @@ async def test_delivery_retry_resumes_after_the_last_confirmed_chunk():
                 raise RuntimeError("discord down")
 
     cog = Autosummary.__new__(Autosummary)
-    cog.bot = SimpleNamespace(get_channel=lambda _: Target())
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        get_channel=lambda _: Target(),
+    )
     cog.settings = SimpleNamespace(auto_summary_channel_id=123, delivery_retry_limit=3)
     job = FakeJob()
     job.status = JobStatus.DELIVERING
@@ -369,17 +451,26 @@ async def test_delivery_retry_resumes_after_the_last_confirmed_chunk():
 
     assert job.status is JobStatus.READY_TO_DELIVER
     assert job.delivery_chunk_index == 1
+    assert job.saved == 2  # Initial state and error progress.
     first_chunk = sent[0]
 
     class WorkingTarget:
         async def send(self, chunk):
             sent.append(chunk)
 
-    cog.bot = SimpleNamespace(get_channel=lambda _: WorkingTarget())
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        get_channel=lambda _: WorkingTarget(),
+    )
     await cog._deliver_for_job(job)
 
     assert sent.count(first_chunk) == 1
     assert job.status is JobStatus.COMPLETED
+    assert job.delivery_chunk_index == len(job.delivery_chunks)
+    assert job.saved == 4  # Retry initial state and completion add two saves.
 
 
 @pytest.mark.asyncio
@@ -391,21 +482,45 @@ async def test_source_failure_uses_configured_retry_limit_in_notification():
             messages.append(message)
 
     cog = Autosummary.__new__(Autosummary)
-    cog.bot = SimpleNamespace(get_channel=lambda _: Target())
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        get_channel=lambda _: Target(),
+    )
     cog.settings = SimpleNamespace(auto_summary_channel_id=123, source_retry_limit=2)
     job = FakeJob()
     job.retry_count = 1
 
     await cog._handle_source_error(job, RuntimeError("no transcript"))
 
-    assert job.status is JobStatus.FAILED
-    assert "after 2 attempts" in messages[0]
+    assert job.status is JobStatus.READY_TO_DELIVER
+    assert job.failure_notice
+    assert "after 2 attempts" in job.delivery_chunks[0]
+    assert not messages
 
 
 @pytest.mark.asyncio
 async def test_invalid_notebooklm_topic_response_retries_immediately_then_succeeds():
     cog = Autosummary.__new__(Autosummary)
-    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+    )
     cog.settings = SimpleNamespace(source_retry_limit=5)
     cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value=None))
     cog.summary_service = SimpleNamespace(
@@ -430,7 +545,18 @@ async def test_invalid_notebooklm_topic_response_retries_immediately_then_succee
 async def test_invalid_notebooklm_topic_response_queues_after_immediate_retry():
     error = InvalidSummaryResponse("NotebookLM did not return JSON topic data")
     cog = Autosummary.__new__(Autosummary)
-    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+    )
     cog.settings = SimpleNamespace(source_retry_limit=5)
     cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value=None))
     cog.summary_service = SimpleNamespace(
@@ -450,19 +576,23 @@ async def test_invalid_notebooklm_topic_response_queues_after_immediate_retry():
 @pytest.mark.asyncio
 async def test_generation_cancels_when_refreshed_topic_is_ignored(monkeypatch):
     published_at = datetime(2026, 9, 20, tzinfo=UTC)
-    policy = AutoSummaryTopicPolicy.model_construct(
-        topic_id="shorts",
-        topic_key="shorts",
-        ignored=True,
-        effective_at=published_at - timedelta(days=1),
-    )
+
     monkeypatch.setattr(
-        autosummary_module,
-        "get_auto_summary_topic_policies",
-        AsyncMock(return_value=[policy]),
+        autosummary_module, "policy_ignores_video", AsyncMock(return_value=True)
     )
     cog = Autosummary.__new__(Autosummary)
-    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+    )
     cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value="SHORTS"))
     cog.summary_service = SimpleNamespace(summarize=AsyncMock())
     job = FakeJob()
@@ -480,16 +610,9 @@ async def test_generation_cancels_when_refreshed_topic_is_ignored(monkeypatch):
 @pytest.mark.asyncio
 async def test_cancellation_persists_and_releases_claimed_job(monkeypatch):
     published_at = datetime(2026, 9, 20, tzinfo=UTC)
-    policy = AutoSummaryTopicPolicy.model_construct(
-        topic_id="shorts",
-        topic_key="shorts",
-        ignored=True,
-        effective_at=published_at - timedelta(days=1),
-    )
+
     monkeypatch.setattr(
-        autosummary_module,
-        "get_auto_summary_topic_policies",
-        AsyncMock(return_value=[policy]),
+        autosummary_module, "policy_ignores_video", AsyncMock(return_value=True)
     )
     collection = SimpleNamespace(
         update_one=AsyncMock(return_value=SimpleNamespace(matched_count=1))
@@ -515,7 +638,18 @@ async def test_cancellation_persists_and_releases_claimed_job(monkeypatch):
     )
     cog = Autosummary.__new__(Autosummary)
     cog.worker_id = "worker"
-    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.worker_id = "worker"
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+    )
     cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value="shorts"))
     cog.summary_service = SimpleNamespace(summarize=AsyncMock())
 
@@ -532,19 +666,23 @@ async def test_cancellation_persists_and_releases_claimed_job(monkeypatch):
 @pytest.mark.asyncio
 async def test_generation_uses_policy_effective_at_video_publication(monkeypatch):
     published_at = datetime(2026, 9, 20, tzinfo=UTC)
-    later_policy = AutoSummaryTopicPolicy.model_construct(
-        topic_id="shorts",
-        topic_key="shorts",
-        ignored=True,
-        effective_at=published_at + timedelta(days=1),
-    )
+
     monkeypatch.setattr(
-        autosummary_module,
-        "get_auto_summary_topic_policies",
-        AsyncMock(return_value=[later_policy]),
+        autosummary_module, "policy_ignores_video", AsyncMock(return_value=False)
     )
     cog = Autosummary.__new__(Autosummary)
-    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+    )
     cog.holodex = SimpleNamespace(get_video_topic=AsyncMock(return_value="shorts"))
     cog.summary_service = SimpleNamespace(
         summarize=AsyncMock(return_value=[Topic(name="Intro", detail="Details")])
@@ -560,7 +698,18 @@ async def test_generation_uses_policy_effective_at_video_publication(monkeypatch
 @pytest.mark.asyncio
 async def test_generation_continues_after_two_failed_topic_refreshes():
     cog = Autosummary.__new__(Autosummary)
-    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+    )
     cog.settings = SimpleNamespace(source_retry_limit=5)
     cog.holodex = SimpleNamespace(
         get_video_topic=AsyncMock(
@@ -586,19 +735,23 @@ async def test_generation_continues_after_two_failed_topic_refreshes():
 @pytest.mark.asyncio
 async def test_second_topic_refresh_can_still_cancel_ignored_video(monkeypatch):
     published_at = datetime(2026, 9, 20, tzinfo=UTC)
-    policy = AutoSummaryTopicPolicy.model_construct(
-        topic_id="shorts",
-        topic_key="shorts",
-        ignored=True,
-        effective_at=published_at - timedelta(days=1),
-    )
+
     monkeypatch.setattr(
-        autosummary_module,
-        "get_auto_summary_topic_policies",
-        AsyncMock(return_value=[policy]),
+        autosummary_module, "policy_ignores_video", AsyncMock(return_value=True)
     )
     cog = Autosummary.__new__(Autosummary)
-    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+    )
     cog.holodex = SimpleNamespace(
         get_video_topic=AsyncMock(
             side_effect=[TransientHolodexError("unavailable"), "shorts"]
@@ -618,19 +771,23 @@ async def test_second_topic_refresh_can_still_cancel_ignored_video(monkeypatch):
 @pytest.mark.asyncio
 async def test_missing_topic_is_retried_before_generation(monkeypatch):
     published_at = datetime(2026, 9, 20, tzinfo=UTC)
-    policy = AutoSummaryTopicPolicy.model_construct(
-        topic_id="shorts",
-        topic_key="shorts",
-        ignored=True,
-        effective_at=published_at - timedelta(days=1),
-    )
+
     monkeypatch.setattr(
-        autosummary_module,
-        "get_auto_summary_topic_policies",
-        AsyncMock(return_value=[policy]),
+        autosummary_module, "policy_ignores_video", AsyncMock(return_value=True)
     )
     cog = Autosummary.__new__(Autosummary)
-    cog.bot = SimpleNamespace(notebook_client=object())
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
+    cog.bot = SimpleNamespace(
+        fetch_channel=None,
+        message_rate_limiter=None,
+        settings=None,
+        video_work=VideoWorkCoordinator(),
+        notebook_client=object(),
+    )
     cog.holodex = SimpleNamespace(
         get_video_topic=AsyncMock(side_effect=[None, "shorts"])
     )
@@ -668,6 +825,11 @@ async def test_owned_job_writes_include_the_current_claimed_by(monkeypatch):
         classmethod(lambda cls: collection),
     )
     cog = Autosummary.__new__(Autosummary)
+    cog.worker_id = "worker"
+    cog.settings = None
+    cog.settings = None
+    cog.summary_service = None
+    cog.notebook = None
     cog.worker_id = "worker"
 
     assert await cog._save_item(job)

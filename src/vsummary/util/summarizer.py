@@ -112,12 +112,6 @@ class NotebookLMSummaryService:
         self.client = client
         self.config = config
 
-    async def close(self) -> None:
-        """Close the client when it exposes the optional asynchronous close hook."""
-        close = getattr(self.client, "aclose", None)
-        if close is not None:
-            await close()
-
     async def summarize(
         self, ref: VideoRef, *, use_youtube_audio: bool = False
     ) -> list[Topic]:
