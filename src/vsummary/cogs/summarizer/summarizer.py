@@ -15,6 +15,7 @@ from vsummary.model.channel import (
 from vsummary.util.discord import send_limited, split_message
 from vsummary.util.generic_media import GenericMediaError
 from vsummary.util.video import (
+    VIDEO_SOURCE_LABELS,
     UnsupportedVideoSource,
     VideoRef,
     build_video_url,
@@ -38,12 +39,6 @@ _ACTIVE_JOB_STATUSES = [
     JobStatus.READY_TO_DELIVER.value,
     JobStatus.DELIVERING.value,
 ]
-_SOURCE_LABELS = {
-    "youtube": "YouTube video",
-    "twitch": "Twitch VOD",
-    "x_space": "X Space",
-    "yt_dlp": "Media",
-}
 
 
 async def _resolve_x_status(x_input: XSpaceInput) -> VideoRef:
@@ -166,7 +161,7 @@ class Summarizer(commands.Cog):
                 channel_id=interaction.channel_id,
                 requester_id=interaction.user.id,
             )
-            source_label = _SOURCE_LABELS[ref.source]
+            source_label = VIDEO_SOURCE_LABELS[ref.source]
             await send_limited(
                 self.bot,
                 interaction.followup.send,
@@ -225,7 +220,7 @@ class Summarizer(commands.Cog):
                 channel_id=interaction.channel_id,
                 requester_id=interaction.user.id,
             )
-            source_label = _SOURCE_LABELS[ref.source]
+            source_label = VIDEO_SOURCE_LABELS[ref.source]
             await send_limited(
                 self.bot,
                 interaction.followup.send,

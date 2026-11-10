@@ -224,6 +224,8 @@ class SummaryJobService:
         resolve_channel: Callable[[], Awaitable[ChannelT | None]],
         send: Callable[[ChannelT, str], Awaitable[None]],
         save: Callable[[SummaryJob], Awaitable[bool]] | None = None,
+        *,
+        checkpoint_each_chunk: bool = False,
     ) -> bool:
         """Send remaining chunks and persist the outcome at completion or failure.
 
@@ -236,6 +238,7 @@ class SummaryJobService:
                 if unavailable.
             send: Asynchronous callback that sends one chunk to the resolved channel.
             save: Optional persistence callback. Defaults to the ownership-checked save.
+            checkpoint_each_chunk: Save progress before attempting the next chunk.
 
         Returns:
             ``True`` if delivery finished and the final save succeeded. Return ``False``
@@ -258,8 +261,28 @@ class SummaryJobService:
             for chunk in job.delivery_chunks[job.delivery_chunk_index :]:
                 await send(channel, chunk)
                 job.delivery_chunk_index += 1
+                if (
+                    checkpoint_each_chunk
+                    and job.delivery_chunk_index < len(job.delivery_chunks)
+                    and not await save(job)
+                ):
+                    return False
         except Exception as exc:  # noqa: BLE001 - Discord failures are retried
             delivery_failure(job, exc, self.config)
+            self.logger.warning(
+                "Summary delivery failed: %s",
+                exc,
+                extra={
+                    "context": {
+                        "job_id": str(job.id),
+                        "worker_id": self.worker_id,
+                        "job_type": self.job_type,
+                        "job_status": job.status.value,
+                        "delivery_chunk_index": job.delivery_chunk_index,
+                        "delivery_retry_count": job.delivery_retry_count,
+                    }
+                },
+            )
             self.release(job)
             await save(job)
             return False

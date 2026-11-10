@@ -39,12 +39,12 @@ class DiscordMessageRateLimiter:
         self._lock = asyncio.Lock()
         self._next_send_at = 0.0
 
-    async def send(self, sender, content: str, **kwargs: Any) -> Any:
+    async def send(self, sender, content: str | None, **kwargs: Any) -> Any:
         """Reserve a send slot and await the sender while holding the limiter lock.
 
         Args:
             sender: Asynchronous callback that sends one Discord message.
-            content: Message body passed as the callback's first argument.
+            content: Message body, or ``None`` for an embed-only send.
             **kwargs: Additional keyword arguments forwarded to the sender.
 
         Returns:
@@ -58,13 +58,13 @@ class DiscordMessageRateLimiter:
             return await sender(content, **kwargs)
 
 
-async def send_limited(bot: "Bot", sender, content: str, **kwargs: Any) -> Any:
+async def send_limited(bot: "Bot", sender, content: str | None, **kwargs: Any) -> Any:
     """Send a message using the bot's limiter when one is installed.
 
     Args:
         bot: Bot exposing the shared Discord message limiter.
         sender: Asynchronous message callback.
-        content: Body of the message.
+        content: Message body, or ``None`` for an embed-only send.
         **kwargs: Additional keyword arguments forwarded to the sender.
 
     Returns:

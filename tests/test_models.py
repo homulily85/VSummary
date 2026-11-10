@@ -46,6 +46,7 @@ def test_job_defaults_and_lifecycle_states():
     assert SummaryJob.model_fields["next_attempt_at"].is_required()
     assert job.status is JobStatus.QUEUED
     assert job.delivery_chunks == []
+    assert job.topic_count is None
     assert job.delivery_chunk_index == 0
     assert job.lease_expires_at is None
     assert [status.value for status in JobStatus] == [

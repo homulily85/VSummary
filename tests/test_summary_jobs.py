@@ -6,6 +6,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import discord
 import pytest
 
 from vsummary.model.channel import JobStatus, SummaryJob
@@ -125,8 +126,45 @@ async def test_delivery_renews_and_checkpoints_only_on_error_or_completion(
 
 
 @pytest.mark.asyncio
+async def test_delivery_logs_discord_rejection_with_job_context(service, caplog):
+    job = SimpleNamespace(
+        id="job",
+        delivery_chunks=["saved page"],
+        delivery_chunk_index=0,
+        delivery_retry_count=0,
+    )
+    error = discord.HTTPException(
+        SimpleNamespace(status=400, reason="Bad Request"),
+        {
+            "code": 50035,
+            "message": "Invalid Form Body",
+            "errors": {
+                "content": {
+                    "_errors": [{"message": "Must be 2000 or fewer in length."}]
+                }
+            },
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger=__name__):
+        assert not await service.deliver(
+            job,
+            AsyncMock(return_value=object()),
+            AsyncMock(side_effect=error),
+            AsyncMock(return_value=True),
+        )
+
+    assert "50035" in caplog.text
+    record = next(item for item in caplog.records if "50035" in item.getMessage())
+    assert "In content: Must be 2000 or fewer in length." in record.getMessage()
+    assert record.context["job_id"] == "job"
+    assert record.context["worker_id"] == service.worker_id
+    assert record.context["delivery_chunk_index"] == 0
+    assert job.status is JobStatus.READY_TO_DELIVER
+
+
+@pytest.mark.asyncio
 async def test_failure_notice_retries_then_finishes_failed(service):
-    job = SimpleNamespace()
+    job = SimpleNamespace(id="job")
     service.prepare_failure(job, "Source failed")
     save = AsyncMock(return_value=True)
     send = AsyncMock(side_effect=RuntimeError("Discord offline"))

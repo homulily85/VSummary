@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import discord
 import pytest
 
 import vsummary.cogs.manualsummary.manualsummary as manualsummary_module
@@ -25,6 +26,19 @@ def test_manual_worker_inherits_bot_settings():
 
     assert cog.config.output_language == "Vietnamese"
     assert cog.worker_loop.seconds == 10
+
+
+@pytest.mark.asyncio
+async def test_manual_worker_logs_its_identity_when_ready(caplog):
+    bot = SimpleNamespace(settings=None, wait_until_ready=AsyncMock())
+    cog = ManualSummary(bot, start_worker=False)
+
+    with caplog.at_level(logging.INFO, logger=manualsummary_module.__name__):
+        await cog.before_worker_loop()
+
+    bot.wait_until_ready.assert_awaited_once()
+    assert "Manual summary worker ready" in caplog.text
+    assert caplog.records[-1].context["worker_id"] == cog.worker_id
 
 
 def make_manual_fallback_job(
@@ -250,7 +264,8 @@ async def test_enabling_audio_fallback_does_not_revive_failed_manual_jobs():
 
 
 @pytest.mark.asyncio
-async def test_topic_delivery_posts_plain_text_without_a_topic_picker(monkeypatch):
+@pytest.mark.parametrize("start_at", [0, 1])
+async def test_legacy_topic_delivery_posts_plain_text(monkeypatch, start_at):
     sent = []
 
     class Channel:
@@ -281,18 +296,192 @@ async def test_topic_delivery_posts_plain_text_without_a_topic_picker(monkeypatc
         next_attempt_at=datetime.now(UTC),
         status=JobStatus.DELIVERING,
         delivery_chunks=["1: Intro", "2: Outro"],
+        delivery_chunk_index=start_at,
     )
     get_topic_list = AsyncMock(side_effect=AssertionError("must not build a picker"))
     monkeypatch.setattr(manualsummary_module, "get_topic_list", get_topic_list)
 
     await cog._deliver(job)
 
-    assert sent == [
-        ("Here are the topics mentioned in the video:\n1: Intro", {}),
-        ("2: Outro", {}),
-    ]
+    assert (
+        sent
+        == [
+            ("Here are the topics mentioned in the video:\n1: Intro", {}),
+            ("2: Outro", {}),
+        ][start_at:]
+    )
     assert job.status is JobStatus.COMPLETED
     get_topic_list.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_topic_delivery_preserves_a_full_length_chunk():
+    cog, job = make_manual_fallback_job()
+    chunk = "1: " + "x" * 1997
+    job.delivery_chunks = [chunk]
+    channel = SimpleNamespace(send=AsyncMock())
+    cog.bot.get_channel = lambda _: channel
+
+    assert await cog._deliver(job)
+
+    channel.send.assert_awaited_once_with(chunk)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [1, 24])
+async def test_topic_pages_link_to_source_and_keep_topic_indices(monkeypatch, count):
+    cog, job = make_manual_fallback_job()
+    job.source = "yt_dlp"
+    job.source_url = "https://vimeo.com/123"
+    summary = AsyncMock(
+        return_value=[Topic(name=f"Mục {i}") for i in range(1, count + 1)]
+    )
+    monkeypatch.setattr(manualsummary_module, "get_topic_list", summary)
+    channel = SimpleNamespace(send=AsyncMock())
+    cog.bot.get_channel = lambda _: channel
+
+    await cog._generate(job)
+    assert job.topic_count == count
+    job = SummaryJob.model_construct(**job.model_dump())
+    assert await cog._deliver(job)
+
+    pages = [call.kwargs["embed"] for call in channel.send.await_args_list]
+    topic_rows = []
+    for index, page in enumerate(pages, start=1):
+        assert page.title == "Topics · Title"
+        assert page.url == job.source_url
+        assert page.author.name == "Channel"
+        assert page.footer.text.startswith(f"Page {index}/{len(pages)} · {count} topic")
+        assert "/detail video:<URL or ID> topic_index:<number>" in page.description
+        rows = [row for row in page.description.splitlines() if row.startswith("**")]
+        assert len(rows) <= 10
+        topic_rows.extend(rows)
+    assert len(pages) == (count + 9) // 10
+    assert topic_rows == [f"**{i}.** Mục {i}" for i in range(1, count + 1)]
+    summary.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_topic_embed_uses_source_label_when_metadata_is_missing(monkeypatch):
+    cog, job = make_manual_fallback_job(source="twitch")
+    job.video_id = "12345"
+    job.title = job.channel_name = None
+    monkeypatch.setattr(
+        manualsummary_module,
+        "get_topic_list",
+        AsyncMock(return_value=[Topic(name="Intro")]),
+    )
+    channel = SimpleNamespace(send=AsyncMock())
+    cog.bot.get_channel = lambda _: channel
+
+    await cog._generate(job)
+    assert await cog._deliver(job)
+
+    embed = channel.send.await_args.kwargs["embed"]
+    assert embed.title == "Topics · Twitch VOD"
+    assert embed.url == "https://www.twitch.tv/videos/12345"
+    assert embed.author.name is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("long_url", [False, True])
+async def test_topic_text_fallback_keeps_pages_safe(monkeypatch, long_url):
+    cog, job = make_manual_fallback_job(source="yt_dlp")
+    job.source_url = "https://example.org/" + ("x" * 2000 if long_url else "video")
+    job.title = "😀" * 300
+    job.channel_name = "**News**" * 70
+    name = "**Mục** @everyone\n" + "😀" * 80
+    monkeypatch.setattr(
+        manualsummary_module,
+        "get_topic_list",
+        AsyncMock(return_value=[Topic(name=name) for _ in range(10)]),
+    )
+    member = object()
+    channel = SimpleNamespace(
+        send=AsyncMock(),
+        guild=SimpleNamespace(me=member),
+        permissions_for=lambda _: discord.Permissions(send_messages=True),
+    )
+    cog.bot.get_channel = lambda _: channel
+
+    await cog._generate(job)
+    assert await cog._deliver(job)
+
+    calls = channel.send.await_args_list
+    assert len(calls) > 1
+    for index, call in enumerate(calls, start=1):
+        body = call.args[0]
+        assert len(body.encode("utf-16-le")) // 2 <= 2000
+        assert f"Page {index}/{len(calls)} · 10 topics" in body
+        assert "/detail video:<URL or ID> topic_index:<number>" in body
+        assert r"\*\*Mục\*\*" + " @\u200beveryone " in body
+        assert (job.source_url in body) is not long_url
+        assert "embed" not in call.kwargs
+        assert call.kwargs["allowed_mentions"].to_dict() == {"parse": []}
+    assert sum(call.args[0].count(r"\*\*Mục\*\*") for call in calls) == 10
+
+
+@pytest.mark.asyncio
+async def test_topic_delivery_falls_back_if_discord_rejects_embed(monkeypatch):
+    cog, job = make_manual_fallback_job()
+    monkeypatch.setattr(
+        manualsummary_module,
+        "get_topic_list",
+        AsyncMock(return_value=[Topic(name="Intro")]),
+    )
+    missing_permission = discord.Forbidden(
+        SimpleNamespace(status=403, reason="Forbidden"), {"code": 50013}
+    )
+    channel = SimpleNamespace(send=AsyncMock(side_effect=[missing_permission, None]))
+    cog.bot.get_channel = lambda _: channel
+
+    await cog._generate(job)
+    assert await cog._deliver(job)
+
+    embed_attempt, text_attempt = channel.send.await_args_list
+    assert embed_attempt.kwargs["embed"].title == "Topics · Title"
+    assert "**1.** Intro" in text_attempt.args[0]
+    assert job.delivery_chunk_index == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lose_lease", [False, True])
+async def test_topic_delivery_checkpoints_each_page_and_resumes(
+    monkeypatch, lose_lease
+):
+    cog, job = make_manual_fallback_job()
+    summary = AsyncMock(return_value=[Topic(name=f"Topic {i}") for i in range(24)])
+    monkeypatch.setattr(manualsummary_module, "get_topic_list", summary)
+    await cog._generate(job)
+    progress = []
+    attempts = []
+
+    async def save(job):
+        progress.append(job.delivery_chunk_index)
+        return not (lose_lease and job.delivery_chunk_index == 1)
+
+    async def send(_, *, embed, **kwargs):
+        page = embed.footer.text.split(" · ", 1)[0]
+        attempts.append(page)
+        assert progress[-1] == int(page.split("/")[0].split()[-1]) - 1
+        if attempts == ["Page 1/3", "Page 2/3"]:
+            raise RuntimeError("Discord unavailable")
+
+    cog._save = save
+    cog.bot.get_channel = lambda _: SimpleNamespace(send=send)
+    assert not await cog._deliver(job)
+    assert job.delivery_chunk_index == 1
+    if lose_lease:
+        assert attempts == ["Page 1/3"]
+        assert progress == [0, 1]
+    else:
+        assert job.status is JobStatus.READY_TO_DELIVER
+        job = SummaryJob.model_construct(**job.model_dump())
+        job.claimed_by = cog.worker_id
+        assert await cog._deliver(job)
+        assert attempts == ["Page 1/3", "Page 2/3", "Page 2/3", "Page 3/3"]
+        assert job.status is JobStatus.COMPLETED
+    summary.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -398,7 +587,7 @@ async def test_generic_job_restores_url_for_generation(monkeypatch):
     await cog._generate(job)
 
     assert summary.await_args.args[1] == ref
-    assert job.delivery_chunks == ["1: Introduction"]
+    assert job.delivery_chunks == ["**1.** Introduction"]
 
 
 def test_generic_detail_displays_title_without_missing_channel():

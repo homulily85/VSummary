@@ -2,16 +2,19 @@
 
 import logging
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import discord
 from discord.ext import commands, tasks
 
 from vsummary.model.channel import JobStatus, ManualSummaryOperation, SummaryJob
+from vsummary.model.video import Topic
 from vsummary.services.summary_jobs import SummaryJobService
 from vsummary.services.summary_retry import delivery_failure, source_failure
 from vsummary.settings import RuntimeConfig, Settings, runtime_config
-from vsummary.util.discord import send_limited, split_message
+from vsummary.util.discord import DISCORD_MESSAGE_LIMIT, send_limited, split_message
 from vsummary.util.generic_media import (
     GenericMediaError,
     GenericMediaUnavailableError,
@@ -26,7 +29,7 @@ from vsummary.util.summarizer import (
     retry_invalid_summary_response,
 )
 from vsummary.util.twitch import TwitchAudioError, TwitchAudioUnavailableError
-from vsummary.util.video import VideoRef
+from vsummary.util.video import VIDEO_SOURCE_LABELS, VideoRef, build_video_url
 from vsummary.util.video_metadata import (
     VideoMetadata,
     VideoMetadataError,
@@ -38,6 +41,64 @@ if TYPE_CHECKING:
     from vsummary.bot import Bot
 
 logger = logging.getLogger(__name__)
+
+_TOPICS_PER_PAGE = 10
+# Leave room for the title, channel name, page number, and help in plain text.
+_TOPIC_PAGE_BODY_LIMIT = 1400
+_DETAIL_HELP = "Use `/detail video:<URL or ID> topic_index:<number>` to open a topic."
+
+
+def _utf16_length(text: str) -> int:
+    """Measure text conservatively for Discord's character budget."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _escape_display_text(text: str) -> str:
+    """Keep generated text from becoming Discord formatting or mentions."""
+    return discord.utils.escape_mentions(
+        discord.utils.escape_markdown(text, ignore_links=False)
+    )
+
+
+def _format_topic_pages(topics: Sequence[Topic]) -> list[str]:
+    """Group complete, continuously numbered topic rows into message bodies."""
+    pages: list[str] = []
+    rows: list[str] = []
+    page_length = 0
+    for index, topic in enumerate(topics, start=1):
+        name = _escape_display_text(" ".join(topic.name.split()))
+        row = f"**{index}.** {name}"
+        row_length = _utf16_length(row) + 1  # Include room for a line break.
+        if rows and (
+            len(rows) == _TOPICS_PER_PAGE
+            or page_length + row_length > _TOPIC_PAGE_BODY_LIMIT
+        ):
+            pages.append("\n".join(rows))
+            rows = []
+            page_length = 0
+        page_length += row_length
+        rows.append(row)
+    if rows:
+        pages.append("\n".join(rows))
+    return pages
+
+
+def _short_label(value: str | None, limit: int) -> str:
+    """Normalize metadata to a single line and abbreviate long labels."""
+    label = " ".join((value or "").split())
+    return label if len(label) <= limit else label[: limit - 1].rstrip() + "…"
+
+
+def _channel_accepts_embeds(channel) -> bool:
+    """Check cached permissions when available, otherwise let Discord decide."""
+    member = getattr(getattr(channel, "guild", None), "me", None)
+    if member is None:
+        return True
+    try:
+        return channel.permissions_for(member).embed_links
+    except discord.ClientException:
+        # A thread may be resolved even when its parent channel is missing from cache.
+        return True
 
 
 class ManualSummary(commands.Cog):
@@ -89,6 +150,10 @@ class ManualSummary(commands.Cog):
     async def before_worker_loop(self):
         """Wait for Discord readiness before the first manual-job poll."""
         await self.bot.wait_until_ready()
+        logger.info(
+            "Manual summary worker ready",
+            extra={"context": {"worker_id": self.worker_id}},
+        )
 
     async def enqueue(
         self,
@@ -249,11 +314,9 @@ class ManualSummary(commands.Cog):
                 topics = await get_topic_list(
                     self.bot.notebook_client, ref, **generation_options
                 )
-                return split_message(
-                    "\n".join(
-                        f"{i + 1}: {topic.name}" for i, topic in enumerate(topics)
-                    )
-                )
+                pages = _format_topic_pages(topics)
+                job.topic_count = len(topics)
+                return pages
             if job.operation == ManualSummaryOperation.DETAIL_ONE:
                 detail = await get_topic_details(
                     self.bot.notebook_client,
@@ -314,11 +377,11 @@ class ManualSummary(commands.Cog):
         if not await self._save(job):
             job.claimed_by = None
 
-    async def _deliver(self, job):
+    async def _deliver(self, job: SummaryJob):
         """Deliver saved chunks to the originating Discord channel.
 
-        Prefix the first topics chunk with an introduction. Use the durable service to
-        record progress on success or failure.
+        Render paginated topic results as embeds and checkpoint each delivered page.
+        Keep the saved text path for legacy results, details, and failure notices.
 
         Args:
             job: Manual job with its saved delivery payload and destination.
@@ -329,6 +392,11 @@ class ManualSummary(commands.Cog):
         Raises:
             pymongo.errors.PyMongoError: If a job checkpoint cannot be saved.
         """
+        topic_count = (
+            job.topic_count
+            if job.operation == ManualSummaryOperation.TOPICS and not job.failure_notice
+            else None
+        )
 
         async def resolve_channel():
             """Resolve the destination for the enclosing job.
@@ -349,21 +417,77 @@ class ManualSummary(commands.Cog):
 
             Args:
                 channel: Resolved Discord destination.
-                chunk: Saved content, with the topics introduction added for the first
-                    chunk when applicable.
+                chunk: Saved text or a page of topic rows.
 
             Raises:
                 discord.HTTPException: If Discord cannot send the chunk.
             """
+            if topic_count is not None:
+                await self._send_topic_page(channel, job, chunk, topic_count)
+                return
             if (
                 job.operation == ManualSummaryOperation.TOPICS
                 and job.delivery_chunk_index == 0
                 and not job.failure_notice
             ):
-                chunk = "Here are the topics mentioned in the video:\n" + chunk
+                with_intro = "Here are the topics mentioned in the video:\n" + chunk
+                if _utf16_length(with_intro) <= DISCORD_MESSAGE_LIMIT:
+                    chunk = with_intro
             await send_limited(self.bot, channel.send, chunk)
 
-        return await self.jobs.deliver(job, resolve_channel, send, self._save)
+        return await self.jobs.deliver(
+            job,
+            resolve_channel,
+            send,
+            self._save,
+            checkpoint_each_chunk=topic_count is not None,
+        )
+
+    async def _send_topic_page(
+        self, channel, job: SummaryJob, rows: str, topic_count: int
+    ) -> None:
+        """Post one saved topics page as an embed or a bounded text message."""
+        source_label = VIDEO_SOURCE_LABELS[job.source]
+        title = f"Topics · {_short_label(job.title, 100) or source_label}"
+        channel_name = _short_label(job.channel_name, 80)
+        url = build_video_url(
+            VideoRef(source=job.source, video_id=job.video_id, url=job.source_url)
+        )
+        page = job.delivery_chunk_index + 1
+        page_count = len(job.delivery_chunks)
+        noun = "topic" if topic_count == 1 else "topics"
+        footer = f"Page {page}/{page_count} · {topic_count} {noun}"
+        mentions = discord.AllowedMentions.none()
+
+        if _channel_accepts_embeds(channel):
+            embed = discord.Embed(
+                title=title,
+                url=url,
+                description=f"{rows}\n\n{_DETAIL_HELP}",
+                colour=discord.Colour.blurple(),
+            )
+            if channel_name:
+                embed.set_author(name=channel_name)
+            embed.set_footer(text=footer)
+            try:
+                await send_limited(
+                    self.bot, channel.send, None, embed=embed, allowed_mentions=mentions
+                )
+                return
+            except discord.Forbidden as exc:
+                if exc.code != 50013:  # Missing Permissions
+                    raise
+
+        header = f"**{_escape_display_text(title)}**"
+        if channel_name:
+            header += f"\nChannel: {_escape_display_text(channel_name)}"
+        body = f"\n\n{rows}\n\n{footer}\n{_DETAIL_HELP}"
+        source = f"\n<{url}>"
+        if _utf16_length(header + source + body) <= DISCORD_MESSAGE_LIMIT:
+            header += source
+        await send_limited(
+            self.bot, channel.send, header + body, allowed_mentions=mentions
+        )
 
     async def _fail(self, job, exc, *, permanent=False, allow_youtube_fallback=False):
         """Record a source failure, schedule the next action, and release the lease.
