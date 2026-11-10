@@ -1769,6 +1769,7 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
         SimpleNamespace(
             video_id="dQw4w9WgXcQ",
             title="Auto video",
+            status=JobStatus.QUEUED,
             next_attempt_at=datetime(2026, 9, 19, 12, tzinfo=UTC),
         )
     ]
@@ -1778,12 +1779,14 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
             source="twitch",
             video_id="123456789",
             title="Manual video",
-            next_attempt_at=datetime(2026, 9, 19, 11, tzinfo=UTC),
+            status=JobStatus.GENERATING,
+            next_attempt_at=datetime.fromisoformat("2026-09-19T18:00:20+07:00"),
         ),
         SimpleNamespace(
             source="x_space",
             video_id="1DxleVnmlOmKL",
             title="Archived Space",
+            status=JobStatus.READY_TO_DELIVER,
             next_attempt_at=datetime(2026, 9, 19, 11, 30, tzinfo=UTC),
         ),
         SimpleNamespace(
@@ -1791,6 +1794,7 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
             video_id="hash",
             source_url="https://vimeo.com/123",
             title="Other media",
+            status=JobStatus.DELIVERING,
             next_attempt_at=datetime(2026, 9, 19, 11, 45, tzinfo=UTC),
         ),
     ]
@@ -1817,15 +1821,15 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
     assert interaction.followup.messages == [
         (
             (
-                "Queued videos:\n"
+                "Active jobs:\n"
                 "1. **Manual:** Manual video — <https://www.twitch.tv/videos/123456789> "
-                "— 2026-09-19T11:00:00Z\n"
+                "— **Generating** — <t:1789815620:S>\n"
                 "2. **Manual:** Archived Space — <https://x.com/i/spaces/1DxleVnmlOmKL> "
-                "— 2026-09-19T11:30:00Z\n"
+                "— **Ready to deliver** — <t:1789817400:S>\n"
                 "3. **Manual:** Other media — <https://vimeo.com/123> "
-                "— 2026-09-19T11:45:00Z\n"
+                "— **Delivering** — <t:1789818300:S>\n"
                 "4. **Auto:** Auto video — <https://www.youtube.com/watch?v=dQw4w9WgXcQ> "
-                "— 2026-09-19T12:00:00Z"
+                "— **Queued** — <t:1789819200:S>"
             ),
             {},
         )

@@ -286,8 +286,9 @@ class Summarizer(commands.Cog):
     async def queue(self, interaction: discord.Interaction):
         """Report active automatic and manual jobs in next-attempt order.
 
-        Use the stored title or video ID, source URL, and UTC next-attempt time for each
-        entry. Split long responses into Discord-sized chunks.
+        Show the title or video ID, source URL, status, and next-attempt time for each
+        job. Discord renders timestamps in each viewer's timezone. Split long responses
+        into Discord-sized chunks.
 
         Args:
             interaction: Discord request used to report the queue.
@@ -301,31 +302,27 @@ class Summarizer(commands.Cog):
         await interaction.response.defer(thinking=True)
         query = {"status": {"$in": _ACTIVE_JOB_STATUSES}}
         jobs = await SummaryJob.find(query).to_list()
-        entries = [
-            (
-                job.next_attempt_at,
-                "Auto" if job.job_type == "auto" else "Manual",
-                job.title or job.video_id,
-                build_video_url(
-                    VideoRef(
-                        source=job.source, video_id=job.video_id, url=job.source_url
-                    )
-                ),
-            )
-            for job in jobs
-        ]
-        if not entries:
+        if not jobs:
             await send_limited(
                 self.bot, interaction.followup.send, "The queue is empty."
             )
             return
-        entries.sort(key=lambda entry: entry[0])
-        message = "Queued videos:\n" + "\n".join(
-            f"{index}. **{kind}:** {title} — <{url}> — "
-            f"{timestamp.isoformat(timespec='seconds').replace('+00:00', 'Z')}"
-            for index, (timestamp, kind, title, url) in enumerate(entries, start=1)
-        )
-        for chunk in split_message(message):
+
+        jobs.sort(key=lambda job: job.next_attempt_at)
+        lines = ["Active jobs:"]
+        for index, job in enumerate(jobs, start=1):
+            kind = "Auto" if job.job_type == "auto" else "Manual"
+            title = job.title or job.video_id
+            url = build_video_url(
+                VideoRef(source=job.source, video_id=job.video_id, url=job.source_url)
+            )
+            status = job.status.value.replace("_", " ").capitalize()
+            timestamp = discord.utils.format_dt(job.next_attempt_at, "S")
+            lines.append(
+                f"{index}. **{kind}:** {title} — <{url}> — **{status}** — {timestamp}"
+            )
+
+        for chunk in split_message("\n".join(lines)):
             await send_limited(self.bot, interaction.followup.send, chunk)
 
 
