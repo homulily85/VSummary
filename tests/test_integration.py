@@ -1270,8 +1270,8 @@ def test_deletecache_command_has_one_required_argument_and_existing_access_model
     command = Summarizer.deletecache
     assert command.name == "deletecache"
     assert [
-        (parameter.name, parameter.required) for parameter in command.parameters
-    ] == [("video", True)]
+        (parameter.display_name, parameter.required) for parameter in command.parameters
+    ] == [("video_url_or_id", True)]
     assert (
         command.default_permissions == Autosummary.addignoredtopic.default_permissions
     )

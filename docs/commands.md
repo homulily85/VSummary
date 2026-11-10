@@ -1,16 +1,13 @@
 # Slash command reference
 
-Commands are synchronized when the bot starts. Type `/` in Discord to use
-autocomplete and view Discord's parameter descriptions.
-
 ## Manual summaries
 
 | Command | Parameters | Description |
 | --- | --- | --- |
-| `/topics` | `video` (required) | Queues a topic-list request and posts numbered pages to the invoking channel. |
-| `/detail` | `video` (required), `topic_index` (optional) | Generates detailed content. Omitting `topic_index` generates every topic; providing one generates only that topic. The request is always queued and the result is posted to the invoking channel. |
-| `/deletecache` | `video` (required) | Deletes one video's cached topics and details across all languages, including legacy entries. Replies are visible only to the requester. |
-| `/queue` | None | Lists active auto-summary and manual-summary jobs with their status and scheduled attempt time in the viewer's local timezone. |
+| `/topics` | `video_url_or_id` (required) | Queues a topic-list request and posts numbered pages to the invoking channel. |
+| `/detail` | `video_url_or_id` (required), `topic_index` (optional) | Generates detailed content. Omitting `topic_index` generates every topic; providing one generates only that topic. |
+| `/deletecache` | `video_url_or_id` (required) | Deletes one video's cached topics and details across all languages.|
+| `/queue` | None | Lists active auto-summary and manual-summary jobs.|
 | `/ping` | None | Confirms that the bot is responding and displays gateway latency. |
 
 ### Supported video inputs
@@ -21,61 +18,9 @@ autocomplete and view Discord's parameter descriptions.
   `https://www.twitch.tv/videos/123456789`. Bare VOD IDs are not accepted.
 - **X (Twitter) Space:** a public archived Space URL such as
   `https://x.com/i/spaces/1OwxWwQOPlNxQ`, or an X post URL whose media resolves
-  to a Space. `twitter.com`/`x.com` plus `www`, `m`, and `mobile` variants and
-  query parameters are accepted. Upcoming, live, replay-disabled, and
-  not-yet-archived Spaces are rejected before a job is queued.
+  to a Space.
 - **Other media:** a public HTTP(S) URL for one finished video or audio item
   accessible to `yt-dlp`, including Twitch clips and public video posts.
-  Playlist, live, upcoming, private, and unsupported URLs are rejected.
-  Support depends on the site and may change when the site changes.
-
-Examples:
-
-```text
-/topics video:https://www.youtube.com/watch?v=dQw4w9WgXcQ
-/detail video:dQw4w9WgXcQ topic_index:2
-/detail video:https://www.twitch.tv/videos/123456789
-/topics video:https://x.com/i/spaces/1OwxWwQOPlNxQ
-/topics video:https://vimeo.com/123456789
-/deletecache video:dQw4w9WgXcQ
-```
-
-Each `/topics` page shows the source, topic numbers, and how to request details.
-The bot uses plain text in channels where it lacks **Embed Links**. To open a
-specific topic, run `/detail` with the same video and its displayed topic number
-as `topic_index`. The numbering starts at 1 and continues across pages. For an
-invalid index, the bot posts an error after the worker processes the job.
-
-New topic lists use `summary.output_language` from `config.toml` (English by
-default) and are checked against the source in a second NotebookLM request for
-missing or overly broad topics before being cached.
-Detail summaries adapt to the amount of discussion, from a short paragraph for
-brief topics to several paragraphs for substantial topics. Prompts request a
-maximum of 450 words per topic. Cached topics and details are reused separately
-for each language. After changing the language and restarting the bot, request
-`/topics` again before choosing a topic index, since the lists can differ.
-
-### Deleting cached summaries
-
-Use `/deletecache video:<URL-or-ID>` to clear every cached language for one
-video, including older entries without a language tag. The reply reports the
-number of cache records deleted, or that no cached summary was found. Each
-record contains a topic list and its generated details; the count is not the
-number of topics. Command access follows the existing topic-policy commands
-and can be managed through Discord server integration permissions.
-
-YouTube IDs/URLs, Twitch VOD URLs, direct X Space URLs, and other media URLs use
-the same normalized identities as summary requests. Direct references do not
-require the recording to remain available. X post URLs require metadata
-resolution to find a Space; if resolution fails, provide the direct Space URL.
-An X post that explicitly contains no Space uses the generic media URL cache.
-
-The command waits for local generation of that video to finish before deleting
-its cache. Queued jobs, saved delivery output and checkpoints, and posted
-Discord messages remain unchanged. Saved output can still be delivered, and
-pending generation can recreate the cache. The command itself does not generate
-a summary; a later `/topics` or `/detail` request creates fresh output when its
-language cache is absent.
 
 ## Automatic-summary channel tracking
 
@@ -87,43 +32,3 @@ language cache is absent.
 | `/addignoredtopic` | `topic_id` (required) | Prevents future videos with this Holodex topic from creating auto-summary jobs. |
 | `/removeignoredtopic` | `topic_id` (required) | Allows future videos with this Holodex topic to create auto-summary jobs. |
 | `/listignoredtopics` | None | Lists Holodex topics currently ignored by auto-summary. |
-
-For `/addchannel`, `/removechannel`, and `/listchannels`, `channel_id` is a
-YouTube channel ID (usually starts with `UC`), not a Discord channel ID or a
-streamer's display name. For example:
-
-```text
-/addchannel channel_id:UCQ0UDLQCjY0rmuxCDE38FGg
-/removechannel channel_id:UCQ0UDLQCjY0rmuxCDE38FGg
-```
-
-The bot checks for new videos every 30 minutes. Automatic summaries are sent to
-`discord.auto_summary_channel_id`,
-not the channel where `/addchannel` was invoked. Set this option to a Discord channel where the bot
-has **View Channel** and **Send Messages**.
-
-Topic-policy commands apply globally to this bot instance. Configure which
-users, roles, and channels may use them in Discord's **Server Settings →
-Integrations**. Their `topic_id` value is the Holodex topic classification, not
-a free-form video topic. Topic IDs are matched case-insensitively. The initial
-ignored topics are `Original_Song`, `membersonly`, `shorts`, and `Music_Cover`;
-server administrators can remove any of them.
-
-Policies are evaluated against a video's publication time, not the time the
-bot polls it. Adding a topic ignores only videos published after the command;
-removing it allows only videos published after that command. Before generating
-an automatic summary, the bot checks the video's Holodex topic again. A queued
-job is cancelled without posting if Holodex has since classified the video
-under a topic ignored at its publication time. If Holodex cannot provide a
-topic, the bot retries the lookup once and then continues with auto-summary.
-
-## Troubleshooting
-
-| Symptom | What to check |
-| --- | --- |
-| `The application did not respond` | Confirm the bot is online, its token belongs to the Application that owns the slash command, and the process was restarted after changing the token. |
-| `Missing Access` while posting a result | Check the job `channel_id`, **View Channel**/**Send Messages**, and category overrides. |
-| A Twitch VOD cannot be processed | Use a full public VOD URL, install `ffmpeg`, and ensure its converted audio fits NotebookLM's upload limit. |
-| An X Space cannot be processed | Use a public archived Space (or a post that resolves to one), install `ffmpeg`, and ensure its converted audio fits NotebookLM's upload limit. |
-| Another media URL cannot be processed | Use a public URL for one completed recording supported by `yt-dlp`, install `ffmpeg`, and ensure its audio fits NotebookLM's upload limit. |
-| NotebookLM is temporarily unavailable | Check `retries.source_limit`; inspect `logging.path` or the channel configured by `logging.discord_channel_id` for details. |

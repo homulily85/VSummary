@@ -9,6 +9,7 @@ import pytest
 
 import vsummary.cogs.manualsummary.manualsummary as manualsummary_module
 from vsummary.cogs.manualsummary.manualsummary import ManualSummary
+from vsummary.cogs.summarizer.summarizer import Summarizer
 from vsummary.model.channel import JobStatus, ManualSummaryOperation, SummaryJob
 from vsummary.model.video import Topic
 from vsummary.services import summary_jobs
@@ -18,6 +19,14 @@ from vsummary.util.summarizer import InvalidSummaryResponse, PermanentSummaryErr
 from vsummary.util.twitch import TwitchAudioUnavailableError
 from vsummary.util.video import parse_non_space_video_source
 from vsummary.util.video_work import VideoWorkCoordinator
+
+
+@pytest.mark.parametrize("command", [Summarizer.topics, Summarizer.detail])
+def test_manual_slash_command_has_required_video_url_or_id(command):
+    option = command.parameters[0]
+
+    assert option.display_name == "video_url_or_id"
+    assert option.required
 
 
 def test_manual_worker_inherits_bot_settings():
@@ -352,7 +361,10 @@ async def test_topic_pages_link_to_source_and_keep_topic_indices(monkeypatch, co
         assert page.url == job.source_url
         assert page.author.name == "Channel"
         assert page.footer.text.startswith(f"Page {index}/{len(pages)} · {count} topic")
-        assert "/detail video:<URL or ID> topic_index:<number>" in page.description
+        assert (
+            "/detail video_url_or_id:<URL or ID> topic_index:<number>"
+            in page.description
+        )
         rows = [row for row in page.description.splitlines() if row.startswith("**")]
         assert len(rows) <= 10
         topic_rows.extend(rows)
@@ -413,7 +425,7 @@ async def test_topic_text_fallback_keeps_pages_safe(monkeypatch, long_url):
         body = call.args[0]
         assert len(body.encode("utf-16-le")) // 2 <= 2000
         assert f"Page {index}/{len(calls)} · 10 topics" in body
-        assert "/detail video:<URL or ID> topic_index:<number>" in body
+        assert "/detail video_url_or_id:<URL or ID> topic_index:<number>" in body
         assert r"\*\*Mục\*\*" + " @\u200beveryone " in body
         assert (job.source_url in body) is not long_url
         assert "embed" not in call.kwargs
