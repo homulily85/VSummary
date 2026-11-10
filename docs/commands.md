@@ -7,10 +7,10 @@ autocomplete and view Discord's parameter descriptions.
 
 | Command | Parameters | Description |
 | --- | --- | --- |
-| `/topics` | `video` (required) | Queues a topic-list request and posts the plain-text result to the invoking channel. |
+| `/topics` | `video` (required) | Queues a topic-list request and posts numbered pages to the invoking channel. |
 | `/detail` | `video` (required), `topic_index` (optional) | Generates detailed content. Omitting `topic_index` generates every topic; providing one generates only that topic. The request is always queued and the result is posted to the invoking channel. |
 | `/deletecache` | `video` (required) | Deletes one video's cached topics and details across all languages, including legacy entries. Replies are visible only to the requester. |
-| `/queue` | None | Lists active auto-summary and manual-summary jobs in processing order. |
+| `/queue` | None | Lists active auto-summary and manual-summary jobs with their status and scheduled attempt time in the viewer's local timezone. |
 | `/ping` | None | Confirms that the bot is responding and displays gateway latency. |
 
 ### Supported video inputs
@@ -40,9 +40,11 @@ Examples:
 /deletecache video:dQw4w9WgXcQ
 ```
 
-`topic_index` is one-based. For an invalid index, the bot posts an error after
-the worker processes the job. `/topics` does not provide an interactive topic
-picker; use `/detail` with `topic_index` to request a specific topic.
+Each `/topics` page shows the source, topic numbers, and how to request details.
+The bot uses plain text in channels where it lacks **Embed Links**. To open a
+specific topic, run `/detail` with the same video and its displayed topic number
+as `topic_index`. The numbering starts at 1 and continues across pages. For an
+invalid index, the bot posts an error after the worker processes the job.
 
 New topic lists use `summary.output_language` from `config.toml` (English by
 default) and are checked against the source in a second NotebookLM request for

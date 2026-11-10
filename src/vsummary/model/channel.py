@@ -164,6 +164,7 @@ class SummaryJob(Document):
         delivered_at: UTC time when delivery completed.
         delivery_chunks: Saved Discord message chunks in send order.
         delivery_chunk_index: Zero-based position of the next unsent chunk.
+        topic_count: Total topics in a paginated manual topics result, if present.
     """
 
     job_type: Literal["auto", "manual"]
@@ -193,6 +194,7 @@ class SummaryJob(Document):
     delivered_at: datetime | None = None
     delivery_chunks: list[str] = Field(default_factory=list)
     delivery_chunk_index: int = 0
+    topic_count: int | None = Field(default=None, gt=0)
 
     @field_validator(
         "available_at",

@@ -7,6 +7,13 @@ from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
 from vsummary.util.youtube import InvalidYouTubeInputError, to_video_url
 
+VIDEO_SOURCE_LABELS = {
+    "youtube": "YouTube video",
+    "twitch": "Twitch VOD",
+    "x_space": "X Space",
+    "yt_dlp": "Media",
+}
+
 
 class UnsupportedVideoSource(ValueError):
     """Signal media input that cannot be represented by a supported source."""
