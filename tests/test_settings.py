@@ -32,6 +32,8 @@ def test_config_example_matches_builtin_defaults():
     )
     assert "database" not in parsed
     assert "holodex" not in parsed
+    assert "workers" not in parsed
+    assert "media" not in parsed
     assert parsed["summary"]["output_language"] == "English"
 
 
@@ -62,11 +64,6 @@ def test_settings_loads_typed_toml_options_and_keeps_database_fixed():
         SECRETS,
         config={
             "discord": {"auto_summary_channel_id": 123, "send_interval_seconds": 0.5},
-            "workers": {
-                "poll_interval_minutes": 15,
-                "manual_poll_interval_seconds": 3,
-                "lease_seconds": 120,
-            },
             "retries": {
                 "source_limit": 4,
                 "delivery_limit": 3,
@@ -76,12 +73,6 @@ def test_settings_loads_typed_toml_options_and_keeps_database_fixed():
             },
             "autosummary": {"transcript_delay_seconds": 60},
             "youtube": {"yt_dlp_fallback_enabled": True},
-            "media": {
-                "max_audio_mib": 20,
-                "bitrate_kbps": 32,
-                "download_format": "worstaudio",
-                "upload_timeout_seconds": 9,
-            },
             "logging": {
                 "path": "var/log/bot.log",
                 "level": "debug",
@@ -97,9 +88,6 @@ def test_settings_loads_typed_toml_options_and_keeps_database_fixed():
     assert settings.mongodb_database == "VSummary"
     assert settings.auto_summary_channel_id == 123
     assert settings.discord_send_interval_seconds == 0.5
-    assert settings.poll_interval_minutes == 15
-    assert settings.manual_poll_interval_seconds == 3
-    assert settings.job_lease_seconds == 120
     assert settings.source_retry_limit == 4
     assert settings.delivery_retry_limit == 3
     assert settings.retry_initial_delay_seconds == 7
@@ -107,10 +95,6 @@ def test_settings_loads_typed_toml_options_and_keeps_database_fixed():
     assert settings.invalid_summary_retries == 0
     assert settings.transcript_delay_seconds == 60
     assert settings.youtube_yt_dlp_fallback_enabled is True
-    assert settings.max_audio_mib == 20
-    assert settings.audio_bitrate_kbps == 32
-    assert settings.audio_download_format == "worstaudio"
-    assert settings.source_upload_timeout_seconds == 9
     assert settings.log_file_path == Path("var/log/bot.log")
     assert settings.log_level == "DEBUG"
     assert settings.log_rotation_interval_days == 2
@@ -211,23 +195,42 @@ def test_invalid_or_unsupported_config_is_rejected(tmp_path, text):
         load_settings(SECRETS, config_path=path, load_dotenv_file=False)
 
 
+def test_worker_settings_are_rejected(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[workers]\npoll_interval_minutes = 15\n"
+        "manual_poll_interval_seconds = 3\nlease_seconds = 120\n"
+    )
+    with pytest.raises(SettingsError, match="Unknown configuration section: workers"):
+        load_settings(SECRETS, config_path=path, load_dotenv_file=False)
+
+
+def test_media_settings_are_rejected(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[media]\nmax_audio_mib = 20\nbitrate_kbps = 32\n"
+        'download_format = "worstaudio"\nupload_timeout_seconds = 9\n'
+    )
+    with pytest.raises(SettingsError, match="Unknown configuration section: media"):
+        load_settings(SECRETS, config_path=path, load_dotenv_file=False)
+
+
 @pytest.mark.parametrize(
     ("section", "key", "value"),
     [
         ("youtube", "yt_dlp_fallback_enabled", "true"),
-        ("workers", "lease_seconds", 0),
-        ("workers", "manual_poll_interval_seconds", float("nan")),
-        pytest.param("workers", "lease_seconds", 10**400, id="oversized-number"),
-        ("workers", "poll_interval_minutes", float("inf")),
+        ("discord", "send_interval_seconds", float("nan")),
+        pytest.param(
+            "retries", "initial_delay_seconds", 10**400, id="oversized-number"
+        ),
+        ("retries", "initial_delay_seconds", float("inf")),
         ("discord", "auto_summary_channel_id", True),
         ("discord", "send_interval_seconds", -1),
         ("retries", "invalid_response_retries", -1),
         ("retries", "source_limit", True),
         ("retries", "multiplier", 0.5),
         ("autosummary", "transcript_delay_seconds", -1),
-        ("media", "bitrate_kbps", 1.5),
-        ("media", "max_audio_mib", 0),
-        ("media", "download_format", ""),
+        ("logging", "discord_queue_size", 1.5),
         ("logging", "level", "verbose"),
         ("logging", "discord_min_level", "bad"),
         ("logging", "discord_queue_size", 0),
@@ -286,11 +289,13 @@ def test_operational_injection_does_not_forward_or_represent_secrets():
         "MONGODB_URI": "mongodb://user:secret-value@localhost",
         "HOLODEX_API_KEY": "holodex-secret-value",
     }
-    settings = Settings.from_mapping(values, config={"media": {"bitrate_kbps": 32}})
+    settings = Settings.from_mapping(
+        values, config={"summary": {"output_language": "Vietnamese"}}
+    )
     config = settings_module.runtime_config(settings)
     assert type(config) is settings_module.RuntimeConfig
     assert not hasattr(config, "discord_token")
     assert not hasattr(config, "mongodb_uri")
     assert not hasattr(config, "holodex_api_key")
-    assert config.audio_bitrate_kbps == 32
+    assert config.output_language == "Vietnamese"
     assert all(value not in repr(settings) for value in values.values())

@@ -1,7 +1,5 @@
 """Holodex subscriptions, topic policies, and automatic summary delivery."""
 
-from __future__ import annotations
-
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -63,7 +61,7 @@ class Autosummary(commands.Cog):
     NotebookLM work.
     """
 
-    def __init__(self, bot: Bot, *, start_polling: bool = True):
+    def __init__(self, bot: "Bot", *, start_polling: bool = True):
         """Configure the automatic worker and optionally start polling.
 
         Args:
@@ -80,7 +78,6 @@ class Autosummary(commands.Cog):
         self.notebook = bot.notebook_client
         self.summary_service = bot.summary_service
         self.worker_id = uuid.uuid4().hex
-        self.poll_loop.change_interval(minutes=self.config.poll_interval_minutes)
         if start_polling:
             self.poll_loop.start()
 
@@ -110,7 +107,7 @@ class Autosummary(commands.Cog):
         """
         await ensure_default_auto_summary_topic_policies()
 
-    @tasks.loop()
+    @tasks.loop(minutes=30)
     async def poll_loop(self):
         """Scan followed channels and advance due automatic jobs for one poll."""
         await self.check_new_videos()
@@ -647,14 +644,6 @@ class Autosummary(commands.Cog):
         """
         for chunk in split_message(text):
             await send_limited(self.bot, channel.send, chunk)
-
-    def _lease_duration(self) -> timedelta:
-        """Read the configured worker claim lifetime.
-
-        Returns:
-            Lease interval as a timedelta.
-        """
-        return timedelta(seconds=self.config.job_lease_seconds)
 
     @staticmethod
     def _job_context(job: SummaryJob, **additional) -> dict[str, object]:

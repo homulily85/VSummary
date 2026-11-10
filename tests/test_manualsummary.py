@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,6 +10,7 @@ import vsummary.cogs.manualsummary.manualsummary as manualsummary_module
 from vsummary.cogs.manualsummary.manualsummary import ManualSummary
 from vsummary.model.channel import JobStatus, ManualSummaryOperation, SummaryJob
 from vsummary.model.video import Topic
+from vsummary.services import summary_jobs
 from vsummary.settings import RuntimeConfig
 from vsummary.util.generic_media import GenericMediaUnavailableError
 from vsummary.util.summarizer import InvalidSummaryResponse, PermanentSummaryError
@@ -19,13 +20,11 @@ from vsummary.util.video_work import VideoWorkCoordinator
 
 
 def test_manual_worker_inherits_bot_settings():
-    settings = RuntimeConfig(
-        output_language="Vietnamese", manual_poll_interval_seconds=42
-    )
+    settings = RuntimeConfig(output_language="Vietnamese")
     cog = ManualSummary(SimpleNamespace(settings=settings), start_worker=False)
 
     assert cog.config.output_language == "Vietnamese"
-    assert cog.worker_loop.seconds == 42
+    assert cog.worker_loop.seconds == 10
 
 
 def make_manual_fallback_job(
@@ -71,7 +70,7 @@ def make_manual_fallback_job(
 async def test_manual_invalid_response_retry_budget_and_config_propagation(monkeypatch):
     cog, job = make_manual_fallback_job(retry_count=0)
     cog.settings = RuntimeConfig(
-        invalid_summary_retries=2, source_upload_timeout_seconds=11
+        invalid_summary_retries=2, output_language="Vietnamese"
     )
     error = InvalidSummaryResponse("bad JSON")
     summary = AsyncMock(side_effect=[error, error, [Topic(name="Intro")]])
@@ -79,7 +78,7 @@ async def test_manual_invalid_response_retry_budget_and_config_propagation(monke
     await cog._generate(job)
     assert job.status is JobStatus.READY_TO_DELIVER
     assert summary.await_count == 3
-    assert summary.await_args.kwargs["config"].source_upload_timeout_seconds == 11
+    assert summary.await_args.kwargs["config"].output_language == "Vietnamese"
 
 
 @pytest.mark.asyncio
@@ -483,7 +482,7 @@ async def test_manual_generation_renews_owned_lease(monkeypatch):
     cog.settings = None
     cog.worker_id = "worker"
 
-    cog.settings = RuntimeConfig(job_lease_seconds=0.03)
+    monkeypatch.setattr(summary_jobs, "_JOB_LEASE_DURATION", timedelta(seconds=0.03))
 
     async with cog.jobs.maintain_lease(SimpleNamespace(id="job")):
         await asyncio.wait_for(renewed.wait(), timeout=1)

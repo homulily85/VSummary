@@ -119,9 +119,6 @@ without brackets or quotation marks.
 | --- | --- | --- |
 | `discord.auto_summary_channel_id` | Omitted | Destination for automatic summaries. |
 | `discord.send_interval_seconds` | `1.0` | Minimum gap between outbound messages. |
-| `workers.poll_interval_minutes` | `30` | Automatic-summary polling interval. |
-| `workers.manual_poll_interval_seconds` | `10` | Manual worker interval. |
-| `workers.lease_seconds` | `900` | Shared job lease duration; renewed every third of the duration. |
 | `retries.source_limit` | `5` | Native generation failure threshold. |
 | `retries.delivery_limit` | `5` | Discord delivery failure threshold. |
 | `retries.initial_delay_seconds` | `3600` | First durable retry delay. |
@@ -130,10 +127,6 @@ without brackets or quotation marks.
 | `autosummary.transcript_delay_seconds` | `7200` | Delay after stream completion before first generation. |
 | `summary.output_language` | `"English"` | Language for generated topic names and details. |
 | `youtube.yt_dlp_fallback_enabled` | `false` | One final audio attempt after native retries. Requires `ffmpeg`. |
-| `media.max_audio_mib` | `190` | Maximum prepared audio size in MiB. |
-| `media.bitrate_kbps` | `64` | Converted M4A bitrate. |
-| `media.download_format` | `"bestaudio/best"` | yt-dlp source format selector. |
-| `media.upload_timeout_seconds` | `600` | Wait for uploaded audio processing. |
 | `logging.path` | `"logs/vsummary.log"` | Rotating file-log destination. |
 | `logging.level` | `"INFO"` | Global minimum severity. |
 | `logging.rotation_interval_days` | `1` | File rotation interval in UTC days. |
@@ -146,8 +139,12 @@ Numbers must be finite and positive, except retry counts, transcript delay, and
 backup count may be zero. A source/delivery threshold of zero schedules no
 durable retries after the initial failure. Logging levels accept `DEBUG`,
 `INFO`, `WARNING`, `ERROR`, or `CRITICAL`, ignoring case. Booleans use TOML
-`true`/`false`, without quotes. Shared media settings apply to Twitch, archived
-X Spaces, generic media, and the YouTube audio fallback.
+`true`/`false`, without quotes.
+
+Twitch, archived X Spaces, generic media, and the YouTube audio fallback use
+yt-dlp's `bestaudio/best` format and convert to M4A at 64 kbps. Prepared audio
+is limited to 190 MiB. The bot waits up to 600 seconds for NotebookLM to process
+an uploaded audio source.
 
 ### Summary output language and cache
 
@@ -187,7 +184,6 @@ this mapping, then remove the old entries from `.env` and any service environmen
 | --- | --- |
 | `AUTO_SUMMARY_CHANNEL_ID` | `discord.auto_summary_channel_id` |
 | `DISCORD_SEND_INTERVAL_SECONDS` | `discord.send_interval_seconds` |
-| `POLL_INTERVAL_MINUTES` | `workers.poll_interval_minutes` |
 | `SOURCE_RETRY_LIMIT` | `retries.source_limit` |
 | `DELIVERY_RETRY_LIMIT` | `retries.delivery_limit` |
 | `YOUTUBE_YT_DLP_FALLBACK_ENABLED` | `youtube.yt_dlp_fallback_enabled` |
@@ -200,6 +196,10 @@ to TOML booleans; omit empty channel IDs. `MONGODB_DATABASE` and
 `HTTP_TIMEOUT_SECONDS` are unsupported. The database is fixed to `VSummary`
 and the Holodex client uses a 15-second timeout. `APP_ID`, `PUBLIC_KEY`, and
 `TWITCH_MAX_DURATION_SECONDS` are unused legacy entries and do not need TOML options.
+
+Remove any `[workers]` or `[media]` section from `config.toml` before restarting.
+The automatic worker polls every 30 minutes, the manual worker every 10 seconds,
+and both use a 900-second job lease.
 
 ### Optional YouTube audio fallback
 

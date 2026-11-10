@@ -642,7 +642,7 @@ async def test_workers_preserve_retry_policy_for_topic_review(
     cleaned = []
 
     @asynccontextmanager
-    async def fake_download(ref, *, config):
+    async def fake_download(ref):
         downloads.append(ref)
         try:
             yield audio
@@ -1115,9 +1115,8 @@ async def test_youtube_audio_fallback_uploads_audio_and_keeps_the_youtube_cache(
     cleaned = []
 
     @asynccontextmanager
-    async def fake_download(ref, *, config):
+    async def fake_download(ref):
         assert ref == VIDEO_REF
-        assert config.output_language == "Japanese"
         downloads.append(ref)
         try:
             yield audio
@@ -2388,12 +2387,11 @@ async def test_poll_loop_waits_for_discord_ready_before_first_run():
     bot.wait_until_ready.assert_awaited_once_with()
 
 
-def test_autosummary_poll_interval_comes_from_settings():
+def test_autosummary_poll_interval_is_fixed():
     settings = Settings(
         discord_token="token",
         mongodb_uri="mongodb://localhost",
         holodex_api_key="test-holodex-key",
-        poll_interval_minutes=7,
     )
     bot = SimpleNamespace(
         fetch_channel=None,
@@ -2410,7 +2408,7 @@ def test_autosummary_poll_interval_comes_from_settings():
     assert cog.holodex is bot.holodex
     assert cog.summary_service is bot.summary_service
 
-    assert cog.poll_loop.minutes == 7
+    assert cog.poll_loop.minutes == 30
 
 
 @pytest.mark.asyncio
@@ -2443,33 +2441,6 @@ async def test_bot_reuses_holodex_managed_by_startup():
     finally:
         await bot.close()
     holodex.aclose.assert_not_awaited()
-
-
-def test_manual_poll_and_lease_interval_come_from_config():
-    config = RuntimeConfig(manual_poll_interval_seconds=3, job_lease_seconds=120)
-    cog = ManualSummary(SimpleNamespace(), settings=config, start_worker=False)
-    assert cog.worker_loop.seconds == 3
-    assert cog._lease_duration().total_seconds() == 120
-
-
-@pytest.mark.asyncio
-async def test_summary_service_passes_media_config_to_uploads(monkeypatch, tmp_path):
-    config = RuntimeConfig(source_upload_timeout_seconds=11, audio_bitrate_kbps=32)
-    client = FakeNotebookClient(answers=['[{"name":"Intro"}]'] * 2 + ["Details"])
-    client.sources.add_file = AsyncMock()
-    audio = tmp_path / "audio.m4a"
-    audio.write_bytes(b"audio")
-
-    @asynccontextmanager
-    async def fake_download(ref, *, config):
-        assert config.audio_bitrate_kbps == 32
-        yield audio
-
-    monkeypatch.setattr(summarizer_util, "download_generic_audio", fake_download)
-    await NotebookLMSummaryService(client, config=config).summarize(
-        VIDEO_REF, use_youtube_audio=True
-    )
-    assert client.sources.add_file.await_args.kwargs["wait_timeout"] == 11
 
 
 @pytest.mark.asyncio

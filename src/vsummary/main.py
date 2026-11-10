@@ -1,7 +1,5 @@
 """Console entry points and ownership of the bot's external connections."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 from contextlib import AsyncExitStack

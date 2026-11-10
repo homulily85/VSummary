@@ -1,7 +1,5 @@
 """Console and file logging with optional queued delivery to Discord."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import re
@@ -114,7 +112,7 @@ class DiscordLogHandler(logging.Handler):
             return
         self._enqueue(message)
 
-    async def start(self, bot: Bot) -> None:
+    async def start(self, bot: "Bot") -> None:
         """Resolve the destination and schedule delivery once Discord is ready.
 
         Use the channel cache before fetching the channel. Disable the sink if

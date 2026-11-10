@@ -227,7 +227,8 @@ locked virtual environment is used.
   missing files, unknown options, invalid types, and malformed TOML fail startup.
   Database name (`VSummary`) and Holodex settings remain fixed in code. Old
   non-secret environment options are ignored. Preserve injected configuration
-  through workers, retries, all audio downloaders, NotebookLM uploads, and logging.
+  through workers, retries, and logging. Audio download options and the NotebookLM
+  upload wait timeout are fixed in code.
 - `summary.output_language` defaults to `"English"` and controls generated topic
   names and details through both topic-list passes and detail prompts. Use the
   injected setting, not a fixed language or an environment override. Pending

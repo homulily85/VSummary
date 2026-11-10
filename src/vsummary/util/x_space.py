@@ -1,7 +1,5 @@
 """Recognize X URLs, verify archived Spaces, and prepare replay audio."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import re
@@ -17,7 +15,7 @@ from urllib.parse import urlparse
 
 import yt_dlp
 
-from vsummary.settings import RuntimeConfig, runtime_config
+from vsummary.util.audio import MAX_AUDIO_BYTES, audio_options
 
 if TYPE_CHECKING:
     from vsummary.util.video import VideoRef
@@ -118,7 +116,7 @@ def parse_x_space_input(value: str) -> XSpaceInput | None:
     return None
 
 
-async def resolve_parsed_x_space(x_input: XSpaceInput) -> VideoRef:
+async def resolve_parsed_x_space(x_input: XSpaceInput) -> "VideoRef":
     """Resolve a recognized X link to a playable Space replay.
 
     Args:
@@ -171,7 +169,7 @@ def _extract_x_space_info(url: str) -> dict:
     return info
 
 
-def _ref_from_info(info: dict, input_kind: XSpaceInputKind) -> VideoRef:
+def _ref_from_info(info: dict, input_kind: XSpaceInputKind) -> "VideoRef":
     """Validate Space metadata and build its replay reference.
 
     Args:
@@ -270,13 +268,12 @@ def _resolution_error_from_exception(
     return XSpaceResolutionError("This X Space is unavailable or cannot be accessed.")
 
 
-def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) -> Path:
+def _download(url: str, directory: str) -> Path:
     """Revalidate an archived Space and convert its replay to M4A.
 
     Args:
         url: Canonical archived Space URL.
         directory: Directory for the converted file.
-        config: Download format, bitrate, and size limit. Defaults to runtime settings.
 
     Returns:
         Path to the single validated M4A file.
@@ -287,23 +284,9 @@ def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) 
         XSpaceAudioError: If the expected single M4A output is missing or ambiguous.
         OSError: If the output cannot be inspected on disk.
     """
-    config = runtime_config(config)
     if shutil.which("ffmpeg") is None:
         raise XSpaceAudioUnavailableError("ffmpeg is required to process X Space audio")
-    options = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "format": config.audio_download_format,
-        "outtmpl": str(Path(directory) / "%(id)s.%(ext)s"),
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "m4a",
-                "preferredquality": str(config.audio_bitrate_kbps),
-            }
-        ],
-    }
+    options = audio_options(Path(directory) / "%(id)s.%(ext)s")
     try:
         with yt_dlp.YoutubeDL(options) as downloader:
             info = downloader.extract_info(url, download=False)
@@ -324,7 +307,7 @@ def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) 
     paths = list(Path(directory).glob("*.m4a"))
     if len(paths) != 1:
         raise XSpaceAudioError("X Space audio download did not produce an M4A file")
-    if paths[0].stat().st_size > config.max_audio_mib * 1024 * 1024:
+    if paths[0].stat().st_size > MAX_AUDIO_BYTES:
         raise XSpaceAudioUnavailableError(
             "X Space audio exceeds NotebookLM's upload limit"
         )
@@ -333,14 +316,11 @@ def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) 
 
 
 @asynccontextmanager
-async def download_x_space_audio(
-    ref: VideoRef, *, config: RuntimeConfig | None = None
-) -> AsyncIterator[Path]:
+async def download_x_space_audio(ref: "VideoRef") -> AsyncIterator[Path]:
     """Prepare replay audio for an archived Space in a temporary directory.
 
     Args:
         ref: Normalized X Space reference.
-        config: Audio settings. Defaults to runtime settings.
 
     Yields:
         Path to the M4A file, available until the context exits.
@@ -359,6 +339,5 @@ async def download_x_space_audio(
             _download,
             f"https://x.com/i/spaces/{ref.video_id}",
             directory,
-            **({"config": config} if config is not None else {}),
         )
         yield path

@@ -14,6 +14,8 @@ from vsummary.services.summary_retry import delivery_failure
 from vsummary.settings import RuntimeConfig
 from vsummary.util.discord import split_message
 
+_JOB_LEASE_DURATION = timedelta(seconds=900)
+
 
 class LeaseLostError(Exception):
     """Signal that a running job's lease could no longer be renewed."""
@@ -35,21 +37,13 @@ class SummaryJobService:
             job_type: Durable job category owned by this worker, either ``auto`` or
                 ``manual``.
             worker_id: Worker identifier stored in job leases.
-            config: Lease and retry settings.
+            config: Delivery retry settings.
             logger: Logger used for ownership and renewal failures.
         """
         self.job_type = job_type
         self.worker_id = worker_id
         self.config = config
         self.logger = logger
-
-    def lease_duration(self) -> timedelta:
-        """Convert the configured lease interval to a duration.
-
-        Returns:
-            Time a new or renewed claim remains valid.
-        """
-        return timedelta(seconds=self.config.job_lease_seconds)
 
     def owned_query(self, job: SummaryJob) -> dict[str, object]:
         """Build a write filter for a job owned by this worker.
@@ -100,7 +94,7 @@ class SummaryJobService:
                             "status": new.value,
                             "claimed_by": self.worker_id,
                             "claimed_at": now,
-                            "lease_expires_at": now + self.lease_duration(),
+                            "lease_expires_at": now + _JOB_LEASE_DURATION,
                         }
                     },
                     return_document=ReturnDocument.AFTER,
@@ -154,7 +148,7 @@ class SummaryJobService:
         Raises:
             pymongo.errors.PyMongoError: If MongoDB cannot complete the update.
         """
-        expires = datetime.now(UTC) + self.lease_duration()
+        expires = datetime.now(UTC) + _JOB_LEASE_DURATION
         result = await SummaryJob.get_pymongo_collection().update_one(
             self.owned_query(job), {"$set": {"lease_expires_at": expires}}
         )
@@ -185,7 +179,7 @@ class SummaryJobService:
             """Renew periodically and cancel the owner if the lease cannot be extended."""
             nonlocal lost
             while True:
-                await asyncio.sleep(self.lease_duration().total_seconds() / 3)
+                await asyncio.sleep(_JOB_LEASE_DURATION.total_seconds() / 3)
                 try:
                     if await self.renew(job):
                         continue

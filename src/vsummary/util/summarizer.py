@@ -18,6 +18,7 @@ from vsummary.util.video import VideoRef, build_video_url
 from vsummary.util.x_space import download_x_space_audio
 
 logger = logging.getLogger(__name__)
+_SOURCE_UPLOAD_TIMEOUT_SECONDS = 600
 # Conservative application budget, not a claimed Google API limit. UTF-8 bytes
 # also bound character count and leave headroom for multilingual topic names.
 _MAX_CHAT_QUESTION_BYTES = 4000
@@ -363,7 +364,6 @@ async def _create_notebook_with_source(
     ref: VideoRef,
     *,
     use_youtube_audio: bool = False,
-    config: RuntimeConfig | None = None,
 ) -> "Notebook":
     """Open a temporary notebook and attach the requested source.
 
@@ -375,7 +375,6 @@ async def _create_notebook_with_source(
         ref: Media reference used for the URL and source selection.
         use_youtube_audio: Whether to upload downloaded YouTube audio while retaining
             the original reference.
-        config: Download and upload settings. Defaults to runtime settings.
 
     Returns:
         Notebook with its source attached. The caller owns its deletion.
@@ -389,38 +388,36 @@ async def _create_notebook_with_source(
         OSError: If a file operation fails.
     """
     video_link = build_video_url(ref)
-    options = {"config": config} if config is not None else {}
-    upload_timeout = runtime_config(config).source_upload_timeout_seconds
     notebook = await client.notebooks.create(video_link)
     try:
         if ref.source == "twitch":
-            async with download_twitch_audio(ref, **options) as audio:
+            async with download_twitch_audio(ref) as audio:
                 await client.sources.add_file(
                     notebook.id,
                     audio,
                     mime_type="audio/mp4",
                     wait=True,
-                    wait_timeout=upload_timeout,
+                    wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
                     title=f"Twitch VOD {ref.video_id}",
                 )
         elif ref.source == "x_space":
-            async with download_x_space_audio(ref, **options) as audio:
+            async with download_x_space_audio(ref) as audio:
                 await client.sources.add_file(
                     notebook.id,
                     audio,
                     mime_type="audio/mp4",
                     wait=True,
-                    wait_timeout=upload_timeout,
+                    wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
                     title=f"X Space {ref.video_id}",
                 )
         elif ref.source == "yt_dlp" or (ref.source == "youtube" and use_youtube_audio):
-            async with download_generic_audio(ref, **options) as audio:
+            async with download_generic_audio(ref) as audio:
                 await client.sources.add_file(
                     notebook.id,
                     audio,
                     mime_type="audio/mp4",
                     wait=True,
-                    wait_timeout=upload_timeout,
+                    wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
                     title=f"YouTube video {ref.video_id}"
                     if ref.source == "youtube"
                     else "Media",
@@ -576,7 +573,7 @@ async def _get_or_create_topic_list(
     )
 
     notebook = await _create_notebook_with_source(
-        client, ref, use_youtube_audio=use_youtube_audio, config=config
+        client, ref, use_youtube_audio=use_youtube_audio
     )
     try:
         logger.info(f"Asking notebook {notebook.id} for topics...")
@@ -721,7 +718,7 @@ async def get_topic_details(
 
         if notebook is None:
             notebook = await _create_notebook_with_source(
-                client, ref, use_youtube_audio=use_youtube_audio, config=config
+                client, ref, use_youtube_audio=use_youtube_audio
             )
         prompt = _topic_prompt(
             topics, topic_index, output_language=runtime_config(config).output_language
@@ -791,7 +788,7 @@ async def get_topic_details_all(
 
     if notebook is None and any(t.detail is None for t in topics):
         notebook = await _create_notebook_with_source(
-            client, ref, use_youtube_audio=use_youtube_audio, config=config
+            client, ref, use_youtube_audio=use_youtube_audio
         )
 
     results = []
