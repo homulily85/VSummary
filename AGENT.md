@@ -221,13 +221,14 @@ locked virtual environment is used.
   `settings.py` validates TOML with the standard-library `tomllib` reader before
   external services start. Do not read environment or configuration files from
   cogs or utility modules; inject `RuntimeConfig` or `Settings` instead.
-- Required variables are `DISCORD_TOKEN` and `MONGODB_URI`.
+- Required variables are `DISCORD_TOKEN`, `MONGODB_URI`, and `HOLODEX_API_KEY`.
 - `config.example.toml` lists every operational option. Missing options and an
   absent default file use the centralized `RuntimeConfig` defaults; explicit
   missing files, unknown options, invalid types, and malformed TOML fail startup.
   Database name (`VSummary`) and Holodex settings remain fixed in code. Old
   non-secret environment options are ignored. Preserve injected configuration
-  through workers, retries, all audio downloaders, NotebookLM uploads, and logging.
+  through workers, retries, and logging. Audio download options and the NotebookLM
+  upload wait timeout are fixed in code.
 - `summary.output_language` defaults to `"English"` and controls generated topic
   names and details through both topic-list passes and detail prompts. Use the
   injected setting, not a fixed language or an environment override. Pending
@@ -299,8 +300,8 @@ Key points an agent should know before touching `util/summarizer.py`:
   `commands.Cog` (or uses `app_commands` for slash commands) and is loaded
   via an extension `setup()` function.
 - `bot.py` owns the `Bot` instance, intents configuration, dependency
-  injection, cog/extension loading, and shutdown. `main.py` owns MongoDB and
-  the NotebookLM context manager.
+  injection, cog/extension loading, and Discord shutdown. `main.py` owns the
+  Holodex, MongoDB, and NotebookLM clients.
 - Keep the user-facing slash-command names stable: `/topics`, `/detail`, `/deletecache`,
   `/addchannel`, `/removechannel`, and `/listchannels`. Python method and
   model names may be made more descriptive without changing those command

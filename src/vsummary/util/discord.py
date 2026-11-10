@@ -1,7 +1,5 @@
 """Message splitting and shared rate limiting for Discord sends."""
 
-from __future__ import annotations
-
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
@@ -60,7 +58,7 @@ class DiscordMessageRateLimiter:
             return await sender(content, **kwargs)
 
 
-async def send_limited(bot: Bot, sender, content: str, **kwargs: Any) -> Any:
+async def send_limited(bot: "Bot", sender, content: str, **kwargs: Any) -> Any:
     """Send a message using the bot's limiter when one is installed.
 
     Args:

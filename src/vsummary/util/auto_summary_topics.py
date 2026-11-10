@@ -1,7 +1,5 @@
 """Read and append effective-dated topic decisions for automatic summaries."""
 
-from __future__ import annotations
-
 from datetime import UTC, datetime
 
 from pymongo.errors import DuplicateKeyError

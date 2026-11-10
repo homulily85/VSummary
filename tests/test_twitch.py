@@ -3,7 +3,6 @@ from unittest.mock import MagicMock
 import pytest
 import yt_dlp
 
-from vsummary.settings import RuntimeConfig
 from vsummary.util import twitch
 
 
@@ -59,10 +58,10 @@ def test_download_rejects_audio_that_exceeds_notebooklm_upload_limit(
     downloader.extract_info.return_value = {"id": "123456789", "duration": 86_400}
     monkeypatch.setattr(twitch.yt_dlp, "YoutubeDL", lambda _: downloader)
     (tmp_path / "123456789.m4a").write_bytes(b"audio")
+    monkeypatch.setattr(twitch, "MAX_AUDIO_BYTES", 1)
 
     with pytest.raises(twitch.TwitchAudioUnavailableError, match="upload limit"):
         twitch._download(
             "https://www.twitch.tv/videos/123456789",
             str(tmp_path),
-            config=RuntimeConfig(max_audio_mib=1 / 1024**2),
         )

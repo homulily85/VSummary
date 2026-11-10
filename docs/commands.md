@@ -95,8 +95,8 @@ streamer's display name. For example:
 /removechannel channel_id:UCQ0UDLQCjY0rmuxCDE38FGg
 ```
 
-The bot checks for new videos according to `workers.poll_interval_minutes` in
-`config.toml`. Automatic summaries are sent to `discord.auto_summary_channel_id`,
+The bot checks for new videos every 30 minutes. Automatic summaries are sent to
+`discord.auto_summary_channel_id`,
 not the channel where `/addchannel` was invoked. Set this option to a Discord channel where the bot
 has **View Channel** and **Send Messages**.
 

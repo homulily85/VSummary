@@ -4,11 +4,6 @@
 # auto_summary_channel_id = 123456789012345678
 send_interval_seconds = 1.0
 
-[workers]
-poll_interval_minutes = 30
-manual_poll_interval_seconds = 10
-lease_seconds = 900
-
 [retries]
 source_limit = 5
 delivery_limit = 5
@@ -24,12 +19,6 @@ output_language = "English"
 
 [youtube]
 yt_dlp_fallback_enabled = false
-
-[media]
-max_audio_mib = 190
-bitrate_kbps = 64
-download_format = "bestaudio/best"
-upload_timeout_seconds = 600
 
 [logging]
 path = "logs/vsummary.log"

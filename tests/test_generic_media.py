@@ -3,7 +3,6 @@ from unittest.mock import MagicMock
 import pytest
 import yt_dlp
 
-from vsummary.settings import RuntimeConfig
 from vsummary.util import generic_media
 from vsummary.util.video import VideoRef
 
@@ -33,7 +32,7 @@ def test_inspect_accepts_single_public_media(monkeypatch):
 
 
 @pytest.mark.parametrize("source", ["generic_media", "twitch", "x_space"])
-def test_all_audio_backends_use_configured_format_bitrate_and_size(
+def test_all_audio_backends_use_fixed_format_bitrate_and_size(
     monkeypatch, tmp_path, source
 ):
     from importlib import import_module
@@ -54,16 +53,16 @@ def test_all_audio_backends_use_configured_format_bitrate_and_size(
     monkeypatch.setattr(
         module.yt_dlp, "YoutubeDL", lambda value: options.append(value) or downloader
     )
-    (tmp_path / "audio.m4a").write_bytes(b"audio")
-    config = RuntimeConfig(
-        max_audio_mib=1 / 1024**2,
-        audio_bitrate_kbps=32,
-        audio_download_format="worstaudio",
-    )
+    output = tmp_path / "audio.m4a"
+    with output.open("wb") as stream:
+        stream.truncate(190 * 1024**2)
+    assert module._download("https://example.test/media", str(tmp_path)) == output
+    with output.open("ab") as stream:
+        stream.write(b"a")
     with pytest.raises(RuntimeError, match="upload limit"):
-        module._download("https://example.test/media", str(tmp_path), config=config)
-    assert options[0]["format"] == "worstaudio"
-    assert options[0]["postprocessors"][0]["preferredquality"] == "32"
+        module._download("https://example.test/media", str(tmp_path))
+    assert options[0]["format"] == "bestaudio/best"
+    assert options[0]["postprocessors"][0]["preferredquality"] == "64"
 
 
 @pytest.mark.parametrize(

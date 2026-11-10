@@ -2,12 +2,14 @@
 
 import asyncio
 import logging
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from vsummary.model.channel import JobStatus, SummaryJob
+from vsummary.services import summary_jobs
 from vsummary.services.summary_jobs import LeaseLostError, SummaryJobService
 from vsummary.settings import RuntimeConfig
 
@@ -17,9 +19,14 @@ def service(request):
     return SummaryJobService(
         request.param,
         "worker",
-        RuntimeConfig(job_lease_seconds=0.03),
+        RuntimeConfig(),
         logging.getLogger(__name__),
     )
+
+
+@pytest.fixture
+def short_lease(monkeypatch):
+    monkeypatch.setattr(summary_jobs, "_JOB_LEASE_DURATION", timedelta(seconds=0.03))
 
 
 @pytest.mark.asyncio
@@ -33,7 +40,9 @@ async def test_claim_queries_recover_missing_leases_and_isolate_job_types(
     assert len(calls) == 4
     for call in calls:
         assert call.args[0]["job_type"] == service.job_type
-        assert call.args[1]["$set"]["claimed_by"] == "worker"
+        claim = call.args[1]["$set"]
+        assert claim["claimed_by"] == "worker"
+        assert claim["lease_expires_at"] - claim["claimed_at"] == timedelta(seconds=900)
     for call in calls[2:]:
         assert {"lease_expires_at": None} in call.args[0]["$or"]
         assert {"lease_expires_at": {"$exists": False}} in call.args[0]["$or"]
@@ -41,7 +50,7 @@ async def test_claim_queries_recover_missing_leases_and_isolate_job_types(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("renewal", [False, RuntimeError("database offline")])
-async def test_lost_lease_interrupts_processing(service, renewal):
+async def test_lost_lease_interrupts_processing(service, renewal, short_lease):
     service.renew = AsyncMock(
         side_effect=renewal if isinstance(renewal, Exception) else None,
         return_value=False,
@@ -76,7 +85,9 @@ async def test_external_cancellation_is_preserved(service):
 
 
 @pytest.mark.asyncio
-async def test_delivery_renews_and_checkpoints_only_on_error_or_completion(service):
+async def test_delivery_renews_and_checkpoints_only_on_error_or_completion(
+    service, short_lease
+):
     job = SimpleNamespace(
         id="job",
         delivery_chunks=["one", "two", "three"],

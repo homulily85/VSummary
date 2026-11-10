@@ -122,15 +122,13 @@ def make_youtube_fallback_job(*, enabled=True, retry_count=1):
 
 
 @pytest.mark.asyncio
-async def test_auto_job_backoff_and_lease_use_operational_config():
+async def test_auto_job_backoff_uses_operational_config():
     cog, job = make_youtube_fallback_job(enabled=False, retry_count=0)
     cog.settings = RuntimeConfig(
         source_retry_limit=5,
         retry_initial_delay_seconds=7,
         retry_multiplier=3,
-        job_lease_seconds=123,
     )
-    assert cog._lease_duration().total_seconds() == 123
     for delay in (7, 21):
         before = datetime.now(UTC)
         await cog._handle_source_error(job, RuntimeError("offline"))

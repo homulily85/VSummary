@@ -50,7 +50,7 @@ resumes instead of generating content again.
 ### Automatic requests
 
 `/addchannel` stores a Holodex channel in `FollowedChannel`. The auto-summary
-poller runs at `workers.poll_interval_minutes`, obtains streams published after the
+poller runs every 30 minutes, obtains streams published after the
 channel was added, ignores configured unwanted Holodex topic types, and creates
 an auto `SummaryJob` for each eligible stream. Generation is delayed until at least
 `autosummary.transcript_delay_seconds` after the stream ends (two hours by
@@ -206,8 +206,8 @@ explicit UTC timestamp and a Discord-rendered local timestamp for the viewer.
 Secrets come from `.env` or process environment. Non-secret options come only
 from optional `config.toml` in the working directory, with native TOML types
 and centralized defaults for omitted values. Configuration is validated once
-before opening external services, then injected into workers, upload helpers,
-audio downloaders, and logging. Environment options do not override TOML.
+before opening external services, then injected into workers and logging.
+Environment options do not override TOML.
 Database name and Holodex behavior remain fixed in code.
 
 Use the command guide for normal bot actions and the installation guide for

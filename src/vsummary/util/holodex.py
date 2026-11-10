@@ -1,7 +1,5 @@
 """Asynchronous Holodex requests, response validation, and retry pacing."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 from dataclasses import dataclass
@@ -15,14 +13,9 @@ from vsummary.logging import log_event
 
 logger = logging.getLogger(__name__)
 
-HOLODEX_BASE_URL = "https://holodex.net"
-HOLODEX_API_URL = f"{HOLODEX_BASE_URL}/api/v2"
+HOLODEX_API_URL = "https://holodex.net/api/v2"
 _REQUEST_INTERVAL_SECONDS = 2.0
-REFERER = f"{HOLODEX_BASE_URL}"
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
-)
+_MAX_PAGE_SIZE = 50
 DEFAULT_IGNORED_TOPICS = {
     "Original_Song",
     "membersonly",
@@ -101,6 +94,7 @@ class HolodexClient:
         self,
         transport: httpx.AsyncBaseTransport | None = None,
         *,
+        api_key: str,
         timeout: float = 15.0,
         retries: int = 2,
     ):
@@ -108,16 +102,21 @@ class HolodexClient:
 
         Args:
             transport: Optional HTTPX transport. By default, use HTTPX networking.
+            api_key: Credential sent to Holodex in the ``X-APIKEY`` header.
             timeout: Per-request HTTPX timeout in seconds.
             retries: Additional attempts for transient failures. Negative values act as
                 zero.
         """
+        api_key = api_key.strip()
+        if not api_key or not api_key.isascii() or not api_key.isprintable():
+            raise ValueError("HOLODEX_API_KEY must be non-empty and printable ASCII")
+
         self._retries = max(0, retries)
         self._request_lock = asyncio.Lock()
         self._next_request_at = float("-inf")
         self._client = httpx.AsyncClient(
             base_url=HOLODEX_API_URL,
-            headers={"referer": REFERER, "user-agent": USER_AGENT},
+            headers={"X-APIKEY": api_key},
             transport=transport,
             timeout=httpx.Timeout(timeout),
         )
@@ -246,7 +245,7 @@ class HolodexClient:
 
         Args:
             channel_id: Channel whose past streams to query.
-            limit: Maximum number of streams requested in the page.
+            limit: Maximum number of streams requested in the page, capped at 50.
             offset: Number of results to skip from the start of the listing.
 
         Returns:
@@ -260,12 +259,15 @@ class HolodexClient:
         """
         response = await self._request(
             "GET",
-            f"/channels/{channel_id}/videos",
+            "/videos",
             params={
+                "channel_id": channel_id,
                 "type": "stream",
-                "limit": limit,
-                "offset": offset,
                 "status": "past",
+                "sort": "available_at",
+                "order": "desc",
+                "limit": min(limit, _MAX_PAGE_SIZE),
+                "offset": offset,
             },
         )
         if response.is_error:
@@ -326,14 +328,14 @@ class HolodexClient:
         channel_id: str,
         since: datetime,
         *,
-        page_size: int = 50,
+        page_size: int = _MAX_PAGE_SIZE,
     ) -> list[HolodexVideo]:
         """Page through past streams until reaching the publication cutoff.
 
         Args:
             channel_id: Channel to scan in newest-first order.
             since: Exclusive, timezone-aware lower bound on publication time.
-            page_size: Positive maximum number of streams to request per page.
+            page_size: Positive maximum number of streams to request per page, capped at 50.
 
         Returns:
             Streams published strictly after the cutoff, in newest-first order.
@@ -348,6 +350,7 @@ class HolodexClient:
             raise ValueError("since must be timezone-aware")
         if page_size <= 0:
             raise ValueError("page_size must be positive")
+        page_size = min(page_size, _MAX_PAGE_SIZE)
 
         videos: list[HolodexVideo] = []
         offset = 0

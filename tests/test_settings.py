@@ -1,4 +1,5 @@
 import json
+import os
 import tomllib
 from pathlib import Path
 
@@ -7,7 +8,11 @@ import pytest
 from vsummary import settings as settings_module
 from vsummary.settings import Settings, SettingsError, load_settings
 
-SECRETS = {"DISCORD_TOKEN": "token", "MONGODB_URI": "mongodb://localhost"}
+SECRETS = {
+    "DISCORD_TOKEN": "token",
+    "MONGODB_URI": "mongodb://localhost",
+    "HOLODEX_API_KEY": "test-holodex-key",
+}
 
 
 def test_env_example_contains_only_supported_application_secrets():
@@ -27,6 +32,8 @@ def test_config_example_matches_builtin_defaults():
     )
     assert "database" not in parsed
     assert "holodex" not in parsed
+    assert "workers" not in parsed
+    assert "media" not in parsed
     assert parsed["summary"]["output_language"] == "English"
 
 
@@ -57,11 +64,6 @@ def test_settings_loads_typed_toml_options_and_keeps_database_fixed():
         SECRETS,
         config={
             "discord": {"auto_summary_channel_id": 123, "send_interval_seconds": 0.5},
-            "workers": {
-                "poll_interval_minutes": 15,
-                "manual_poll_interval_seconds": 3,
-                "lease_seconds": 120,
-            },
             "retries": {
                 "source_limit": 4,
                 "delivery_limit": 3,
@@ -71,12 +73,6 @@ def test_settings_loads_typed_toml_options_and_keeps_database_fixed():
             },
             "autosummary": {"transcript_delay_seconds": 60},
             "youtube": {"yt_dlp_fallback_enabled": True},
-            "media": {
-                "max_audio_mib": 20,
-                "bitrate_kbps": 32,
-                "download_format": "worstaudio",
-                "upload_timeout_seconds": 9,
-            },
             "logging": {
                 "path": "var/log/bot.log",
                 "level": "debug",
@@ -92,9 +88,6 @@ def test_settings_loads_typed_toml_options_and_keeps_database_fixed():
     assert settings.mongodb_database == "VSummary"
     assert settings.auto_summary_channel_id == 123
     assert settings.discord_send_interval_seconds == 0.5
-    assert settings.poll_interval_minutes == 15
-    assert settings.manual_poll_interval_seconds == 3
-    assert settings.job_lease_seconds == 120
     assert settings.source_retry_limit == 4
     assert settings.delivery_retry_limit == 3
     assert settings.retry_initial_delay_seconds == 7
@@ -102,10 +95,6 @@ def test_settings_loads_typed_toml_options_and_keeps_database_fixed():
     assert settings.invalid_summary_retries == 0
     assert settings.transcript_delay_seconds == 60
     assert settings.youtube_yt_dlp_fallback_enabled is True
-    assert settings.max_audio_mib == 20
-    assert settings.audio_bitrate_kbps == 32
-    assert settings.audio_download_format == "worstaudio"
-    assert settings.source_upload_timeout_seconds == 9
     assert settings.log_file_path == Path("var/log/bot.log")
     assert settings.log_level == "DEBUG"
     assert settings.log_rotation_interval_days == 2
@@ -169,21 +158,25 @@ def test_dotenv_secrets_preserve_environment_precedence_and_notebooklm_auth(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DISCORD_TOKEN", "environment-token")
     monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.setenv("HOLODEX_API_KEY", "  environment-holodex-key  ")
     monkeypatch.delenv("NOTEBOOKLM_PROFILE", raising=False)
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
     dotenv = tmp_path / ".env"
     dotenv.write_text(
-        "DISCORD_TOKEN=file-token\nMONGODB_URI=mongodb://file\nNOTEBOOKLM_PROFILE=bot\nLOG_LEVEL=DEBUG\n"
+        "DISCORD_TOKEN=file-token\nMONGODB_URI=mongodb://file\n"
+        "HOLODEX_API_KEY=file-holodex-key\nNOTEBOOKLM_PROFILE=bot\nLOG_LEVEL=DEBUG\n"
     )
     settings = load_settings(dotenv_path=dotenv)
     assert settings.discord_token == "environment-token"
     assert settings.mongodb_uri == "mongodb://file"
+    assert settings.holodex_api_key == "environment-holodex-key"
     assert settings.log_level == "INFO"
-    import os
-
     assert os.environ["NOTEBOOKLM_PROFILE"] == "bot"
-    monkeypatch.delenv("MONGODB_URI")
-    monkeypatch.delenv("NOTEBOOKLM_PROFILE")
-    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    monkeypatch.delenv("HOLODEX_API_KEY")
+    assert load_settings(dotenv_path=dotenv).holodex_api_key == "file-holodex-key"
+    os.environ.pop("MONGODB_URI")
+    os.environ.pop("NOTEBOOKLM_PROFILE")
+    os.environ.pop("LOG_LEVEL", None)
 
 
 @pytest.mark.parametrize(
@@ -202,23 +195,42 @@ def test_invalid_or_unsupported_config_is_rejected(tmp_path, text):
         load_settings(SECRETS, config_path=path, load_dotenv_file=False)
 
 
+def test_worker_settings_are_rejected(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[workers]\npoll_interval_minutes = 15\n"
+        "manual_poll_interval_seconds = 3\nlease_seconds = 120\n"
+    )
+    with pytest.raises(SettingsError, match="Unknown configuration section: workers"):
+        load_settings(SECRETS, config_path=path, load_dotenv_file=False)
+
+
+def test_media_settings_are_rejected(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[media]\nmax_audio_mib = 20\nbitrate_kbps = 32\n"
+        'download_format = "worstaudio"\nupload_timeout_seconds = 9\n'
+    )
+    with pytest.raises(SettingsError, match="Unknown configuration section: media"):
+        load_settings(SECRETS, config_path=path, load_dotenv_file=False)
+
+
 @pytest.mark.parametrize(
     ("section", "key", "value"),
     [
         ("youtube", "yt_dlp_fallback_enabled", "true"),
-        ("workers", "lease_seconds", 0),
-        ("workers", "manual_poll_interval_seconds", float("nan")),
-        pytest.param("workers", "lease_seconds", 10**400, id="oversized-number"),
-        ("workers", "poll_interval_minutes", float("inf")),
+        ("discord", "send_interval_seconds", float("nan")),
+        pytest.param(
+            "retries", "initial_delay_seconds", 10**400, id="oversized-number"
+        ),
+        ("retries", "initial_delay_seconds", float("inf")),
         ("discord", "auto_summary_channel_id", True),
         ("discord", "send_interval_seconds", -1),
         ("retries", "invalid_response_retries", -1),
         ("retries", "source_limit", True),
         ("retries", "multiplier", 0.5),
         ("autosummary", "transcript_delay_seconds", -1),
-        ("media", "bitrate_kbps", 1.5),
-        ("media", "max_audio_mib", 0),
-        ("media", "download_format", ""),
+        ("logging", "discord_queue_size", 1.5),
         ("logging", "level", "verbose"),
         ("logging", "discord_min_level", "bad"),
         ("logging", "discord_queue_size", 0),
@@ -262,15 +274,28 @@ def test_missing_required_secrets_still_fail():
         Settings.from_mapping({"DISCORD_TOKEN": "token"})
 
 
+@pytest.mark.parametrize("key", [None, "", " \t "])
+def test_holodex_key_is_required(key):
+    values = SECRETS | {"HOLODEX_API_KEY": key}
+    if key is None:
+        del values["HOLODEX_API_KEY"]
+    with pytest.raises(SettingsError, match="HOLODEX_API_KEY is required"):
+        Settings.from_mapping(values)
+
+
 def test_operational_injection_does_not_forward_or_represent_secrets():
     values = {
         "DISCORD_TOKEN": "discord-secret-value",
         "MONGODB_URI": "mongodb://user:secret-value@localhost",
+        "HOLODEX_API_KEY": "holodex-secret-value",
     }
-    settings = Settings.from_mapping(values, config={"media": {"bitrate_kbps": 32}})
+    settings = Settings.from_mapping(
+        values, config={"summary": {"output_language": "Vietnamese"}}
+    )
     config = settings_module.runtime_config(settings)
     assert type(config) is settings_module.RuntimeConfig
     assert not hasattr(config, "discord_token")
     assert not hasattr(config, "mongodb_uri")
-    assert config.audio_bitrate_kbps == 32
+    assert not hasattr(config, "holodex_api_key")
+    assert config.output_language == "Vietnamese"
     assert all(value not in repr(settings) for value in values.values())

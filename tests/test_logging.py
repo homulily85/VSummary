@@ -37,6 +37,7 @@ def test_configure_logging_writes_utf8_tracebacks_to_daily_rotating_file(
     settings = Settings(
         discord_token="token",
         mongodb_uri="mongodb://localhost",
+        holodex_api_key="test-holodex-key",
         log_file_path=tmp_path / "nested" / "vsummary.log",
         log_level="DEBUG",
     )
@@ -75,6 +76,7 @@ def test_configure_logging_fails_fast_when_log_file_cannot_be_opened(
     settings = Settings(
         discord_token="token",
         mongodb_uri="mongodb://localhost",
+        holodex_api_key="test-holodex-key",
         log_file_path=blocked_parent / "vsummary.log",
     )
 
@@ -86,7 +88,11 @@ def test_configured_logging_rotation_queue_and_discord_threshold(
     tmp_path, isolated_root_logger
 ):
     settings = Settings.from_mapping(
-        {"DISCORD_TOKEN": "token", "MONGODB_URI": "mongodb://localhost"},
+        {
+            "DISCORD_TOKEN": "token",
+            "MONGODB_URI": "mongodb://localhost",
+            "HOLODEX_API_KEY": "test-holodex-key",
+        },
         config={
             "logging": {
                 "path": str(tmp_path / "bot.log"),

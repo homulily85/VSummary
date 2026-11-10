@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yt_dlp
 
-from vsummary.settings import RuntimeConfig, runtime_config
+from vsummary.util.audio import MAX_AUDIO_BYTES, audio_options
 from vsummary.util.video import VideoRef, build_video_url
 
 logger = logging.getLogger(__name__)
@@ -24,13 +24,12 @@ class TwitchAudioUnavailableError(TwitchAudioError):
     """Signal inaccessible Twitch audio or an unsupported conversion or size."""
 
 
-def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) -> Path:
+def _download(url: str, directory: str) -> Path:
     """Download a Twitch VOD and validate its converted M4A file.
 
     Args:
         url: Public Twitch VOD URL.
         directory: Directory for the audio file.
-        config: Download format, bitrate, and size limit. Defaults to runtime settings.
 
     Returns:
         Path to the single M4A file in the output directory.
@@ -41,23 +40,9 @@ def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) 
         TwitchAudioError: If the expected single M4A output is missing or ambiguous.
         OSError: If the file cannot be inspected on disk.
     """
-    config = runtime_config(config)
     if shutil.which("ffmpeg") is None:
         raise TwitchAudioUnavailableError("ffmpeg is required to process Twitch audio")
-    options = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "format": config.audio_download_format,
-        "outtmpl": str(Path(directory) / "%(id)s.%(ext)s"),
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "m4a",
-                "preferredquality": str(config.audio_bitrate_kbps),
-            }
-        ],
-    }
+    options = audio_options(Path(directory) / "%(id)s.%(ext)s")
     try:
         with yt_dlp.YoutubeDL(options) as downloader:
             info = downloader.extract_info(url, download=False)
@@ -79,7 +64,7 @@ def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) 
     paths = list(Path(directory).glob("*.m4a"))
     if len(paths) != 1:
         raise TwitchAudioError("Twitch audio download did not produce an M4A file")
-    if paths[0].stat().st_size > config.max_audio_mib * 1024 * 1024:
+    if paths[0].stat().st_size > MAX_AUDIO_BYTES:
         raise TwitchAudioUnavailableError(
             "Twitch VOD audio exceeds NotebookLM's upload limit"
         )
@@ -88,14 +73,11 @@ def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) 
 
 
 @asynccontextmanager
-async def download_twitch_audio(
-    ref: VideoRef, *, config: RuntimeConfig | None = None
-) -> AsyncIterator[Path]:
+async def download_twitch_audio(ref: VideoRef) -> AsyncIterator[Path]:
     """Prepare a public Twitch VOD in a temporary directory.
 
     Args:
         ref: Normalized Twitch VOD reference.
-        config: Audio settings. Defaults to runtime settings.
 
     Yields:
         Path to the converted M4A file, available until the context exits.
@@ -110,8 +92,5 @@ async def download_twitch_audio(
     if ref.source != "twitch":
         raise ValueError("Twitch audio can only be downloaded for Twitch references")
     with tempfile.TemporaryDirectory(prefix="vsummary-twitch-") as directory:
-        options = {"config": config} if config is not None else {}
-        path = await asyncio.to_thread(
-            _download, build_video_url(ref), directory, **options
-        )
+        path = await asyncio.to_thread(_download, build_video_url(ref), directory)
         yield path

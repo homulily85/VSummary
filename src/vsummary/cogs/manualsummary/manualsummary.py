@@ -1,10 +1,8 @@
 """Durable generation and Discord delivery for manual summary requests."""
 
-from __future__ import annotations
-
 import logging
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from discord.ext import commands, tasks
@@ -46,7 +44,7 @@ class ManualSummary(commands.Cog):
     """Run manual video requests independently of expiring Discord interactions."""
 
     def __init__(
-        self, bot: Bot, *, settings: Settings | None = None, start_worker: bool = True
+        self, bot: "Bot", *, settings: Settings | None = None, start_worker: bool = True
     ):
         """Configure the worker and optionally start its polling loop.
 
@@ -61,9 +59,6 @@ class ManualSummary(commands.Cog):
         self.bot = bot
         self.settings = settings if settings is not None else bot.settings
         self.worker_id = uuid.uuid4().hex
-        self.worker_loop.change_interval(
-            seconds=self.config.manual_poll_interval_seconds
-        )
         if start_worker:
             self.worker_loop.start()
 
@@ -77,14 +72,6 @@ class ManualSummary(commands.Cog):
         """Effective operational settings for the worker, including runtime defaults."""
         return runtime_config(self.settings)
 
-    def _lease_duration(self) -> timedelta:
-        """Read the configured claim lifetime.
-
-        Returns:
-            Lease interval as a timedelta.
-        """
-        return timedelta(seconds=self.config.job_lease_seconds)
-
     def cog_unload(self):
         """Cancel the manual worker loop when Discord unloads the cog."""
         self.worker_loop.cancel()
@@ -93,7 +80,7 @@ class ManualSummary(commands.Cog):
         """Request cancellation of the manual worker during application shutdown."""
         self.worker_loop.cancel()
 
-    @tasks.loop()
+    @tasks.loop(seconds=10)
     async def worker_loop(self):
         """Run one poll of the durable manual-job queue."""
         await self.process_due_jobs()

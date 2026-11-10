@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 import yt_dlp
 
-from vsummary.settings import RuntimeConfig, runtime_config
+from vsummary.util.audio import MAX_AUDIO_BYTES, audio_options
 from vsummary.util.video import VideoRef, build_video_url, normalize_public_url
 from vsummary.util.video_metadata import VideoMetadata
 
@@ -23,39 +23,6 @@ class GenericMediaError(RuntimeError):
 
 class GenericMediaUnavailableError(GenericMediaError):
     """Signal media that cannot produce a supported, uploadable recording."""
-
-
-def _options(
-    directory: str | None = None, *, config: RuntimeConfig | None = None
-) -> dict:
-    """Build the yt-dlp options for inspection or audio conversion.
-
-    Args:
-        directory: Destination directory for M4A output, or ``None`` to omit conversion
-            options.
-        config: Operational settings for format selection and bitrate. Defaults to
-            runtime settings.
-
-    Returns:
-        yt-dlp option mapping.
-    """
-    config = runtime_config(config)
-    options = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "format": config.audio_download_format,
-    }
-    if directory is not None:
-        options["outtmpl"] = str(Path(directory) / "audio.%(ext)s")
-        options["postprocessors"] = [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "m4a",
-                "preferredquality": str(config.audio_bitrate_kbps),
-            }
-        ]
-    return options
 
 
 def _ensure_public_host(url: str) -> None:
@@ -132,7 +99,7 @@ def inspect_media(url: str) -> VideoMetadata | None:
     """
     _ensure_public_host(url)
     try:
-        with yt_dlp.YoutubeDL(_options()) as downloader:
+        with yt_dlp.YoutubeDL(audio_options()) as downloader:
             info = _require_one_finished_media(
                 downloader.extract_info(url, download=False)
             )
@@ -171,13 +138,12 @@ async def inspect_generic_media(ref: VideoRef) -> VideoMetadata | None:
     return await asyncio.to_thread(inspect_media, build_video_url(ref))
 
 
-def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) -> Path:
+def _download(url: str, directory: str) -> Path:
     """Download a single finished item and transcode its audio to M4A.
 
     Args:
         url: Public media URL.
         directory: Directory for the audio file.
-        config: Download format, bitrate, and size limit. Defaults to runtime settings.
 
     Returns:
         Path to the single M4A file in the output directory.
@@ -190,12 +156,13 @@ def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) 
             output is missing or ambiguous.
         OSError: If the output cannot be inspected on disk.
     """
-    config = runtime_config(config)
     _ensure_public_host(url)
     if shutil.which("ffmpeg") is None:
         raise GenericMediaUnavailableError("ffmpeg is required to process media audio.")
     try:
-        with yt_dlp.YoutubeDL(_options(directory, config=config)) as downloader:
+        with yt_dlp.YoutubeDL(
+            audio_options(Path(directory) / "audio.%(ext)s")
+        ) as downloader:
             info = _require_one_finished_media(
                 downloader.extract_info(url, download=False)
             )
@@ -209,7 +176,7 @@ def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) 
     paths = list(Path(directory).glob("*.m4a"))
     if len(paths) != 1:
         raise GenericMediaError("Media download did not produce one M4A file.")
-    if paths[0].stat().st_size > config.max_audio_mib * 1024 * 1024:
+    if paths[0].stat().st_size > MAX_AUDIO_BYTES:
         raise GenericMediaUnavailableError(
             "Media audio exceeds NotebookLM's upload limit."
         )
@@ -217,14 +184,11 @@ def _download(url: str, directory: str, *, config: RuntimeConfig | None = None) 
 
 
 @asynccontextmanager
-async def download_generic_audio(
-    ref: VideoRef, *, config: RuntimeConfig | None = None
-) -> AsyncIterator[Path]:
+async def download_generic_audio(ref: VideoRef) -> AsyncIterator[Path]:
     """Prepare generic media or YouTube fallback audio in a temporary directory.
 
     Args:
         ref: Generic or YouTube reference to download.
-        config: Audio settings. Defaults to runtime settings.
 
     Yields:
         Path to the M4A file, available until the context exits.
@@ -240,8 +204,5 @@ async def download_generic_audio(
     if ref.source not in {"yt_dlp", "youtube"}:
         raise ValueError("Generic audio requires a yt-dlp or YouTube reference.")
     with tempfile.TemporaryDirectory(prefix="vsummary-media-") as directory:
-        options = {"config": config} if config is not None else {}
-        path = await asyncio.to_thread(
-            _download, build_video_url(ref), directory, **options
-        )
+        path = await asyncio.to_thread(_download, build_video_url(ref), directory)
         yield path

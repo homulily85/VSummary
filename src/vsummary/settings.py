@@ -1,7 +1,5 @@
 """Runtime defaults, TOML validation, and environment-backed credentials."""
 
-from __future__ import annotations
-
 import math
 import os
 import tomllib
@@ -28,9 +26,6 @@ class RuntimeConfig:
         auto_summary_channel_id: Discord destination for automatic summaries, or
             ``None``.
         discord_send_interval_seconds: Minimum interval between Discord sends.
-        poll_interval_minutes: Interval between automatic worker polls.
-        manual_poll_interval_seconds: Interval between manual worker polls.
-        job_lease_seconds: Duration of a worker claim before it must be renewed.
         source_retry_limit: Generation failure count that exhausts ordinary retries.
         delivery_retry_limit: Delivery failure count at which delivery retries end.
         retry_initial_delay_seconds: Delay after the first retryable job failure.
@@ -39,11 +34,6 @@ class RuntimeConfig:
         transcript_delay_seconds: Time after a stream ends before it can be summarized.
         output_language: Language requested for generated topics and details.
         youtube_yt_dlp_fallback_enabled: Whether eligible jobs may try YouTube audio.
-        max_audio_mib: Maximum size of a prepared audio file, in mebibytes.
-        audio_bitrate_kbps: Target bitrate for transcoded audio, in kilobits per second.
-        audio_download_format: yt-dlp format selector used for downloads.
-        source_upload_timeout_seconds: Timeout for preparing an uploaded NotebookLM
-            source.
         log_file_path: Destination for rotating application logs.
         log_level: Minimum severity for application logging.
         log_rotation_interval_days: Number of days between log rotations.
@@ -57,9 +47,6 @@ class RuntimeConfig:
 
     auto_summary_channel_id: int | None = None
     discord_send_interval_seconds: float = 1.0
-    poll_interval_minutes: float = 30.0
-    manual_poll_interval_seconds: float = 10.0
-    job_lease_seconds: float = 900.0
     source_retry_limit: int = 5
     delivery_retry_limit: int = 5
     retry_initial_delay_seconds: float = 3600.0
@@ -68,10 +55,6 @@ class RuntimeConfig:
     transcript_delay_seconds: float = 7200.0
     output_language: str = "English"
     youtube_yt_dlp_fallback_enabled: bool = False
-    max_audio_mib: float = 190.0
-    audio_bitrate_kbps: int = 64
-    audio_download_format: str = "bestaudio/best"
-    source_upload_timeout_seconds: float = 600.0
     log_file_path: Path = Path("logs/vsummary.log")
     log_level: str = "INFO"
     log_rotation_interval_days: int = 1
@@ -81,7 +64,7 @@ class RuntimeConfig:
     discord_log_min_level: str = "WARNING"
 
     @classmethod
-    def from_mapping(cls, values: Mapping[str, object]) -> RuntimeConfig:
+    def from_mapping(cls, values: Mapping[str, object]) -> "RuntimeConfig":
         """Build operational settings from sectioned TOML data.
 
         Args:
@@ -132,11 +115,6 @@ _CONFIG_SECTIONS = {
         "auto_summary_channel_id": "auto_summary_channel_id",
         "send_interval_seconds": "discord_send_interval_seconds",
     },
-    "workers": {
-        "poll_interval_minutes": "poll_interval_minutes",
-        "manual_poll_interval_seconds": "manual_poll_interval_seconds",
-        "lease_seconds": "job_lease_seconds",
-    },
     "retries": {
         "source_limit": "source_retry_limit",
         "delivery_limit": "delivery_retry_limit",
@@ -147,12 +125,6 @@ _CONFIG_SECTIONS = {
     "autosummary": {"transcript_delay_seconds": "transcript_delay_seconds"},
     "summary": {"output_language": "output_language"},
     "youtube": {"yt_dlp_fallback_enabled": "youtube_yt_dlp_fallback_enabled"},
-    "media": {
-        "max_audio_mib": "max_audio_mib",
-        "bitrate_kbps": "audio_bitrate_kbps",
-        "download_format": "audio_download_format",
-        "upload_timeout_seconds": "source_upload_timeout_seconds",
-    },
     "logging": {
         "path": "log_file_path",
         "level": "log_level",
@@ -172,11 +144,13 @@ class Settings(RuntimeConfig):
     Attributes:
         discord_token: Token used to authenticate the bot with Discord.
         mongodb_uri: Connection URI for the asynchronous MongoDB client.
+        holodex_api_key: API key used to authenticate Holodex requests.
         mongodb_database: Fixed database name used by the application.
     """
 
     discord_token: str = dataclass_field(repr=False)
     mongodb_uri: str = dataclass_field(repr=False)
+    holodex_api_key: str = dataclass_field(repr=False)
     mongodb_database: ClassVar[str] = DATABASE_NAME
 
     @classmethod
@@ -185,12 +159,12 @@ class Settings(RuntimeConfig):
         values: Mapping[str, str | None],
         *,
         config: Mapping[str, object] | None = None,
-    ) -> Settings:
+    ) -> "Settings":
         """Build validated settings from separate credential and option mappings.
 
         Args:
-            values: Environment-style mapping containing ``DISCORD_TOKEN`` and
-                ``MONGODB_URI``.
+            values: Environment-style mapping containing ``DISCORD_TOKEN``,
+                ``MONGODB_URI``, and ``HOLODEX_API_KEY``.
             config: Optional sectioned TOML data. When omitted, use runtime defaults.
 
         Returns:
@@ -204,6 +178,7 @@ class Settings(RuntimeConfig):
         return cls(
             discord_token=_required(values, "DISCORD_TOKEN"),
             mongodb_uri=_required(values, "MONGODB_URI"),
+            holodex_api_key=_required(values, "HOLODEX_API_KEY"),
             **asdict(operational),
         )
 

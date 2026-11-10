@@ -1,9 +1,8 @@
 """Console entry points and ownership of the bot's external connections."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
+from contextlib import AsyncExitStack
 
 from beanie import init_beanie
 from dotenv import load_dotenv
@@ -19,6 +18,7 @@ from vsummary.model.channel import (
 )
 from vsummary.model.video import VideoSummary
 from vsummary.settings import Settings, SettingsError, load_settings
+from vsummary.util.holodex import HolodexClient
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +26,15 @@ logger = logging.getLogger(__name__)
 async def async_main(settings: Settings | None = None):
     """Configure and run the Discord bot until it exits.
 
-    Load dotenv, configure logging, register MongoDB models, and open an authenticated
-    NotebookLM session. Close the bot and its external connections as their scopes exit.
+    Load dotenv, configure logging, and open the Holodex, MongoDB, and NotebookLM
+    clients. Close the bot and its external connections at shutdown.
 
     Args:
         settings: Validated settings to use. When omitted, load them from the
             environment and the default TOML file.
 
     Raises:
-        SystemExit: If settings or required logging configuration fails.
+        SystemExit: If settings, logging configuration, or Holodex setup fails.
         pymongo.errors.PyMongoError: If MongoDB initialization fails.
         discord.LoginFailure: If Discord rejects the configured token.
         notebooklm.AuthError: If the stored NotebookLM session cannot authenticate.
@@ -51,10 +51,17 @@ async def async_main(settings: Settings | None = None):
     except LoggingConfigurationError as exc:
         logger.critical("Application startup aborted: %s", exc)
         raise SystemExit(1) from exc
-
-    logger.info("Connecting to MongoDB...")
-    mongo_client = AsyncMongoClient(settings.mongodb_uri, tz_aware=True)
     try:
+        holodex = HolodexClient(api_key=settings.holodex_api_key)
+    except ValueError as exc:
+        logger.error("Application startup aborted: %s", exc)
+        raise SystemExit(1) from exc
+
+    async with AsyncExitStack() as services:
+        services.push_async_callback(holodex.aclose)
+        logger.info("Connecting to MongoDB...")
+        mongo_client = AsyncMongoClient(settings.mongodb_uri, tz_aware=True)
+        services.push_async_callback(mongo_client.close)
         database = mongo_client[settings.mongodb_database]
         await init_beanie(
             database=database,
@@ -67,19 +74,18 @@ async def async_main(settings: Settings | None = None):
         )
         logger.info("Connected to MongoDB!")
 
-        async with NotebookLMClient.from_storage(keepalive=600) as notebook_client:
-            bot = Bot(
-                notebook_client=notebook_client,
-                settings=settings,
-                discord_log_handler=discord_log_handler,
-            )
-            logger.info("Bot is connecting...")
-            try:
-                await bot.start(settings.discord_token)
-            finally:
-                await bot.close()
-    finally:
-        await mongo_client.close()
+        notebook_client = await services.enter_async_context(
+            NotebookLMClient.from_storage(keepalive=600)
+        )
+        bot = Bot(
+            notebook_client=notebook_client,
+            settings=settings,
+            holodex=holodex,
+            discord_log_handler=discord_log_handler,
+        )
+        services.push_async_callback(bot.close)
+        logger.info("Bot is connecting...")
+        await bot.start(settings.discord_token)
 
 
 def main():
