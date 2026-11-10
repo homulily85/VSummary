@@ -18,7 +18,7 @@ class Bot(commands.Bot):
     Attributes:
         notebook_client: Authenticated NotebookLM client supplied by the application.
         settings: Injected settings or ``None`` when using runtime defaults.
-        holodex: Holodex client closed by the bot during shutdown.
+        holodex: Shared Holodex client managed by the application.
         summary_service: NotebookLM summary generator and cache interface.
         discord_log_handler: Optional sink started when Discord is ready.
         video_work: Process-local coordinator for per-video summary and cache work.
@@ -29,7 +29,8 @@ class Bot(commands.Bot):
         self,
         notebook_client: NotebookLMClient,
         settings: Settings | None = None,
-        holodex=None,
+        *,
+        holodex: HolodexClient,
         discord_log_handler: DiscordLogHandler | None = None,
     ):
         """Initialize Discord and compose the services used by the cogs.
@@ -37,7 +38,7 @@ class Bot(commands.Bot):
         Args:
             notebook_client: Authenticated NotebookLM client managed by the caller.
             settings: Application settings. When omitted, use the runtime defaults.
-            holodex: Client to reuse and close at shutdown. When omitted, create one.
+            holodex: Shared Holodex client managed by the caller.
             discord_log_handler: Optional handler for forwarding log events to Discord.
         """
         intents = discord.Intents.default()
@@ -45,7 +46,7 @@ class Bot(commands.Bot):
         super().__init__(command_prefix="/", intents=intents)
         self.notebook_client = notebook_client
         self.settings = settings
-        self.holodex = holodex if holodex is not None else HolodexClient()
+        self.holodex = holodex
         self.summary_service = NotebookLMSummaryService(
             notebook_client, config=runtime_config(settings)
         )
@@ -56,7 +57,7 @@ class Bot(commands.Bot):
         )
 
     async def close(self):
-        """Stop Discord logging, close cogs and the Holodex client, and disconnect.
+        """Stop Discord logging, close cogs, and disconnect.
 
         Shutdown awaits each close operation in order, so errors from a close operation
         propagate to the caller.
@@ -67,9 +68,6 @@ class Bot(commands.Bot):
             close = getattr(cog, "close", None)
             if close is not None:
                 await close()
-        if self.holodex is not None:
-            await self.holodex.aclose()
-            self.holodex = None
         await super().close()
 
     async def on_ready(self):

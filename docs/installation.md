@@ -79,7 +79,11 @@ takes precedence):
 ```dotenv
 DISCORD_TOKEN=replace-with-a-bot-token
 MONGODB_URI=mongodb://localhost:27017
+HOLODEX_API_KEY=replace-with-a-holodex-api-key
 ```
+
+Get the required API key from your Holodex account settings. The bot uses it to
+look up channels and discover finished streams. See the [Holodex API guide](https://docs.holodex.net/#section/Getting-Started).
 
 Operational options are read only from `config.toml` in the working directory.
 The file is optional and ignored by Git. To customize the defaults:
@@ -193,9 +197,8 @@ this mapping, then remove the old entries from `.env` and any service environmen
 
 Convert quoted environment numbers to TOML numbers and legacy boolean strings
 to TOML booleans; omit empty channel IDs. `MONGODB_DATABASE` and
-`HTTP_TIMEOUT_SECONDS` are unsupported: the database is fixed to `VSummary`,
-and Holodex retains its existing endpoint, headers, 15-second timeout, retries,
-pagination, and topic-refresh policy. `APP_ID`, `PUBLIC_KEY`, and
+`HTTP_TIMEOUT_SECONDS` are unsupported. The database is fixed to `VSummary`
+and the Holodex client uses a 15-second timeout. `APP_ID`, `PUBLIC_KEY`, and
 `TWITCH_MAX_DURATION_SECONDS` are unused legacy entries and do not need TOML options.
 
 ### Optional YouTube audio fallback
@@ -292,13 +295,14 @@ in your Google Account security settings. See the
 
 ### Pull and start the container
 
-Create a `.env` file with these two lines and replace the placeholders. Set
+Create a `.env` file with these credentials and replace the placeholders. Set
 the file's permissions to `0600`. Keep Google credentials in the profile
 directory.
 
 ```dotenv
 DISCORD_TOKEN=YOUR_DISCORD_BOT_TOKEN
 MONGODB_URI=YOUR_MONGODB_CONNECTION_STRING
+HOLODEX_API_KEY=YOUR_HOLODEX_API_KEY
 ```
 
 Create an empty `config.toml` with `touch config.toml` to use defaults, or

@@ -2167,7 +2167,9 @@ async def test_notebooklm_error_in_manual_detail_releases_work_for_auto_summary(
 
 @pytest.mark.asyncio
 async def test_bot_setup_loads_all_cogs_and_syncs_commands(monkeypatch):
-    bot = Bot(notebook_client=object())
+    holodex = SimpleNamespace(aclose=AsyncMock())
+    bot = Bot(notebook_client=object(), holodex=holodex)
+    assert bot.holodex is holodex
     loaded = []
     load_extension = AsyncMock(side_effect=lambda cog: loaded.append(cog))
     sync = AsyncMock()
@@ -2390,6 +2392,7 @@ def test_autosummary_poll_interval_comes_from_settings():
     settings = Settings(
         discord_token="token",
         mongodb_uri="mongodb://localhost",
+        holodex_api_key="test-holodex-key",
         poll_interval_minutes=7,
     )
     bot = SimpleNamespace(
@@ -2430,17 +2433,16 @@ async def test_autosummary_leaves_shared_holodex_open_on_unload():
 
 
 @pytest.mark.asyncio
-async def test_bot_creates_shared_services_and_closes_holodex():
-    bot = Bot(notebook_client=object())
-    holodex = bot.holodex
+async def test_bot_reuses_holodex_managed_by_startup():
+    holodex = SimpleNamespace(aclose=AsyncMock())
+    bot = Bot(notebook_client=object(), holodex=holodex)
     try:
-        assert holodex is not None
+        assert bot.holodex is holodex
         assert bot.summary_service.client is bot.notebook_client
         assert bot.summary_service.config is not None
     finally:
         await bot.close()
-    assert holodex._client.is_closed
-    assert bot.holodex is None
+    holodex.aclose.assert_not_awaited()
 
 
 def test_manual_poll_and_lease_interval_come_from_config():
@@ -2779,10 +2781,15 @@ async def test_autosummary_sends_long_summaries_in_discord_sized_chunks():
 
 
 @pytest.mark.asyncio
-async def test_startup_requires_discord_token_and_mongodb_uri(monkeypatch):
+async def test_startup_requires_all_credentials(monkeypatch, caplog, tmp_path):
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(main_module, "load_dotenv", lambda: None)
+    monkeypatch.setattr(main_module, "configure_logging", lambda _: None)
     monkeypatch.delenv("DISCORD_TOKEN", raising=False)
     monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.delenv("HOLODEX_API_KEY", raising=False)
+    mongo_client = Mock(side_effect=AssertionError("Startup reached MongoDB"))
+    monkeypatch.setattr(main_module, "AsyncMongoClient", mongo_client)
 
     with pytest.raises(SystemExit) as missing_token:
         await main_module.async_main()
@@ -2795,6 +2802,37 @@ async def test_startup_requires_discord_token_and_mongodb_uri(monkeypatch):
         await main_module.async_main()
 
     assert missing_uri.value.code == 1
+
+    monkeypatch.setenv("MONGODB_URI", "mongodb://localhost")
+
+    with pytest.raises(SystemExit) as missing_holodex_key:
+        await main_module.async_main()
+
+    assert missing_holodex_key.value.code == 1
+    assert "HOLODEX_API_KEY is required" in caplog.text
+    mongo_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_startup_rejects_invalid_injected_holodex_key(monkeypatch, caplog):
+    monkeypatch.setattr(main_module, "load_dotenv", lambda: None)
+    monkeypatch.setattr(main_module, "configure_logging", lambda _: None)
+    mongo_client = Mock(side_effect=AssertionError("Startup reached MongoDB"))
+    monkeypatch.setattr(main_module, "AsyncMongoClient", mongo_client)
+
+    settings = Settings(
+        discord_token="token",
+        mongodb_uri="mongodb://localhost",
+        holodex_api_key="private-key\ninvalid",
+    )
+
+    with pytest.raises(SystemExit) as error:
+        await main_module.async_main(settings)
+
+    assert error.value.code == 1
+    assert "HOLODEX_API_KEY" in caplog.text
+    assert "private-key" not in caplog.text
+    mongo_client.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2826,7 +2864,11 @@ async def test_startup_configures_timezone_aware_mongodb_datetimes(monkeypatch):
 
     with pytest.raises(RuntimeError, match="stop after client setup"):
         await main_module.async_main(
-            Settings(discord_token="token", mongodb_uri="mongodb://localhost")
+            Settings(
+                discord_token="token",
+                mongodb_uri="mongodb://localhost",
+                holodex_api_key="test-holodex-key",
+            )
         )
 
     assert mongo_client is not None
@@ -2839,9 +2881,8 @@ async def test_startup_configures_timezone_aware_mongodb_datetimes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_startup_initializes_database_before_opening_notebooklm(
-    monkeypatch,
-):
+@pytest.mark.parametrize("bot_error", [None, RuntimeError("Discord failed")])
+async def test_startup_wires_and_closes_external_clients(monkeypatch, bot_error):
     events = []
     database = object()
 
@@ -2864,7 +2905,8 @@ async def test_startup_initializes_database_before_opening_notebooklm(
         events.append("notebook")
         yield object()
 
-    bot = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
+    bot = SimpleNamespace(start=AsyncMock(side_effect=bot_error), close=AsyncMock())
+    make_bot = Mock(return_value=bot)
     monkeypatch.setattr(main_module, "load_dotenv", lambda: None)
     monkeypatch.setattr(main_module, "configure_logging", lambda _: None)
     monkeypatch.setattr(
@@ -2874,11 +2916,23 @@ async def test_startup_initializes_database_before_opening_notebooklm(
     monkeypatch.setattr(
         main_module, "NotebookLMClient", SimpleNamespace(from_storage=notebook_session)
     )
-    monkeypatch.setattr(main_module, "Bot", lambda **kwargs: bot)
-    settings = Settings(discord_token="token", mongodb_uri="mongodb://localhost")
+    monkeypatch.setattr(main_module, "Bot", make_bot)
+    settings = Settings(
+        discord_token="token",
+        mongodb_uri="mongodb://localhost",
+        holodex_api_key="test-holodex-key",
+    )
 
-    await main_module.async_main(settings)
+    if bot_error is None:
+        await main_module.async_main(settings)
+    else:
+        with pytest.raises(RuntimeError, match="Discord failed"):
+            await main_module.async_main(settings)
+
     assert events == ["initialize", "notebook"]
+    holodex = make_bot.call_args.kwargs["holodex"]
+    assert holodex._client.headers["X-APIKEY"] == settings.holodex_api_key
+    assert holodex._client.is_closed
     bot.start.assert_awaited_once_with("token")
     bot.close.assert_awaited_once()
     mongo_client.close.assert_awaited_once()

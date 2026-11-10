@@ -172,11 +172,13 @@ class Settings(RuntimeConfig):
     Attributes:
         discord_token: Token used to authenticate the bot with Discord.
         mongodb_uri: Connection URI for the asynchronous MongoDB client.
+        holodex_api_key: API key used to authenticate Holodex requests.
         mongodb_database: Fixed database name used by the application.
     """
 
     discord_token: str = dataclass_field(repr=False)
     mongodb_uri: str = dataclass_field(repr=False)
+    holodex_api_key: str = dataclass_field(repr=False)
     mongodb_database: ClassVar[str] = DATABASE_NAME
 
     @classmethod
@@ -189,8 +191,8 @@ class Settings(RuntimeConfig):
         """Build validated settings from separate credential and option mappings.
 
         Args:
-            values: Environment-style mapping containing ``DISCORD_TOKEN`` and
-                ``MONGODB_URI``.
+            values: Environment-style mapping containing ``DISCORD_TOKEN``,
+                ``MONGODB_URI``, and ``HOLODEX_API_KEY``.
             config: Optional sectioned TOML data. When omitted, use runtime defaults.
 
         Returns:
@@ -204,6 +206,7 @@ class Settings(RuntimeConfig):
         return cls(
             discord_token=_required(values, "DISCORD_TOKEN"),
             mongodb_uri=_required(values, "MONGODB_URI"),
+            holodex_api_key=_required(values, "HOLODEX_API_KEY"),
             **asdict(operational),
         )
 

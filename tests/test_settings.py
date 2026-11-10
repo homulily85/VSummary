@@ -1,4 +1,5 @@
 import json
+import os
 import tomllib
 from pathlib import Path
 
@@ -7,7 +8,11 @@ import pytest
 from vsummary import settings as settings_module
 from vsummary.settings import Settings, SettingsError, load_settings
 
-SECRETS = {"DISCORD_TOKEN": "token", "MONGODB_URI": "mongodb://localhost"}
+SECRETS = {
+    "DISCORD_TOKEN": "token",
+    "MONGODB_URI": "mongodb://localhost",
+    "HOLODEX_API_KEY": "test-holodex-key",
+}
 
 
 def test_env_example_contains_only_supported_application_secrets():
@@ -169,21 +174,25 @@ def test_dotenv_secrets_preserve_environment_precedence_and_notebooklm_auth(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DISCORD_TOKEN", "environment-token")
     monkeypatch.delenv("MONGODB_URI", raising=False)
+    monkeypatch.setenv("HOLODEX_API_KEY", "  environment-holodex-key  ")
     monkeypatch.delenv("NOTEBOOKLM_PROFILE", raising=False)
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
     dotenv = tmp_path / ".env"
     dotenv.write_text(
-        "DISCORD_TOKEN=file-token\nMONGODB_URI=mongodb://file\nNOTEBOOKLM_PROFILE=bot\nLOG_LEVEL=DEBUG\n"
+        "DISCORD_TOKEN=file-token\nMONGODB_URI=mongodb://file\n"
+        "HOLODEX_API_KEY=file-holodex-key\nNOTEBOOKLM_PROFILE=bot\nLOG_LEVEL=DEBUG\n"
     )
     settings = load_settings(dotenv_path=dotenv)
     assert settings.discord_token == "environment-token"
     assert settings.mongodb_uri == "mongodb://file"
+    assert settings.holodex_api_key == "environment-holodex-key"
     assert settings.log_level == "INFO"
-    import os
-
     assert os.environ["NOTEBOOKLM_PROFILE"] == "bot"
-    monkeypatch.delenv("MONGODB_URI")
-    monkeypatch.delenv("NOTEBOOKLM_PROFILE")
-    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    monkeypatch.delenv("HOLODEX_API_KEY")
+    assert load_settings(dotenv_path=dotenv).holodex_api_key == "file-holodex-key"
+    os.environ.pop("MONGODB_URI")
+    os.environ.pop("NOTEBOOKLM_PROFILE")
+    os.environ.pop("LOG_LEVEL", None)
 
 
 @pytest.mark.parametrize(
@@ -262,15 +271,26 @@ def test_missing_required_secrets_still_fail():
         Settings.from_mapping({"DISCORD_TOKEN": "token"})
 
 
+@pytest.mark.parametrize("key", [None, "", " \t "])
+def test_holodex_key_is_required(key):
+    values = SECRETS | {"HOLODEX_API_KEY": key}
+    if key is None:
+        del values["HOLODEX_API_KEY"]
+    with pytest.raises(SettingsError, match="HOLODEX_API_KEY is required"):
+        Settings.from_mapping(values)
+
+
 def test_operational_injection_does_not_forward_or_represent_secrets():
     values = {
         "DISCORD_TOKEN": "discord-secret-value",
         "MONGODB_URI": "mongodb://user:secret-value@localhost",
+        "HOLODEX_API_KEY": "holodex-secret-value",
     }
     settings = Settings.from_mapping(values, config={"media": {"bitrate_kbps": 32}})
     config = settings_module.runtime_config(settings)
     assert type(config) is settings_module.RuntimeConfig
     assert not hasattr(config, "discord_token")
     assert not hasattr(config, "mongodb_uri")
+    assert not hasattr(config, "holodex_api_key")
     assert config.audio_bitrate_kbps == 32
     assert all(value not in repr(settings) for value in values.values())

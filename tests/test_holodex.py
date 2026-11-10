@@ -8,8 +8,6 @@ import pytest
 from vsummary.util import holodex
 from vsummary.util.holodex import (
     HOLODEX_API_URL,
-    REFERER,
-    USER_AGENT,
     ChannelNotFoundError,
     HolodexClient,
     MalformedHolodexResponse,
@@ -19,6 +17,7 @@ from vsummary.util.holodex import (
 
 CHANNEL_ID = "UCQ0UDLQCjY0rmuxCDE38FGg"
 VIDEO_ID = "abcdefghijk"
+API_KEY = "test-holodex-key"
 
 
 class FakeClock:
@@ -50,7 +49,7 @@ async def make_client(clock):
     clients = []
 
     def create(**kwargs):
-        client = HolodexClient(**kwargs)
+        client = HolodexClient(api_key=API_KEY, **kwargs)
         clients.append(client)
         return client
 
@@ -61,8 +60,15 @@ async def make_client(clock):
             await client.aclose()
 
 
+@pytest.mark.parametrize("api_key", [" ", "private-key\ninvalid", "private-keyé"])
+def test_client_rejects_invalid_api_keys_without_exposing_them(api_key):
+    with pytest.raises(ValueError, match="HOLODEX_API_KEY") as exc:
+        HolodexClient(api_key=api_key)
+    assert "private-key" not in str(exc.value)
+
+
 @pytest.mark.asyncio
-async def test_fetch_channel_parses_response_and_sends_browser_headers(make_client):
+async def test_fetch_channel_parses_response_and_authenticates(make_client):
     seen = {}
 
     async def handler(request):
@@ -75,8 +81,9 @@ async def test_fetch_channel_parses_response_and_sends_browser_headers(make_clie
     assert channel.id == CHANNEL_ID
     assert channel.name == "Test Channel"
     assert seen["request"].url == httpx.URL(f"{HOLODEX_API_URL}/channels/{CHANNEL_ID}")
-    assert seen["request"].headers["referer"] == REFERER
-    assert seen["request"].headers["user-agent"] == USER_AGENT
+    assert seen["request"].headers["X-APIKEY"] == API_KEY
+    assert "referer" not in seen["request"].headers
+    assert "Mozilla" not in seen["request"].headers.get("user-agent", "")
 
 
 @pytest.mark.asyncio
@@ -130,11 +137,16 @@ async def test_fetch_channel_videos_parses_items_and_query_parameters(make_clien
     assert videos[0].available_at == datetime.fromisoformat(available_at)
     assert videos[0].duration == 5400
     assert videos[0].channel_name == "Test Channel"
+    assert seen["request"].url.path == "/api/v2/videos"
+    assert seen["request"].headers["X-APIKEY"] == API_KEY
     assert dict(seen["request"].url.params) == {
+        "channel_id": CHANNEL_ID,
         "type": "stream",
         "limit": "7",
         "offset": "0",
         "status": "past",
+        "sort": "available_at",
+        "order": "desc",
     }
 
 
@@ -154,6 +166,7 @@ async def test_get_video_topic_refreshes_one_video_from_holodex(make_client):
 
     async def handler(request):
         seen.append(request.url)
+        assert request.headers["X-APIKEY"] == API_KEY
         return httpx.Response(200, json={"id": VIDEO_ID, "topic_id": "shorts"})
 
     client = make_client(transport=httpx.MockTransport(handler))
@@ -247,6 +260,7 @@ async def test_transient_retry_uses_the_send_interval(make_client, clock, failur
     starts = []
 
     async def handler(request):
+        assert request.headers["X-APIKEY"] == API_KEY
         starts.append(clock.time())
         if len(starts) == 1:
             if failure == "timeout":
@@ -365,8 +379,9 @@ async def test_cancelling_waiting_request_releases_the_limiter(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("page_size", "limit"), [(2, 2), (75, 50)])
 async def test_pagination_collects_all_videos_newer_than_followed_at(
-    make_client, clock
+    make_client, clock, page_size, limit
 ):
     requests = []
     since = datetime(2026, 8, 9, 10, tzinfo=UTC)
@@ -382,25 +397,38 @@ async def test_pagination_collects_all_videos_newer_than_followed_at(
 
     async def handler(request):
         offset = int(request.url.params["offset"])
+        assert int(request.url.params["limit"]) == limit
         requests.append((offset, clock.time()))
         pages = {
-            0: [video("newest", 13), video("newer", 12)],
-            2: [video("new", 11), video("old", 9)],
+            0: [video(f"video-{i}", 12) for i in range(limit)],
+            limit: [video("new", 11), video("at-cutoff", 10)],
         }
         return httpx.Response(200, json=pages[offset])
 
     client = make_client(transport=httpx.MockTransport(handler))
-    videos = await client.fetch_channel_videos_since(CHANNEL_ID, since, page_size=2)
+    videos = await client.fetch_channel_videos_since(
+        CHANNEL_ID, since, page_size=page_size
+    )
 
-    assert [video.id for video in videos] == ["newest", "newer", "new"]
-    assert requests == [(0, 0), (2, 2)]
+    assert [video.id for video in videos] == [f"video-{i}" for i in range(limit)] + [
+        "new"
+    ]
+    assert requests == [(0, 0), (limit, 2)]
 
 
 @pytest.mark.asyncio
-async def test_non_retryable_client_error_is_permanent(make_client):
+@pytest.mark.parametrize("status", [400, 401, 403])
+async def test_non_retryable_client_error_is_permanent(make_client, status, caplog):
+    attempts = 0
+
     async def handler(request):
-        return httpx.Response(400)
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(status, json={"error": API_KEY})
 
     client = make_client(transport=httpx.MockTransport(handler), retries=1)
-    with pytest.raises(PermanentHolodexError, match="HTTP 400"):
+    with pytest.raises(PermanentHolodexError, match=f"HTTP {status}") as exc:
         await client.fetch_channel(CHANNEL_ID)
+    assert attempts == 1
+    assert API_KEY not in str(exc.value)
+    assert API_KEY not in caplog.text
