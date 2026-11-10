@@ -131,12 +131,14 @@ class Summarizer(commands.Cog):
 
     @app_commands.command(name="topics", description="Get topic list from a video.")
     @app_commands.describe(
-        video=("A YouTube ID or a public URL for one finished video or audio item.")
+        video_url_or_id=(
+            "A YouTube ID or a public URL for one finished video or audio item."
+        )
     )
     async def topics(
         self,
         interaction: discord.Interaction,
-        video: str,
+        video_url_or_id: str,
     ):
         """Queue a topic-list request and acknowledge it in the request channel.
 
@@ -144,7 +146,7 @@ class Summarizer(commands.Cog):
 
         Args:
             interaction: Discord request carrying the channel and requester IDs.
-            video: YouTube ID or public URL for a completed recording.
+            video_url_or_id: YouTube ID or public URL for a completed recording.
 
         Raises:
             discord.HTTPException: If deferral or the follow-up fails.
@@ -154,7 +156,7 @@ class Summarizer(commands.Cog):
         await interaction.response.defer(thinking=True)
 
         try:
-            ref = await _resolve_manual_source(video)
+            ref = await _resolve_manual_source(video_url_or_id)
             await self.bot.get_cog("ManualSummary").enqueue(
                 ref=ref,
                 operation=ManualSummaryOperation.TOPICS,
@@ -178,13 +180,13 @@ class Summarizer(commands.Cog):
         name="detail", description="Get details about a specific topic in the video."
     )
     @app_commands.describe(
-        video="A YouTube ID or a public URL for a finished video or an audio item.",
+        video_url_or_id="A YouTube ID or a public URL for a finished video or an audio item.",
         topic_index="The index of the topic to get details for (1-based).",
     )
     async def detail(
         self,
         interaction: discord.Interaction,
-        video: str,
+        video_url_or_id: str,
         topic_index: int | None = None,
     ):
         """Queue a single-topic explanation or all topic details.
@@ -194,7 +196,7 @@ class Summarizer(commands.Cog):
 
         Args:
             interaction: Discord request carrying the channel and requester IDs.
-            video: YouTube ID or public URL for a completed recording.
+            video_url_or_id: YouTube ID or public URL for a completed recording.
             topic_index: Optional one-based topic index. When omitted, request every
                 topic.
 
@@ -207,7 +209,7 @@ class Summarizer(commands.Cog):
         await interaction.response.defer(thinking=True)
 
         try:
-            ref = await _resolve_manual_source(video)
+            ref = await _resolve_manual_source(video_url_or_id)
             operation = (
                 ManualSummaryOperation.DETAIL_ALL
                 if topic_index is None
@@ -238,9 +240,9 @@ class Summarizer(commands.Cog):
         description="Delete a video's cached topics and details in all languages.",
     )
     @app_commands.describe(
-        video="A YouTube ID or the URL of the cached video or audio item."
+        video_url_or_id="A YouTube ID or the URL of the cached video or audio item."
     )
-    async def deletecache(self, interaction: discord.Interaction, video: str):
+    async def deletecache(self, interaction: discord.Interaction, video_url_or_id: str):
         """Clear cached summaries for one video and report the result privately.
 
         Hold the per-video lock during deletion. The follow-up reports the number of
@@ -248,7 +250,7 @@ class Summarizer(commands.Cog):
 
         Args:
             interaction: Discord request used for the ephemeral response.
-            video: YouTube ID or URL identifying the media to clear.
+            video_url_or_id: YouTube ID or URL identifying the media to clear.
 
         Raises:
             discord.HTTPException: If deferral or the follow-up fails.
@@ -256,7 +258,7 @@ class Summarizer(commands.Cog):
         """
         await interaction.response.defer(thinking=True, ephemeral=True)
         try:
-            ref = await _resolve_cached_source(video)
+            ref = await _resolve_cached_source(video_url_or_id)
         except ValueError as exc:
             await send_limited(
                 self.bot, interaction.followup.send, str(exc), ephemeral=True

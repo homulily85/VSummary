@@ -139,7 +139,7 @@ Notes for agents:
 - `SummaryJob` has a partial unique `(channel_id, video_id)` index for auto jobs
   and `(job_type, status, next_attempt_at)` plus lease indexes. Do not bypass
   these constraints with check-then-insert logic.
-- `/deletecache video:<URL-or-ID>` clears all language caches and untagged legacy
+- `/deletecache video_url_or_id:<URL-or-ID>` clears all language caches and untagged legacy
   records for exactly one `(source, video_id)`. Keep database deletion in
   `util/video_cache.py` and acquire the bot's shared per-video coordinator in the
   command before deleting. Preserve durable jobs, delivery payloads/checkpoints,

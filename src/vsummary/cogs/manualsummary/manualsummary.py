@@ -45,7 +45,9 @@ logger = logging.getLogger(__name__)
 _TOPICS_PER_PAGE = 10
 # Leave room for the title, channel name, page number, and help in plain text.
 _TOPIC_PAGE_BODY_LIMIT = 1400
-_DETAIL_HELP = "Use `/detail video:<URL or ID> topic_index:<number>` to open a topic."
+_DETAIL_HELP = (
+    "Use `/detail video_url_or_id:<URL or ID> topic_index:<number>` to open a topic."
+)
 
 
 def _utf16_length(text: str) -> int:
