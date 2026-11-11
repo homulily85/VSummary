@@ -734,12 +734,12 @@ async def get_topic_details(
         )
 
         logger.info("Parsing response and saving details to database...")
-        topics[topic_index].detail = _clean_topic_detail(response.answer)
-        await video.save()
+        detail = _clean_topic_detail(response.answer)
+        await video.set({f"topics.{topic_index}.detail": detail})
         logger.info("Topic detail saved to database.")
         return {
             "topic_name": topics[topic_index].name,
-            "detail": topics[topic_index].detail,
+            "detail": detail,
         }
     finally:
         if notebook is not None:
@@ -756,8 +756,8 @@ async def get_topic_details_all(
 ):
     """Return details for all topics, filling in missing explanations.
 
-    Reuse saved details, write newly generated details together, and attempt to delete
-    any temporary notebook when done.
+    Reuse saved details and write newly generated details in one update, even if
+    generation fails partway through. Attempt to delete any temporary notebook when done.
 
     Args:
         client: Authenticated NotebookLM client.
@@ -786,18 +786,18 @@ async def get_topic_details_all(
     )
     topics = _validated_topics(video.topics or [])
 
-    if notebook is None and any(t.detail is None for t in topics):
+    if notebook is None and any(not topic.detail for topic in topics):
         notebook = await _create_notebook_with_source(
             client, ref, use_youtube_audio=use_youtube_audio
         )
 
     results = []
-    needs_db_save = False
+    detail_updates: dict[str, str] = {}
+    generation_complete = False
     try:
         for i, topic in enumerate(topics):
-            if topic.detail:
-                results.append({"topic_name": topic.name, "detail": topic.detail})
-            else:
+            detail = topic.detail
+            if not detail:
                 prompt = _topic_prompt(
                     topics, i, output_language=runtime_config(config).output_language
                 )
@@ -811,24 +811,27 @@ async def get_topic_details_all(
                     ref=ref,
                     topic_count=len(topics),
                 )
-                topic.detail = _clean_topic_detail(response.answer)
-                needs_db_save = True
+                detail = _clean_topic_detail(response.answer)
+                detail_updates[f"topics.{i}.detail"] = detail
 
-                results.append({"topic_name": topic.name, "detail": topic.detail})
+            results.append({"topic_name": topic.name, "detail": detail})
 
-        if needs_db_save:
-            logger.info(
-                f"Saving all newly fetched topic details to database for video {ref} in a "
-                f"single batch..."
-            )
-            await video.save()
-            logger.info("Batch save complete.")
-
+        generation_complete = True
         return results
     finally:
-        if notebook is not None:
-            await _safe_delete_notebook(client, notebook.id)
-            logger.info("Deleted temporary notebook used for topic details.")
+        try:
+            if detail_updates:
+                await video.set(detail_updates)
+        except Exception:
+            if generation_complete:
+                raise
+            logger.exception(
+                "Failed to save partial topic details for %s.", ref.video_id
+            )
+        finally:
+            if notebook is not None:
+                await _safe_delete_notebook(client, notebook.id)
+                logger.info("Deleted temporary notebook used for topic details.")
 
 
 async def _safe_delete_notebook(client: NotebookLMClient, notebook_id: str) -> None:
