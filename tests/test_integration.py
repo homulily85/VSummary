@@ -162,6 +162,11 @@ class FakeVideoRecord:
         if self not in self.records:
             self.records.append(self)
 
+    async def set(self, fields):
+        for path, detail in fields.items():
+            _, index, _ = path.split(".")
+            self.topics[int(index)].detail = detail
+
 
 class FakeSummaryJob:
     source = "youtube"
@@ -809,8 +814,8 @@ async def test_missing_details_use_only_the_selected_language_cache(
     )
     await english.save()
     await japanese.save()
-    save = AsyncMock(wraps=japanese.save)
-    monkeypatch.setattr(japanese, "save", save)
+    update_detail = AsyncMock(wraps=japanese.set)
+    monkeypatch.setattr(japanese, "set", update_detail)
     client = FakeNotebookClient(answers=[cited_detail])
     config = RuntimeConfig(output_language="Japanese")
     if all_details:
@@ -834,7 +839,7 @@ async def test_missing_details_use_only_the_selected_language_cache(
     ]
     assert japanese.topics[0].detail == cached_detail
     assert japanese.topics[1].detail == clean_detail
-    save.assert_awaited_once()
+    update_detail.assert_awaited_once_with({"topics.1.detail": clean_detail})
     assert len(client.prompts) == 1
     assert "explanation in Japanese" in client.prompts[0][1]
 
@@ -851,8 +856,8 @@ async def test_citation_only_detail_is_rejected_without_caching(
         topics=[Topic(name="Concert")],
     )
     await video.save()
-    save = AsyncMock(wraps=video.save)
-    monkeypatch.setattr(video, "save", save)
+    update_detail = AsyncMock(wraps=video.set)
+    monkeypatch.setattr(video, "set", update_detail)
     client = FakeNotebookClient(answers=[" [1][2, 3]\n\n [4] "])
 
     with pytest.raises(InvalidSummaryResponse):
@@ -862,7 +867,7 @@ async def test_citation_only_detail_is_rejected_without_caching(
             await summarizer_util.get_topic_details(client, VIDEO_REF, 0)
 
     assert video.topics[0].detail is None
-    save.assert_not_awaited()
+    update_detail.assert_not_awaited()
     assert client.deleted == ["notebook-1"]
 
 
@@ -988,6 +993,79 @@ async def test_summarization_pipeline_generates_caches_and_reuses_all_topic_deta
     assert cached_details == details
     assert second_client.created == []
     assert second_client.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_all_topic_details_resume_from_cache_after_generation_error(monkeypatch):
+    video = FakeVideoRecord(
+        source="youtube",
+        video_id=VIDEO_ID,
+        output_language="english",
+        topics=[
+            Topic(name="Introduction"),
+            Topic(name="Discussion"),
+            Topic(name="Conclusion"),
+        ],
+    )
+    await video.save()
+    update_detail = AsyncMock(wraps=video.set)
+    monkeypatch.setattr(video, "set", update_detail)
+    client = FakeNotebookClient(
+        answers=[
+            "Opening remarks",
+            "Discussion notes",
+            ChatError("NotebookLM unavailable"),
+        ]
+    )
+
+    with pytest.raises(ChatError, match="NotebookLM unavailable"):
+        await summarizer_util.get_topic_details_all(client, VIDEO_REF)
+
+    update_detail.assert_awaited_once_with(
+        {"topics.0.detail": "Opening remarks", "topics.1.detail": "Discussion notes"}
+    )
+    assert video.topics[2].detail is None
+    assert client.deleted == ["notebook-1"]
+
+    retry_client = FakeNotebookClient(answers=["Closing remarks"])
+    assert await summarizer_util.get_topic_details_all(retry_client, VIDEO_REF) == [
+        {"topic_name": "Introduction", "detail": "Opening remarks"},
+        {"topic_name": "Discussion", "detail": "Discussion notes"},
+        {"topic_name": "Conclusion", "detail": "Closing remarks"},
+    ]
+    assert len(retry_client.prompts) == 1
+    assert "'Conclusion'" in retry_client.prompts[0][1]
+    assert retry_client.deleted == ["notebook-1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("generation_fails", [False, True])
+async def test_all_topic_details_cleans_up_when_batch_update_fails(
+    monkeypatch, generation_fails
+):
+    video = FakeVideoRecord(
+        source="youtube",
+        video_id=VIDEO_ID,
+        output_language="english",
+        topics=[Topic(name="Introduction"), Topic(name="Conclusion")],
+    )
+    await video.save()
+    cache_error = OperationFailure("MongoDB write failed")
+    generation_error = ChatError("NotebookLM unavailable")
+    monkeypatch.setattr(video, "set", AsyncMock(side_effect=cache_error))
+    client = FakeNotebookClient(
+        answers=[
+            "Opening remarks",
+            generation_error if generation_fails else "Closing remarks",
+        ]
+    )
+
+    expected_error = generation_error if generation_fails else cache_error
+    with pytest.raises(type(expected_error)) as raised:
+        await summarizer_util.get_topic_details_all(client, VIDEO_REF)
+
+    assert raised.value is expected_error
+    assert client.deleted == ["notebook-1"]
 
 
 @pytest.mark.asyncio
