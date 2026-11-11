@@ -135,6 +135,17 @@ class SummaryJobService:
         """
         job.claimed_by = job.claimed_at = job.lease_expires_at = None
 
+    async def defer_generation(
+        self, job: SummaryJob, *, until: datetime, reason: str
+    ) -> None:
+        """Return an owned generation job to the queue until its quota resets."""
+        job.status = JobStatus.QUEUED
+        job.next_attempt_at = until
+        job.last_error = reason
+        self.release(job)
+        if await self.save_owned(job):
+            self.logger.info("Deferred summary job %s: %s", job.id, reason)
+
     async def renew(self, job: SummaryJob) -> bool:
         """Extend a matching job lease from the current UTC time.
 

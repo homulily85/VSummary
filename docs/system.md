@@ -152,6 +152,13 @@ retries (one by default) while the job remains
 claimed; only a subsequent failure enters the durable retry queue and consumes
 one source retry. Permanent source failures bypass the source retry queue.
 
+Before creating a notebook, attaching a source, or asking a question, the bot
+checks NotebookLM's five-hour and weekly compute quotas. When either window is
+exhausted, the worker releases the job and schedules it for the latest reset of
+the exhausted windows without consuming a retry. Cached output remains usable
+and completed details are saved if quota is exhausted partway through generation.
+An unavailable quota meter or a quota lookup error allows generation to proceed.
+
 With `youtube.yt_dlp_fallback_enabled = true` (default `false`), a retryable
 NotebookLM generation failure that exhausts normal YouTube retries queues one
 final audio-based attempt. Both automatic and manual jobs persist the
@@ -162,7 +169,7 @@ are not requeued. Holodex and delivery errors do not activate the fallback.
 The final attempt downloads temporary M4A audio through the existing yt-dlp
 backend and uploads it to NotebookLM. It retains the YouTube identity, per-video
 lock, and cache, reusing completed topics and details. It bypasses the immediate
-malformed-response retry and ends generation on any failure. Delivery retries
+malformed-response retry and ends generation on a source failure. Delivery retries
 still reuse the persisted output. Disabling the option stops queued audio
 fallbacks without starting another native or audio attempt.
 
