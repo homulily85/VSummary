@@ -162,5 +162,5 @@ docker run -d --name vsummary --init --restart unless-stopped \
   --mount "type=bind,src=$PWD/config.toml,dst=/app/config.toml,readonly" \
   --mount "type=bind,src=$PWD/logs,dst=/app/logs" \
   --mount "type=bind,src=$PWD/.notebooklm,dst=/var/lib/vsummary/notebooklm" \
-  "$VSUMMARY_IMAGE"
+  homulily85/vsummary:latest
 ```
