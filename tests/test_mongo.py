@@ -3,11 +3,9 @@
 Each test uses and removes its own randomly named test database.
 """
 
-import logging
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 from beanie import init_beanie
@@ -17,9 +15,6 @@ from pymongo.errors import DuplicateKeyError
 from vsummary.cogs.autosummary.autosummary import Autosummary
 from vsummary.cogs.manualsummary.manualsummary import ManualSummary
 from vsummary.model.channel import AutoSummaryTopicPolicy, JobStatus, SummaryJob
-from vsummary.services import summary_jobs
-from vsummary.services.summary_jobs import SummaryJobService
-from vsummary.settings import RuntimeConfig
 from vsummary.util.auto_summary_topics import (
     get_ignored_auto_summary_topics,
     policy_ignores_video,
@@ -107,35 +102,6 @@ async def test_workers_claim_only_their_job_type(database):
         {"_id": manual.id}, {"$set": {"claimed_by": "new-worker"}}
     )
     assert not await manual_worker._save(claimed_manual[0])
-
-
-@pytest.mark.parametrize("job_type", ["auto", "manual"])
-async def test_quota_deferred_job_is_claimable_at_reset(
-    database, monkeypatch, job_type
-):
-    original = await (auto_job() if job_type == "auto" else manual_job()).insert()
-    service = SummaryJobService(
-        job_type, "worker", RuntimeConfig(), logging.getLogger(__name__)
-    )
-    (claimed,) = await service.claim_due_jobs()
-    resets_at = claimed.next_attempt_at + timedelta(hours=2)
-
-    await service.defer_generation(
-        claimed, until=resets_at, reason="NotebookLM quota exhausted"
-    )
-
-    queued = await SummaryJob.get(original.id)
-    assert queued.status == JobStatus.QUEUED
-    assert queued.next_attempt_at == resets_at
-    assert queued.claimed_by is None
-    assert await service.claim_due_jobs() == []
-
-    monkeypatch.setattr(
-        summary_jobs, "datetime", SimpleNamespace(now=lambda _: resets_at)
-    )
-    (resumed,) = await service.claim_due_jobs()
-    assert resumed.id == original.id
-    assert resumed.status == JobStatus.GENERATING
 
 
 async def test_ignored_topics_use_latest_policy_per_topic(database):

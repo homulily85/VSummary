@@ -39,7 +39,6 @@ from vsummary.util.holodex import (
     TransientHolodexError,
 )
 from vsummary.util.summarizer import (
-    NotebookLMQuotaExhausted,
     PermanentSummaryError,
     TransientSummaryError,
     retry_invalid_summary_response,
@@ -388,11 +387,6 @@ class Autosummary(commands.Cog):
                         )
                     )
                 job.summary_details = [self._as_topic(detail) for detail in details]
-            except NotebookLMQuotaExhausted as exc:
-                await self.jobs.defer_generation(
-                    job, until=exc.resets_at, reason=str(exc)
-                )
-                return False
             except (PermanentSummaryError, PermanentHolodexError) as exc:
                 logger.warning(
                     "Permanent summary source failure for %s",

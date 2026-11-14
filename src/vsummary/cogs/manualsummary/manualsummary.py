@@ -21,7 +21,6 @@ from vsummary.util.generic_media import (
     inspect_generic_media,
 )
 from vsummary.util.summarizer import (
-    NotebookLMQuotaExhausted,
     PermanentSummaryError,
     TransientSummaryError,
     get_topic_details,
@@ -350,9 +349,6 @@ class ManualSummary(commands.Cog):
                         retries=self.config.invalid_summary_retries,
                     )
                 )
-        except NotebookLMQuotaExhausted as exc:
-            await self.jobs.defer_generation(job, until=exc.resets_at, reason=str(exc))
-            return
         except IndexError:
             job.delivery_chunks = [f"Invalid topic index: {(job.topic_index or 0) + 1}"]
         except (

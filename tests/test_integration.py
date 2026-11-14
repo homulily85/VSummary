@@ -8,14 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
-from bson import ObjectId
 from notebooklm import ChatError, SourceAddError
-from notebooklm.types import (
-    UsageSummary,
-    UsageSummaryStatus,
-    UsageWindow,
-    UsageWindowKind,
-)
 from pymongo.errors import OperationFailure
 
 import vsummary.cogs.autosummary.autosummary as autosummary_module
@@ -123,9 +116,6 @@ class FakeNotebookClient:
         )
         self.sources = SimpleNamespace(add_url=self.add_source)
         self.chat = SimpleNamespace(ask=self.ask)
-        self.settings = SimpleNamespace(
-            get_usage=AsyncMock(return_value=UsageSummary(UsageSummaryStatus.DISABLED))
-        )
 
     async def create_notebook(self, title):
         notebook = SimpleNamespace(id=f"notebook-{self._next_id}", title=title)
@@ -362,16 +352,6 @@ def make_worker_job(client, config, operation):
     return cog, job
 
 
-def exhausted_notebook_quota(resets_at):
-    return UsageSummary(
-        UsageSummaryStatus.READY,
-        windows=(
-            UsageWindow(UsageWindowKind.FIVE_HOUR, 100, 0, resets_at),
-            UsageWindow(UsageWindowKind.WEEKLY, 50, 50, resets_at + timedelta(days=1)),
-        ),
-    )
-
-
 @pytest.fixture(autouse=True)
 def reset_fake_storage(monkeypatch):
     FakeVideoRecord.records = []
@@ -382,140 +362,6 @@ def reset_fake_storage(monkeypatch):
     monkeypatch.setattr(summarizer_util, "VideoSummary", FakeVideoRecord)
     monkeypatch.setattr(autosummary_module, "FollowedChannel", FakeFollowedChannel)
     monkeypatch.setattr(autosummary_module, "SummaryJob", FakeSummaryJob)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("operation", "audio_fallback"),
-    [("automatic", False), ("automatic", True), ("topics", False), ("all", True)],
-)
-async def test_workers_requeue_exhausted_notebook_quota_without_using_a_retry(
-    monkeypatch, operation, audio_fallback
-):
-    now = datetime.now(UTC)
-    resets_at = now + timedelta(hours=2)
-    client = FakeNotebookClient(answers=["[]", "[]"])
-    client.settings.get_usage.return_value = exhausted_notebook_quota(resets_at)
-    download = Mock(side_effect=AssertionError("Quota should block the download"))
-    monkeypatch.setattr(summarizer_util, "download_generic_audio", download)
-    collection = SimpleNamespace(
-        update_one=AsyncMock(return_value=SimpleNamespace(matched_count=1))
-    )
-    monkeypatch.setattr(SummaryJob, "get_pymongo_collection", lambda: collection)
-    config = RuntimeConfig(source_retry_limit=2, youtube_yt_dlp_fallback_enabled=True)
-    cog, job = make_worker_job(client, config, operation)
-    if operation == "automatic":
-        job = SummaryJob.model_construct(
-            job_type="auto",
-            video_id=job.video_id,
-            title=job.title,
-            channel_id=job.channel_id,
-            channel_name=job.channel_name,
-            available_at=job.available_at,
-            next_attempt_at=job.next_attempt_at,
-            claimed_by=cog.worker_id,
-        )
-        del cog._save_item
-    else:
-        del cog._save
-    job.id = ObjectId()
-    job.status = JobStatus.GENERATING
-    job.retry_count = 1
-    job.youtube_audio_fallback = audio_fallback
-    job.claimed_at = now
-    job.lease_expires_at = now + timedelta(minutes=15)
-
-    if operation == "automatic":
-        cog._deliver_for_job = AsyncMock()
-        await cog._process_pending_video(job)
-        cog._deliver_for_job.assert_not_awaited()
-    else:
-        cog._deliver = AsyncMock()
-        await cog._process(job)
-        cog._deliver.assert_not_awaited()
-
-    assert job.status == JobStatus.QUEUED
-    assert job.next_attempt_at == resets_at
-    assert "NotebookLM quota" in job.last_error
-    assert job.claimed_by is job.claimed_at is job.lease_expires_at is None
-    assert job.retry_count == 1
-    assert job.youtube_audio_fallback is audio_fallback
-    assert not job.failure_notice
-    assert client.created == client.added_urls == client.prompts == []
-    client.settings.get_usage.assert_awaited_once()
-    download.assert_not_called()
-    collection.update_one.assert_awaited_once()
-    query, update = collection.update_one.await_args.args
-    assert query == {
-        "_id": job.id,
-        "job_type": job.job_type,
-        "claimed_by": cog.worker_id,
-    }
-    assert update["$set"]["status"] == JobStatus.QUEUED
-    assert update["$set"]["next_attempt_at"] == resets_at
-    assert update["$set"]["claimed_by"] is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("upload_audio", [False, True])
-async def test_quota_rechecked_before_attaching_source(
-    monkeypatch, upload_audio, tmp_path
-):
-    client = FakeNotebookClient()
-    client.sources.add_file = AsyncMock()
-    resets_at = datetime.now(UTC) + timedelta(hours=2)
-    client.settings.get_usage.side_effect = [
-        UsageSummary(UsageSummaryStatus.SKIPPED),
-        exhausted_notebook_quota(resets_at),
-    ]
-
-    @asynccontextmanager
-    async def download(ref):
-        yield tmp_path / "audio.m4a"
-
-    monkeypatch.setattr(summarizer_util, "download_generic_audio", download)
-    with pytest.raises(summarizer_util.SummaryServiceError, match="quota"):
-        await summarizer_util._create_notebook_with_source(
-            client, VIDEO_REF, use_youtube_audio=upload_audio
-        )
-
-    assert [notebook.id for notebook in client.created] == ["notebook-1"]
-    assert client.deleted == ["notebook-1"]
-    assert client.added_urls == []
-    client.sources.add_file.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_quota_deferral_preserves_partial_details_for_next_attempt(monkeypatch):
-    video = FakeVideoRecord(
-        source="youtube",
-        video_id=VIDEO_ID,
-        output_language="english",
-        topics=[Topic(name="Introduction"), Topic(name="Conclusion")],
-    )
-    await video.save()
-    update_details = AsyncMock(wraps=video.set)
-    monkeypatch.setattr(video, "set", update_details)
-    client = FakeNotebookClient(answers=["Opening remarks", "Closing remarks"])
-    resets_at = datetime.now(UTC) + timedelta(hours=2)
-    available = UsageSummary(UsageSummaryStatus.SKIPPED)
-    client.settings.get_usage.side_effect = [available] * 3 + [
-        exhausted_notebook_quota(resets_at)
-    ]
-
-    with pytest.raises(summarizer_util.SummaryServiceError, match="quota"):
-        await summarizer_util.get_topic_details_all(client, VIDEO_REF)
-
-    update_details.assert_awaited_once_with({"topics.0.detail": "Opening remarks"})
-    assert client.deleted == ["notebook-1"]
-    assert len(client.prompts) == 1
-    retry_client = FakeNotebookClient(answers=["Closing remarks"])
-    assert await summarizer_util.get_topic_details_all(retry_client, VIDEO_REF) == [
-        {"topic_name": "Introduction", "detail": "Opening remarks"},
-        {"topic_name": "Conclusion", "detail": "Closing remarks"},
-    ]
-    assert len(retry_client.prompts) == 1
-    assert "'Conclusion'" in retry_client.prompts[0][1]
 
 
 @pytest.mark.asyncio
@@ -1147,7 +993,6 @@ async def test_summarization_pipeline_generates_caches_and_reuses_all_topic_deta
     assert cached_details == details
     assert second_client.created == []
     assert second_client.prompts == []
-    second_client.settings.get_usage.assert_not_awaited()
 
 
 @pytest.mark.asyncio
