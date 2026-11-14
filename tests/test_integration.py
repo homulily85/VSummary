@@ -2261,6 +2261,7 @@ async def test_bot_setup_loads_all_cogs_and_syncs_commands(monkeypatch):
 
     assert loaded == [
         "vsummary.cogs.misc.version",
+        "vsummary.cogs.misc.quota",
         "vsummary.cogs.manualsummary.manualsummary",
         "vsummary.cogs.summarizer.summarizer",
         "vsummary.cogs.autosummary.autosummary",

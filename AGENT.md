@@ -89,6 +89,7 @@ src/vsummary/
 ├── bot.py               # Bot subclass, dependency injection, cog loading, shutdown
 ├── cogs/                # Discord adapters and slash-command handlers
 │   ├── misc/
+│   │   ├── quota.py     # reports the active NotebookLM account's quota
 │   │   └── version.py   # reports the running bot version
 │   ├── summarizer/
 │   │   └── summarizer.py# /topics and /detail commands plus interactive topic UI

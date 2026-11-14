@@ -9,6 +9,7 @@
 | `/deletecache` | `video_url_or_id` (required) | Deletes one video's cached topics and details across all languages.|
 | `/queue` | None | Lists active auto-summary and manual-summary jobs.|
 | `/version` | None | Displays the running bot's version. |
+| `/quota` | None | Shows the active NotebookLM account's 5h and 7d quota usage, remaining percentages, and reset times in the channel. |
 
 ### Supported video inputs
 
