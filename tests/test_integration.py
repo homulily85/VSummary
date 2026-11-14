@@ -9,8 +9,9 @@ from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
+from bson import ObjectId
 from notebooklm import ChatError, SourceAddError
-from pymongo.errors import OperationFailure
+from pymongo.errors import AutoReconnect, OperationFailure
 
 import vsummary.cogs.autosummary.autosummary as autosummary_module
 import vsummary.cogs.manualsummary.manualsummary as manualsummary_module
@@ -1847,6 +1848,7 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
         SimpleNamespace(
             video_id="dQw4w9WgXcQ",
             title="Auto video",
+            id=ObjectId("000000000000000000000001"),
             status=JobStatus.QUEUED,
             next_attempt_at=datetime(2026, 9, 19, 12, tzinfo=UTC),
         )
@@ -1857,6 +1859,7 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
             source="twitch",
             video_id="123456789",
             title="Manual video",
+            id=ObjectId("000000000000000000000003"),
             status=JobStatus.GENERATING,
             next_attempt_at=datetime.fromisoformat("2026-09-19T18:00:20+07:00"),
         ),
@@ -1864,6 +1867,7 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
             source="x_space",
             video_id="1DxleVnmlOmKL",
             title="Archived Space",
+            id=ObjectId("000000000000000000000002"),
             status=JobStatus.READY_TO_DELIVER,
             next_attempt_at=datetime(2026, 9, 19, 11, 30, tzinfo=UTC),
         ),
@@ -1872,6 +1876,7 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
             video_id="hash",
             source_url="https://vimeo.com/123",
             title="Other media",
+            id=ObjectId("000000000000000000000004"),
             status=JobStatus.DELIVERING,
             next_attempt_at=datetime(2026, 9, 19, 11, 45, tzinfo=UTC),
         ),
@@ -1901,13 +1906,13 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
             (
                 "Active jobs:\n"
                 "1. **Manual:** Manual video — <https://www.twitch.tv/videos/123456789> "
-                "— **Generating** — <t:1789815620:S>\n"
+                "— **Generating** — <t:1789815620:S> — ID `000000000000000000000003`\n"
                 "2. **Manual:** Archived Space — <https://x.com/i/spaces/1DxleVnmlOmKL> "
-                "— **Ready to deliver** — <t:1789817400:S>\n"
+                "— **Ready to deliver** — <t:1789817400:S> — ID `000000000000000000000002`\n"
                 "3. **Manual:** Other media — <https://vimeo.com/123> "
-                "— **Delivering** — <t:1789818300:S>\n"
+                "— **Delivering** — <t:1789818300:S> — ID `000000000000000000000004`\n"
                 "4. **Auto:** Auto video — <https://www.youtube.com/watch?v=dQw4w9WgXcQ> "
-                "— **Queued** — <t:1789819200:S>"
+                "— **Queued** — <t:1789819200:S> — ID `000000000000000000000001`"
             ),
             {},
         )
@@ -1916,6 +1921,110 @@ async def test_queue_lists_active_auto_and_manual_jobs_in_processing_order(monke
         "status": {"$in": ["queued", "generating", "ready_to_deliver", "delivering"]}
     }
     assert not hasattr(summarizer_module, "get_topic_list")
+
+
+@pytest.mark.parametrize("job_type", ["auto", "manual"])
+@pytest.mark.parametrize(
+    "status", [JobStatus.QUEUED, JobStatus.GENERATING, JobStatus.READY_TO_DELIVER]
+)
+async def test_canceljob_cancels_one_pending_job(monkeypatch, job_type, status):
+    job_id = ObjectId()
+    job = {
+        "_id": job_id,
+        "job_type": job_type,
+        "status": status.value,
+        "claimed_by": None if status == JobStatus.QUEUED else "worker",
+    }
+    other_job = {**job, "_id": ObjectId()}
+
+    async def update_one(query, update):
+        for record in (job, other_job):
+            if (
+                record["_id"] == query["_id"]
+                and record["status"] in query["status"]["$in"]
+            ):
+                record.update(update["$set"])
+                return SimpleNamespace(matched_count=1)
+        return SimpleNamespace(matched_count=0)
+
+    collection = SimpleNamespace(update_one=AsyncMock(side_effect=update_one))
+    monkeypatch.setattr(SummaryJob, "get_pymongo_collection", lambda: collection)
+    cog = Summarizer(SimpleNamespace(message_rate_limiter=None))
+    interaction = FakeInteraction()
+
+    await Summarizer.canceljob.callback(cog, interaction, f" {job_id} ")
+
+    collection.update_one.assert_awaited_once_with(
+        {
+            "_id": job_id,
+            "status": {"$in": ["queued", "generating", "ready_to_deliver"]},
+        },
+        {
+            "$set": {
+                "status": "cancelled",
+                "claimed_by": None,
+                "claimed_at": None,
+                "lease_expires_at": None,
+            }
+        },
+    )
+    assert job["status"] == "cancelled"
+    assert job["claimed_by"] is None
+    assert other_job["status"] == status.value
+    assert interaction.response.deferred == [{"thinking": True}]
+    assert interaction.followup.messages == [(f"Cancelled job `{job_id}`.", {})]
+
+    retry = FakeInteraction()
+    await Summarizer.canceljob.callback(cog, retry, str(job_id))
+
+    assert retry.followup.messages == [("That job is no longer pending.", {})]
+
+
+async def test_canceljob_rejects_invalid_id_before_touching_mongodb(monkeypatch):
+    get_collection = Mock()
+    monkeypatch.setattr(SummaryJob, "get_pymongo_collection", get_collection)
+    cog = Summarizer(SimpleNamespace(message_rate_limiter=None))
+    interaction = FakeInteraction()
+
+    await Summarizer.canceljob.callback(cog, interaction, "1")
+
+    get_collection.assert_not_called()
+    assert interaction.followup.messages == [("Enter a job ID shown by /queue.", {})]
+
+
+@pytest.mark.parametrize("status", [None, "delivering", "completed", "failed"])
+async def test_canceljob_rejects_missing_or_non_cancellable_job(monkeypatch, status):
+    job_id = ObjectId()
+
+    async def update_one(query, _update):
+        return SimpleNamespace(matched_count=int(status in query["status"]["$in"]))
+
+    collection = SimpleNamespace(update_one=AsyncMock(side_effect=update_one))
+    monkeypatch.setattr(SummaryJob, "get_pymongo_collection", lambda: collection)
+    cog = Summarizer(SimpleNamespace(message_rate_limiter=None))
+    interaction = FakeInteraction()
+
+    await Summarizer.canceljob.callback(cog, interaction, str(job_id))
+
+    collection.update_one.assert_awaited_once()
+    assert interaction.followup.messages == [("That job is no longer pending.", {})]
+
+
+async def test_canceljob_reports_unconfirmed_result_after_database_error(
+    monkeypatch, caplog
+):
+    job_id = ObjectId()
+    collection = SimpleNamespace(update_one=AsyncMock(side_effect=AutoReconnect()))
+    monkeypatch.setattr(SummaryJob, "get_pymongo_collection", lambda: collection)
+    cog = Summarizer(SimpleNamespace(message_rate_limiter=None))
+    interaction = FakeInteraction()
+
+    await Summarizer.canceljob.callback(cog, interaction, str(job_id))
+
+    assert interaction.followup.messages == [
+        ("Could not confirm whether the job was cancelled. Check /queue.", {}),
+    ]
+    assert str(job_id) in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2583,7 +2692,10 @@ async def test_autosummary_poll_only_enqueues_videos_released_after_channel_was_
 
 
 @pytest.mark.asyncio
-async def test_autosummary_enqueue_skips_ignored_and_duplicate_videos(monkeypatch):
+@pytest.mark.parametrize("status", [JobStatus.QUEUED, JobStatus.CANCELLED])
+async def test_autosummary_enqueue_skips_ignored_and_duplicate_videos(
+    monkeypatch, status
+):
     cog = make_autosummary()
     channel = FakeFollowedChannel("UC1", "Test")
     monkeypatch.setattr(
@@ -2608,6 +2720,7 @@ async def test_autosummary_enqueue_skips_ignored_and_duplicate_videos(monkeypatc
         title="Existing",
         available_at=datetime.now(UTC),
         next_attempt_at=datetime.now(UTC),
+        status=status,
     )
     FakeSummaryJob.records = [existing]
     duplicate = HolodexVideo(

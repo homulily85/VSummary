@@ -7,7 +7,8 @@
 | `/topics` | `video_url_or_id` (required) | Queues a topic-list request and posts numbered pages to the invoking channel. |
 | `/detail` | `video_url_or_id` (required), `topic_index` (optional) | Generates detailed content. Omitting `topic_index` generates every topic; providing one generates only that topic. |
 | `/deletecache` | `video_url_or_id` (required) | Deletes one video's cached topics and details across all languages.|
-| `/queue` | None | Lists active auto-summary and manual-summary jobs.|
+| `/queue` | None | Lists active auto-summary and manual-summary jobs with their IDs. |
+| `/canceljob` | `job_id` (required) | Cancels an auto or manual job that is queued, generating, or ready to deliver. Copy its ID from `/queue`. |
 | `/version` | None | Displays the running bot's version. |
 | `/quota` | None | Shows the active NotebookLM account's 5h and 7d quota usage, remaining percentages, and reset times in the channel. |
 

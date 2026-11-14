@@ -3,7 +3,7 @@
 import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from notebooklm import NotebookLMError
@@ -88,7 +88,10 @@ async def test_quota_handles_sdk_errors_without_exposing_details(caplog):
     assert "private error details" not in caplog.text
 
 
-async def test_quota_cancels_slow_lookup():
+async def test_quota_cancels_slow_lookup(monkeypatch):
+    real_timeout = asyncio.timeout
+    timeout = Mock(side_effect=lambda _seconds: real_timeout(0))
+    monkeypatch.setattr(asyncio, "timeout", timeout)
     cancelled = asyncio.Event()
 
     async def slow_lookup():
@@ -97,8 +100,9 @@ async def test_quota_cancels_slow_lookup():
         finally:
             cancelled.set()
 
-    async with asyncio.timeout(3):
+    async with real_timeout(3):
         result = await invoke_quota(AsyncMock(side_effect=slow_lookup))
 
+    timeout.assert_called_once_with(60)
     assert cancelled.is_set()
     assert result == "NotebookLM quota is temporarily unavailable. Please try again."
