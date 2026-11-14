@@ -186,3 +186,34 @@ async def test_failed_owned_save_prevents_delivery(service):
         job, AsyncMock(), send, AsyncMock(return_value=False)
     )
     send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("matched", [0, 1])
+async def test_quota_deferral_saves_only_while_job_is_owned(
+    service, monkeypatch, matched
+):
+    from datetime import UTC, datetime
+
+    from vsummary.services.notebook_quota import NotebookQuotaExceeded
+    from vsummary.services.summary_retry import source_failure
+
+    reset = datetime.now(UTC) + timedelta(hours=5)
+    job = SummaryJob.model_construct(
+        job_type=service.job_type, video_id="video", claimed_by="worker", retry_count=99
+    )
+    collection = SimpleNamespace(
+        update_one=AsyncMock(return_value=SimpleNamespace(matched_count=matched))
+    )
+    monkeypatch.setattr(SummaryJob, "get_pymongo_collection", lambda: collection)
+    assert not source_failure(
+        job, NotebookQuotaExceeded(reset), service.config, allow_youtube_fallback=True
+    )
+    service.release(job)
+    assert await service.save_owned(job) is bool(matched)
+    query, update = collection.update_one.await_args.args
+    assert query["claimed_by"] == "worker"
+    assert query["job_type"] == service.job_type
+    assert update["$set"]["next_attempt_at"] == reset
+    assert update["$set"]["retry_count"] == 99
+    assert update["$set"]["status"] == JobStatus.QUEUED
+    assert update["$set"]["claimed_by"] is None

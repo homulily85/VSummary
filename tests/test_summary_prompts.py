@@ -54,7 +54,12 @@ def test_review_uses_the_complete_previous_answer_without_resending_the_inventor
 )
 async def test_chat_question_budget_accepts_boundary_values(prompt):
     response = SimpleNamespace(answer="done")
-    client = SimpleNamespace(chat=SimpleNamespace(ask=AsyncMock(return_value=response)))
+    client = SimpleNamespace(
+        settings=SimpleNamespace(
+            get_usage=AsyncMock(return_value=SimpleNamespace(enabled=False))
+        ),
+        chat=SimpleNamespace(ask=AsyncMock(return_value=response)),
+    )
 
     assert (
         await summarizer._ask_notebook(
@@ -70,7 +75,12 @@ async def test_chat_question_budget_accepts_boundary_values(prompt):
     "prompt", ["a" * 4001, "🎵" * 1001], ids=["ascii-oversize", "emoji-oversize"]
 )
 async def test_chat_question_budget_blocks_oversized_requests_before_dispatch(prompt):
-    client = SimpleNamespace(chat=SimpleNamespace(ask=AsyncMock()))
+    client = SimpleNamespace(
+        settings=SimpleNamespace(
+            get_usage=AsyncMock(return_value=SimpleNamespace(enabled=False))
+        ),
+        chat=SimpleNamespace(ask=AsyncMock()),
+    )
     with pytest.raises(PermanentSummaryError, match="4000"):
         await summarizer._ask_notebook(
             client, "notebook", prompt, phase="topic_review", ref=REF, topic_count=10
@@ -82,7 +92,12 @@ async def test_chat_question_budget_blocks_oversized_requests_before_dispatch(pr
 async def test_chat_metrics_record_sizes_and_stage_without_prompt_content(caplog):
     caplog.set_level(logging.INFO, logger=summarizer.__name__)
     prompt = "private content 語🎵"
-    client = SimpleNamespace(chat=SimpleNamespace(ask=AsyncMock()))
+    client = SimpleNamespace(
+        settings=SimpleNamespace(
+            get_usage=AsyncMock(return_value=SimpleNamespace(enabled=False))
+        ),
+        chat=SimpleNamespace(ask=AsyncMock()),
+    )
     await summarizer._ask_notebook(
         client, "notebook", prompt, phase="topic_review", ref=REF, topic_count=17
     )
@@ -103,7 +118,12 @@ async def test_chat_metrics_record_sizes_and_stage_without_prompt_content(caplog
 @pytest.mark.asyncio
 async def test_status_3_is_permanent_without_replaying_the_request():
     error = ChatError("Chat request was rejected by the server (status 3). Shorten it.")
-    client = SimpleNamespace(chat=SimpleNamespace(ask=AsyncMock(side_effect=error)))
+    client = SimpleNamespace(
+        settings=SimpleNamespace(
+            get_usage=AsyncMock(return_value=SimpleNamespace(enabled=False))
+        ),
+        chat=SimpleNamespace(ask=AsyncMock(side_effect=error)),
+    )
     with pytest.raises(PermanentSummaryError, match="status 3") as caught:
         await summarizer._ask_notebook(
             client,
@@ -128,7 +148,12 @@ async def test_status_3_is_permanent_without_replaying_the_request():
 )
 async def test_other_chat_failures_keep_existing_classification(message):
     error = ChatError(message)
-    client = SimpleNamespace(chat=SimpleNamespace(ask=AsyncMock(side_effect=error)))
+    client = SimpleNamespace(
+        settings=SimpleNamespace(
+            get_usage=AsyncMock(return_value=SimpleNamespace(enabled=False))
+        ),
+        chat=SimpleNamespace(ask=AsyncMock(side_effect=error)),
+    )
     with pytest.raises(ChatError) as caught:
         await summarizer._ask_notebook(
             client,

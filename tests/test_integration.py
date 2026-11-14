@@ -104,6 +104,9 @@ class FakeChannelTarget:
 
 class FakeNotebookClient:
     def __init__(self, answers=None, source_error=False):
+        self.settings = SimpleNamespace(
+            get_usage=AsyncMock(return_value=SimpleNamespace(enabled=False))
+        )
         self.answers = list(answers or [])
         self.source_error = source_error
         self.created = []
@@ -3134,3 +3137,81 @@ async def test_listignoredtopics_uses_current_ignored_topics(monkeypatch, topics
         else "No topics are ignored for automatic summaries."
     )
     assert interaction.response.sent_kwargs == {"ephemeral": True}
+
+
+@pytest.mark.parametrize("operation", ["automatic", "topics", "detail", "all"])
+async def test_quota_defers_workers_without_retry_or_fallback(operation):
+    from notebooklm.types import (
+        UsageSummary,
+        UsageSummaryStatus,
+        UsageWindow,
+        UsageWindowKind,
+    )
+
+    reset = datetime.now(UTC) + timedelta(hours=5)
+    client = FakeNotebookClient()
+    client.settings.get_usage.return_value = UsageSummary(
+        UsageSummaryStatus.READY,
+        windows=(UsageWindow(UsageWindowKind.FIVE_HOUR, 100, 0, reset),),
+    )
+    cog, job = make_worker_job(client, RuntimeConfig(), operation)
+    job.retry_count = cog.config.source_retry_limit - 1
+    original_count = job.retry_count
+    if operation == "automatic":
+        await cog._generate_for_job(job)
+    else:
+        await cog._generate(job)
+    assert job.status == JobStatus.QUEUED
+    assert job.next_attempt_at == reset
+    assert job.retry_count == original_count
+    assert not job.youtube_audio_fallback
+    assert job.claimed_by is None
+    assert not client.created
+    assert not client.prompts
+
+
+async def test_quota_midway_preserves_details_and_cached_results_bypass_quota():
+    from notebooklm.types import (
+        UsageSummary,
+        UsageSummaryStatus,
+        UsageWindow,
+        UsageWindowKind,
+    )
+
+    from vsummary.services.notebook_quota import NotebookQuotaExceeded
+
+    video = FakeVideoRecord(
+        source="youtube",
+        video_id=VIDEO_ID,
+        output_language="english",
+        topics=[Topic(name="First"), Topic(name="Second")],
+    )
+    await video.save()
+    client = FakeNotebookClient(answers=["First detail"])
+    available = UsageSummary(UsageSummaryStatus.DISABLED)
+    exhausted = UsageSummary(
+        UsageSummaryStatus.READY,
+        windows=(
+            UsageWindow(
+                UsageWindowKind.FIVE_HOUR,
+                100,
+                0,
+                datetime.now(UTC) + timedelta(hours=5),
+            ),
+        ),
+    )
+    client.settings.get_usage.side_effect = [available, available, exhausted]
+    with pytest.raises(NotebookQuotaExceeded):
+        await summarizer_util.get_topic_details_all(client, VIDEO_REF)
+    assert video.topics[0].detail == "First detail"
+    assert video.topics[1].detail is None
+    assert client.deleted == ["notebook-1"]
+    retry_client = FakeNotebookClient(answers=["Second detail"])
+    await summarizer_util.get_topic_details_all(retry_client, VIDEO_REF)
+    assert len(retry_client.prompts) == 1
+    cached_client = FakeNotebookClient()
+    cached_client.settings.get_usage.return_value = exhausted
+    result = await summarizer_util.get_topic_details_all(cached_client, VIDEO_REF)
+    assert [item["detail"] for item in result] == ["First detail", "Second detail"]
+    cached_client.settings.get_usage.assert_not_awaited()
+    assert not cached_client.created

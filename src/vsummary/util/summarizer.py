@@ -11,6 +11,7 @@ from notebooklm.types import AskResult, Notebook
 
 from vsummary.logging import log_event
 from vsummary.model.video import Topic, VideoSummary
+from vsummary.services.notebook_quota import quota_guard
 from vsummary.settings import DEFAULT_CONFIG, RuntimeConfig, runtime_config
 from vsummary.util.generic_media import download_generic_audio
 from vsummary.util.twitch import download_twitch_audio
@@ -103,7 +104,8 @@ async def _ask_notebook(
     try:
         # Omitted conversation_id continues the notebook's server-side thread.
         # The review must follow extraction without resending its large answer.
-        return await client.chat.ask(notebook_id, prompt)
+        async with quota_guard(client):
+            return await client.chat.ask(notebook_id, prompt)
     except ChatError as exc:
         # notebooklm-py 0.8.0 exposes this rejection only in its message. Match
         # the entire status marker, not rate-limit details or status 13 / 30.
@@ -388,46 +390,49 @@ async def _create_notebook_with_source(
         OSError: If a file operation fails.
     """
     video_link = build_video_url(ref)
-    notebook = await client.notebooks.create(video_link)
-    try:
-        if ref.source == "twitch":
-            async with download_twitch_audio(ref) as audio:
-                await client.sources.add_file(
-                    notebook.id,
-                    audio,
-                    mime_type="audio/mp4",
-                    wait=True,
-                    wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
-                    title=f"Twitch VOD {ref.video_id}",
-                )
-        elif ref.source == "x_space":
-            async with download_x_space_audio(ref) as audio:
-                await client.sources.add_file(
-                    notebook.id,
-                    audio,
-                    mime_type="audio/mp4",
-                    wait=True,
-                    wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
-                    title=f"X Space {ref.video_id}",
-                )
-        elif ref.source == "yt_dlp" or (ref.source == "youtube" and use_youtube_audio):
-            async with download_generic_audio(ref) as audio:
-                await client.sources.add_file(
-                    notebook.id,
-                    audio,
-                    mime_type="audio/mp4",
-                    wait=True,
-                    wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
-                    title=f"YouTube video {ref.video_id}"
-                    if ref.source == "youtube"
-                    else "Media",
-                )
-        else:
-            await client.sources.add_url(notebook.id, video_link)
-    except Exception:
-        await _safe_delete_notebook(client, notebook.id)
-        raise
-    return notebook
+    async with quota_guard(client):
+        notebook = await client.notebooks.create(video_link)
+        try:
+            if ref.source == "twitch":
+                async with download_twitch_audio(ref) as audio:
+                    await client.sources.add_file(
+                        notebook.id,
+                        audio,
+                        mime_type="audio/mp4",
+                        wait=True,
+                        wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
+                        title=f"Twitch VOD {ref.video_id}",
+                    )
+            elif ref.source == "x_space":
+                async with download_x_space_audio(ref) as audio:
+                    await client.sources.add_file(
+                        notebook.id,
+                        audio,
+                        mime_type="audio/mp4",
+                        wait=True,
+                        wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
+                        title=f"X Space {ref.video_id}",
+                    )
+            elif ref.source == "yt_dlp" or (
+                ref.source == "youtube" and use_youtube_audio
+            ):
+                async with download_generic_audio(ref) as audio:
+                    await client.sources.add_file(
+                        notebook.id,
+                        audio,
+                        mime_type="audio/mp4",
+                        wait=True,
+                        wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
+                        title=f"YouTube video {ref.video_id}"
+                        if ref.source == "youtube"
+                        else "Media",
+                    )
+            else:
+                await client.sources.add_url(notebook.id, video_link)
+        except Exception:
+            await _safe_delete_notebook(client, notebook.id)
+            raise
+        return notebook
 
 
 def _topic_prompt(
