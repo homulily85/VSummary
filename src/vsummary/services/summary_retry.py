@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 from vsummary.model.channel import JobStatus, SummaryJob
+from vsummary.services.notebook_quota import NotebookQuotaExceeded
 from vsummary.settings import RuntimeConfig
 
 
@@ -30,6 +31,11 @@ def source_failure(
         ``True`` when the caller should prepare a failure notice, or ``False`` when
             another generation attempt is scheduled.
     """
+    if isinstance(exc, NotebookQuotaExceeded):
+        job.status = JobStatus.QUEUED
+        job.next_attempt_at = exc.retry_at
+        job.last_error = str(exc)
+        return False
     job.retry_count += 1
     job.last_error = str(exc)
     if (

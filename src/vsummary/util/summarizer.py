@@ -4,14 +4,14 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC, datetime
 
 import httpx
-from notebooklm import ChatError, NotebookLMClient, NotebookLMError, SourceAddError
+from notebooklm import ChatError, NotebookLMClient, SourceAddError
 from notebooklm.types import AskResult, Notebook
 
 from vsummary.logging import log_event
 from vsummary.model.video import Topic, VideoSummary
+from vsummary.services.notebook_quota import quota_guard
 from vsummary.settings import DEFAULT_CONFIG, RuntimeConfig, runtime_config
 from vsummary.util.generic_media import download_generic_audio
 from vsummary.util.twitch import download_twitch_audio
@@ -48,40 +48,6 @@ class InvalidSummaryResponse(TransientSummaryError):
     """Signal malformed NotebookLM output eligible for an immediate retry."""
 
 
-class NotebookLMQuotaExhausted(SummaryServiceError):
-    """Signal that NotebookLM work should wait for the account's quota reset."""
-
-    def __init__(self, resets_at: datetime) -> None:
-        self.resets_at = resets_at.astimezone(UTC)
-        super().__init__(
-            f"NotebookLM quota exhausted until {self.resets_at.isoformat()}"
-        )
-
-
-async def _check_notebooklm_quota(client: NotebookLMClient) -> None:
-    """Check the account's live usage and raise if a window is still exhausted."""
-    try:
-        usage = await client.settings.get_usage()
-    except NotebookLMError as exc:
-        logger.warning("Could not read NotebookLM quota (%s).", type(exc).__name__)
-        return
-
-    if not usage.available:
-        return
-
-    now = datetime.now(UTC)
-    resets_at = max(
-        (
-            window.resets_at
-            for window in usage.windows
-            if window.used_percent >= 100 and window.resets_at > now
-        ),
-        default=None,
-    )
-    if resets_at is not None:
-        raise NotebookLMQuotaExhausted(resets_at)
-
-
 async def _ask_notebook(
     client: NotebookLMClient,
     notebook_id: str,
@@ -109,7 +75,6 @@ async def _ask_notebook(
     Raises:
         PermanentSummaryError: If the question exceeds the local byte budget or
             NotebookLM rejects it with status 3.
-        NotebookLMQuotaExhausted: If the account must wait for a quota reset.
         notebooklm.NotebookLMError: If another NotebookLM request error propagates.
     """
     character_count = len(prompt)
@@ -136,11 +101,11 @@ async def _ask_notebook(
             f"UTF-8 safety limit ({byte_count} bytes). Shorten the prompt or "
             "summary.output_language."
         )
-    await _check_notebooklm_quota(client)
     try:
         # Omitted conversation_id continues the notebook's server-side thread.
         # The review must follow extraction without resending its large answer.
-        return await client.chat.ask(notebook_id, prompt)
+        async with quota_guard(client):
+            return await client.chat.ask(notebook_id, prompt)
     except ChatError as exc:
         # notebooklm-py 0.8.0 exposes this rejection only in its message. Match
         # the entire status marker, not rate-limit details or status 13 / 30.
@@ -215,7 +180,6 @@ class NotebookLMSummaryService:
                 fails, or a NotebookLM answer needs to be retried.
             PermanentSummaryError: If the request is invalid or generation produces
                 unusable data.
-            NotebookLMQuotaExhausted: If the account must wait for a quota reset.
             TwitchAudioError: If Twitch audio cannot be prepared.
             XSpaceAudioError: If Space replay audio cannot be prepared.
             GenericMediaError: If generic or fallback audio cannot be prepared.
@@ -419,7 +383,6 @@ async def _create_notebook_with_source(
 
     Raises:
         UnsupportedVideoSource: If the reference cannot be turned into a source URL.
-        NotebookLMQuotaExhausted: If the account must wait for a quota reset.
         notebooklm.NotebookLMError: If notebook creation or source attachment fails.
         TwitchAudioError: If Twitch VOD audio cannot be prepared.
         XSpaceAudioError: If Space replay audio cannot be prepared.
@@ -427,51 +390,49 @@ async def _create_notebook_with_source(
         OSError: If a file operation fails.
     """
     video_link = build_video_url(ref)
-    await _check_notebooklm_quota(client)
-    notebook = await client.notebooks.create(video_link)
-    try:
-        if ref.source == "twitch":
-            async with download_twitch_audio(ref) as audio:
-                await _check_notebooklm_quota(client)
-                await client.sources.add_file(
-                    notebook.id,
-                    audio,
-                    mime_type="audio/mp4",
-                    wait=True,
-                    wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
-                    title=f"Twitch VOD {ref.video_id}",
-                )
-        elif ref.source == "x_space":
-            async with download_x_space_audio(ref) as audio:
-                await _check_notebooklm_quota(client)
-                await client.sources.add_file(
-                    notebook.id,
-                    audio,
-                    mime_type="audio/mp4",
-                    wait=True,
-                    wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
-                    title=f"X Space {ref.video_id}",
-                )
-        elif ref.source == "yt_dlp" or (ref.source == "youtube" and use_youtube_audio):
-            async with download_generic_audio(ref) as audio:
-                await _check_notebooklm_quota(client)
-                await client.sources.add_file(
-                    notebook.id,
-                    audio,
-                    mime_type="audio/mp4",
-                    wait=True,
-                    wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
-                    title=f"YouTube video {ref.video_id}"
-                    if ref.source == "youtube"
-                    else "Media",
-                )
-        else:
-            await _check_notebooklm_quota(client)
-            await client.sources.add_url(notebook.id, video_link)
-    except Exception:
-        await _safe_delete_notebook(client, notebook.id)
-        raise
-    return notebook
+    async with quota_guard(client):
+        notebook = await client.notebooks.create(video_link)
+        try:
+            if ref.source == "twitch":
+                async with download_twitch_audio(ref) as audio:
+                    await client.sources.add_file(
+                        notebook.id,
+                        audio,
+                        mime_type="audio/mp4",
+                        wait=True,
+                        wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
+                        title=f"Twitch VOD {ref.video_id}",
+                    )
+            elif ref.source == "x_space":
+                async with download_x_space_audio(ref) as audio:
+                    await client.sources.add_file(
+                        notebook.id,
+                        audio,
+                        mime_type="audio/mp4",
+                        wait=True,
+                        wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
+                        title=f"X Space {ref.video_id}",
+                    )
+            elif ref.source == "yt_dlp" or (
+                ref.source == "youtube" and use_youtube_audio
+            ):
+                async with download_generic_audio(ref) as audio:
+                    await client.sources.add_file(
+                        notebook.id,
+                        audio,
+                        mime_type="audio/mp4",
+                        wait=True,
+                        wait_timeout=_SOURCE_UPLOAD_TIMEOUT_SECONDS,
+                        title=f"YouTube video {ref.video_id}"
+                        if ref.source == "youtube"
+                        else "Media",
+                    )
+            else:
+                await client.sources.add_url(notebook.id, video_link)
+        except Exception:
+            await _safe_delete_notebook(client, notebook.id)
+            raise
+        return notebook
 
 
 def _topic_prompt(
@@ -590,7 +551,6 @@ async def _get_or_create_topic_list(
         InvalidSummaryResponse: If cached or generated topic data is invalid.
         PermanentSummaryError: If an extraction or review question is rejected as
             invalid.
-        NotebookLMQuotaExhausted: If the account must wait for a quota reset.
         UnsupportedVideoSource: If the reference cannot be turned into a source URL.
         notebooklm.NotebookLMError: If a NotebookLM request fails.
         TwitchAudioError: If Twitch audio cannot be prepared.
@@ -687,7 +647,6 @@ async def get_topic_list(
         InvalidSummaryResponse: If cached or generated topics are invalid.
         PermanentSummaryError: If a generation question is invalid or exceeds the byte
             budget.
-        NotebookLMQuotaExhausted: If the account must wait for a quota reset.
         UnsupportedVideoSource: If the reference cannot be turned into a source URL.
         notebooklm.NotebookLMError: If a NotebookLM request fails.
         TwitchAudioError: If Twitch audio cannot be prepared.
@@ -738,7 +697,6 @@ async def get_topic_details(
             only citations.
         PermanentSummaryError: If a generation question is rejected or exceeds the byte
             budget.
-        NotebookLMQuotaExhausted: If the account must wait for a quota reset.
         UnsupportedVideoSource: If the reference cannot be turned into a source URL.
         notebooklm.NotebookLMError: If a NotebookLM request fails.
         TwitchAudioError: If Twitch audio cannot be prepared.
@@ -820,7 +778,6 @@ async def get_topic_details_all(
             only citations.
         PermanentSummaryError: If a generation question is rejected or exceeds the byte
             budget.
-        NotebookLMQuotaExhausted: If the account must wait for a quota reset.
         UnsupportedVideoSource: If the reference cannot be turned into a source URL.
         notebooklm.NotebookLMError: If a NotebookLM request fails.
         TwitchAudioError: If Twitch audio cannot be prepared.

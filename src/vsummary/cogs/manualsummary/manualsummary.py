@@ -11,6 +11,7 @@ from discord.ext import commands, tasks
 
 from vsummary.model.channel import JobStatus, ManualSummaryOperation, SummaryJob
 from vsummary.model.video import Topic
+from vsummary.services.notebook_quota import NotebookQuotaExceeded
 from vsummary.services.summary_jobs import SummaryJobService
 from vsummary.services.summary_retry import delivery_failure, source_failure
 from vsummary.settings import RuntimeConfig, Settings, runtime_config
@@ -21,7 +22,6 @@ from vsummary.util.generic_media import (
     inspect_generic_media,
 )
 from vsummary.util.summarizer import (
-    NotebookLMQuotaExhausted,
     PermanentSummaryError,
     TransientSummaryError,
     get_topic_details,
@@ -350,8 +350,8 @@ class ManualSummary(commands.Cog):
                         retries=self.config.invalid_summary_retries,
                     )
                 )
-        except NotebookLMQuotaExhausted as exc:
-            await self.jobs.defer_generation(job, until=exc.resets_at, reason=str(exc))
+        except NotebookQuotaExceeded as exc:
+            await self._fail(job, exc)
             return
         except IndexError:
             job.delivery_chunks = [f"Invalid topic index: {(job.topic_index or 0) + 1}"]

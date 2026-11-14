@@ -17,6 +17,7 @@ from vsummary.model.channel import (
     SummaryJob,
 )
 from vsummary.model.video import Topic
+from vsummary.services.notebook_quota import NotebookQuotaExceeded
 from vsummary.services.summary_jobs import SummaryJobService
 from vsummary.services.summary_retry import delivery_failure, source_failure
 from vsummary.settings import (
@@ -39,7 +40,6 @@ from vsummary.util.holodex import (
     TransientHolodexError,
 )
 from vsummary.util.summarizer import (
-    NotebookLMQuotaExhausted,
     PermanentSummaryError,
     TransientSummaryError,
     retry_invalid_summary_response,
@@ -388,10 +388,8 @@ class Autosummary(commands.Cog):
                         )
                     )
                 job.summary_details = [self._as_topic(detail) for detail in details]
-            except NotebookLMQuotaExhausted as exc:
-                await self.jobs.defer_generation(
-                    job, until=exc.resets_at, reason=str(exc)
-                )
+            except NotebookQuotaExceeded as exc:
+                await self._handle_source_error(job, exc)
                 return False
             except (PermanentSummaryError, PermanentHolodexError) as exc:
                 logger.warning(

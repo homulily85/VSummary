@@ -3,6 +3,7 @@
 import logging
 
 import discord
+from bson import ObjectId
 from discord import app_commands
 from discord.ext import commands
 from pymongo.errors import PyMongoError
@@ -33,12 +34,12 @@ from vsummary.util.x_space import (
 
 logger = logging.getLogger(__name__)
 
-_ACTIVE_JOB_STATUSES = [
+_CANCELLABLE_JOB_STATUSES = [
     JobStatus.QUEUED.value,
     JobStatus.GENERATING.value,
     JobStatus.READY_TO_DELIVER.value,
-    JobStatus.DELIVERING.value,
 ]
+_ACTIVE_JOB_STATUSES = [*_CANCELLABLE_JOB_STATUSES, JobStatus.DELIVERING.value]
 
 
 async def _resolve_x_status(x_input: XSpaceInput) -> VideoRef:
@@ -284,13 +285,56 @@ class Summarizer(commands.Cog):
                 message = "No cached summary found for this video."
         await send_limited(self.bot, interaction.followup.send, message, ephemeral=True)
 
+    @app_commands.command(
+        name="canceljob", description="Cancel a summary job before delivery starts."
+    )
+    @app_commands.describe(job_id="The job ID shown in /queue.")
+    async def canceljob(self, interaction: discord.Interaction, job_id: str):
+        """Cancel one queued, generating, or ready-to-deliver summary job."""
+        await interaction.response.defer(thinking=True)
+        job_id = job_id.strip()
+        if not ObjectId.is_valid(job_id):
+            await send_limited(
+                self.bot,
+                interaction.followup.send,
+                "Enter a job ID shown by /queue.",
+            )
+            return
+
+        object_id = ObjectId(job_id)
+        try:
+            # Revoke any worker lease so it cannot renew or overwrite cancellation.
+            result = await SummaryJob.get_pymongo_collection().update_one(
+                {"_id": object_id, "status": {"$in": _CANCELLABLE_JOB_STATUSES}},
+                {
+                    "$set": {
+                        "status": JobStatus.CANCELLED.value,
+                        "claimed_by": None,
+                        "claimed_at": None,
+                        "lease_expires_at": None,
+                    }
+                },
+            )
+        except PyMongoError:
+            logger.exception(
+                "Could not confirm cancellation for summary job %s.", object_id
+            )
+            message = "Could not confirm whether the job was cancelled. Check /queue."
+        else:
+            message = (
+                f"Cancelled job `{object_id}`."
+                if result.matched_count
+                else "That job is no longer pending."
+            )
+        await send_limited(self.bot, interaction.followup.send, message)
+
     @app_commands.command(name="queue", description="List videos awaiting a summary.")
     async def queue(self, interaction: discord.Interaction):
         """Report active automatic and manual jobs in next-attempt order.
 
-        Show the title or video ID, source URL, status, and next-attempt time for each
-        job. Discord renders timestamps in each viewer's timezone. Split long responses
-        into Discord-sized chunks.
+        Show each job's ID, title or video ID, source URL, status, and next-attempt
+        time. Discord renders timestamps in each viewer's timezone. Split long
+        responses into Discord-sized chunks.
 
         Args:
             interaction: Discord request used to report the queue.
@@ -322,6 +366,7 @@ class Summarizer(commands.Cog):
             timestamp = discord.utils.format_dt(job.next_attempt_at, "S")
             lines.append(
                 f"{index}. **{kind}:** {title} — <{url}> — **{status}** — {timestamp}"
+                f" — ID `{job.id}`"
             )
 
         for chunk in split_message("\n".join(lines)):

@@ -76,7 +76,7 @@ class Bot(commands.Bot):
             await self.discord_log_handler.start(self)
 
     async def setup_hook(self):
-        """Load the four application extensions and sync their slash commands.
+        """Load the application extensions and sync their slash commands.
 
         Raises:
             discord.ext.commands.ExtensionError: If an extension cannot be loaded.
@@ -84,7 +84,8 @@ class Bot(commands.Bot):
                 sync.
         """
         cogs = [
-            "vsummary.cogs.misc.ping",
+            "vsummary.cogs.misc.version",
+            "vsummary.cogs.misc.quota",
             "vsummary.cogs.manualsummary.manualsummary",
             "vsummary.cogs.summarizer.summarizer",
             "vsummary.cogs.autosummary.autosummary",

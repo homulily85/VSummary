@@ -155,8 +155,7 @@ or customize the [example configuration](../config.example.toml).
 ```bash
 chmod 600 .env
 touch config.toml
-VSUMMARY_IMAGE=homulily85/vsummary:1.6.0
-docker pull "$VSUMMARY_IMAGE"
+docker pull homulily85/vsummary:latest
 docker run -d --name vsummary --init --restart unless-stopped \
   --user "$(id -u):$(id -g)" \
   --env-file .env \
