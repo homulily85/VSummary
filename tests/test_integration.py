@@ -372,12 +372,11 @@ def reset_fake_storage(monkeypatch):
 async def test_topic_list_requests_english_names_and_caches_them_in_order():
     client = FakeNotebookClient(
         answers=['[{"name": "Preparing for the concert"}, {"name": "Future plans"}]']
-        * 2
     )
 
     topics = await summarizer_util.get_topic_list(client, VIDEO_REF)
 
-    assert len(client.prompts) == 2
+    assert len(client.prompts) == 1
     for notebook_id, text in client.prompts:
         prompt = " ".join(text.split())
         assert notebook_id == "notebook-1"
@@ -393,33 +392,6 @@ async def test_topic_list_requests_english_names_and_caches_them_in_order():
         assert "100 characters" in prompt
         assert '[{"name": "topic name"}]' in prompt
         assert "JSON only" in prompt
-    extraction = " ".join(client.prompts[0][1].split())
-    for instruction in (
-        "every substantive discussion",
-        "chronological order",
-        "brief discussions",
-        "secondary topics",
-        "audience questions",
-        "announcements",
-        "anecdotes",
-        "later returns",
-        "new information",
-        "filler",
-        "incidental mentions",
-        "Do not target a fixed topic count",
-    ):
-        assert instruction in extraction
-    review = " ".join(client.prompts[1][1].split())
-    for instruction in (
-        "beginning to end",
-        "omitted discussions",
-        "overly broad entries",
-        "merged recurring discussions",
-        "complete corrected list",
-        "Retain supported discussions",
-        "chronological order",
-    ):
-        assert instruction in review
     assert [topic.name for topic in topics] == [
         "Preparing for the concert",
         "Future plans",
@@ -435,41 +407,17 @@ async def test_topic_list_requests_english_names_and_caches_them_in_order():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("draft", "reviewed"),
-    [
-        (["Concert", "Travel"], ["Concert", "Audience questions", "Travel"]),
-        (["Concert", "Travel"], ["Concert", "Travel", "Concert"]),
-    ],
-    ids=["omission", "recurring"],
-)
-async def test_topic_review_saves_only_the_corrected_list(monkeypatch, draft, reviewed):
-    draft_json = json.dumps([{"name": name} for name in draft])
+async def test_topic_list_keeps_nonconsecutive_returns_to_the_same_subject():
+    names = ["Concert", "Travel", "Concert"]
     client = FakeNotebookClient(
-        answers=[draft_json, json.dumps([{"name": name} for name in reviewed])]
+        answers=[json.dumps([{"name": name} for name in names])]
     )
-    ask = client.chat.ask
-
-    async def ask_before_save(notebook_id, prompt):
-        assert FakeVideoRecord.records == []
-        return await ask(notebook_id, prompt)
-
-    monkeypatch.setattr(client.chat, "ask", ask_before_save)
 
     topics = await summarizer_util.get_topic_list(client, VIDEO_REF)
 
-    assert [topic.name for topic in topics] == reviewed
-    assert len(client.prompts) == 2
-    assert draft_json not in client.prompts[1][1]
-    assert (
-        "complete candidate topic list in your previous answer" in client.prompts[1][1]
-    )
-    assert len(FakeVideoRecord.records) == 1
+    assert [topic.name for topic in topics] == names
     assert FakeVideoRecord.records[0].topics == topics
-    assert client.deleted == ["notebook-1"]
-    cached_client = FakeNotebookClient()
-    assert await summarizer_util.get_topic_list(cached_client, VIDEO_REF) == topics
-    assert cached_client.prompts == cached_client.created == []
+    assert len(client.prompts) == 1
 
 
 @pytest.mark.asyncio
@@ -478,16 +426,12 @@ async def test_large_topic_inventories_keep_every_topic_with_bounded_chat_reques
     monkeypatch, operation
 ):
     names = [f"Segment {i:04}: " + "🎵" * 86 for i in range(100)]
-    reviewed_names = names + ["Audience questions"]
-    draft = json.dumps([{"name": name} for name in names], ensure_ascii=False)
-    reviewed = json.dumps(
-        [{"name": name} for name in reviewed_names], ensure_ascii=False
-    )
-    answers = [draft, reviewed]
+    names.append("Audience questions")
+    answers = [json.dumps([{"name": name} for name in names], ensure_ascii=False)]
     if operation == "detail":
         answers.append("Selected details")
     elif operation != "topics":
-        answers += [f"Details {index}" for index in range(len(reviewed_names))]
+        answers += [f"Details {index}" for index in range(len(names))]
     client = FakeNotebookClient(answers=answers)
     ask = client.chat.ask
 
@@ -502,7 +446,7 @@ async def test_large_topic_inventories_keep_every_topic_with_bounded_chat_reques
     config = RuntimeConfig(output_language="Japanese")
     if operation == "topics":
         result = await summarizer_util.get_topic_list(client, VIDEO_REF, config=config)
-        assert [topic.name for topic in result] == reviewed_names
+        assert [topic.name for topic in result] == names
     elif operation == "detail":
         result = await summarizer_util.get_topic_details(
             client, VIDEO_REF, 50, config=config
@@ -512,24 +456,25 @@ async def test_large_topic_inventories_keep_every_topic_with_bounded_chat_reques
         result = await summarizer_util.get_topic_details_all(
             client, VIDEO_REF, config=config
         )
-        assert [item["topic_name"] for item in result] == reviewed_names
+        assert [item["topic_name"] for item in result] == names
     else:
         result = await NotebookLMSummaryService(client, config=config).summarize(
             VIDEO_REF
         )
-        assert [topic.name for topic in result] == reviewed_names
-    assert [topic.name for topic in FakeVideoRecord.records[0].topics] == reviewed_names
+        assert [topic.name for topic in result] == names
+    assert [topic.name for topic in FakeVideoRecord.records[0].topics] == names
     assert client.deleted == ["notebook-1"]
     assert all(notebook_id == "notebook-1" for notebook_id, _ in client.prompts)
     assert all(len(prompt.encode("utf-8")) <= 4000 for _, prompt in client.prompts)
-    assert "previous answer" in client.prompts[1][1]
+    detail_count = {"topics": 0, "detail": 1, "all": len(names), "service": len(names)}
+    assert len(client.prompts) == 1 + detail_count[operation]
     cached_client = FakeNotebookClient()
     assert [
         topic.name
         for topic in await summarizer_util.get_topic_list(
             cached_client, VIDEO_REF, config=config
         )
-    ] == reviewed_names
+    ] == names
     assert cached_client.created == cached_client.prompts == []
 
 
@@ -552,11 +497,11 @@ async def test_oversized_language_never_dispatches_a_chat_request():
         ("automatic", "topic_detail"),
         ("topics", "topic_extraction"),
         ("detail", "topic_detail"),
-        ("all", "topic_review"),
+        ("all", "topic_extraction"),
     ],
 )
 async def test_workers_do_not_retry_or_download_audio_for_status_3(operation, stage):
-    phase_index = {"topic_extraction": 0, "topic_review": 1, "topic_detail": 2}[stage]
+    phase_index = {"topic_extraction": 0, "topic_detail": 1}[stage]
     client = FakeNotebookClient(
         answers=['[{"name": "Concert"}]'] * phase_index
         + [
@@ -590,14 +535,16 @@ async def test_workers_do_not_retry_or_download_audio_for_status_3(operation, st
         pytest.param(True, "not JSON", InvalidSummaryResponse, id="json-empty-cache"),
         pytest.param(
             False,
-            httpx.ReadTimeout("review timed out"),
+            httpx.ReadTimeout("extraction timed out"),
             TransientSummaryError,
             id="timeout",
         ),
-        pytest.param(False, RuntimeError("review failed"), RuntimeError, id="request"),
+        pytest.param(
+            False, RuntimeError("extraction failed"), RuntimeError, id="request"
+        ),
     ],
 )
-async def test_topic_review_failure_leaves_no_draft_cache(
+async def test_topic_extraction_failure_does_not_save_topics(
     existing_record, answer, error_type
 ):
     if existing_record:
@@ -605,12 +552,12 @@ async def test_topic_review_failure_leaves_no_draft_cache(
             source="youtube", video_id=VIDEO_ID, topics=[], output_language="english"
         )
         await video.save()
-    client = FakeNotebookClient(answers=['[{"name": "Concert"}]', answer])
+    client = FakeNotebookClient(answers=[answer])
 
     with pytest.raises(error_type):
         await NotebookLMSummaryService(client).summarize(VIDEO_REF)
 
-    assert len(client.prompts) == 2
+    assert len(client.prompts) == 1
     assert client.deleted == ["notebook-1"]
     if existing_record:
         assert FakeVideoRecord.records == [video]
@@ -631,18 +578,17 @@ async def test_topic_review_failure_leaves_no_draft_cache(
         ("all", "audio_failure"),
     ],
 )
-async def test_workers_preserve_retry_policy_for_topic_review(
+async def test_workers_preserve_retry_policy_for_topic_extraction(
     monkeypatch, tmp_path, operation, outcome
 ):
-    draft = '[{"name": "Concert"}]'
-    reviewed = '[{"name": "Audience questions"}]'
-    answers = [draft, "not JSON"]
+    topics_json = '[{"name": "Audience questions"}]'
+    answers = ["not JSON"]
     if outcome == "recovered":
-        answers += [draft, reviewed]
+        answers += [topics_json]
         if operation != "topics":
             answers.append("The speaker answers questions.")
     elif outcome == "exhausted":
-        answers += [draft, "not JSON"]
+        answers += ["not JSON"]
     client = FakeNotebookClient(answers=answers)
     client.sources.add_file = AsyncMock()
     audio = tmp_path / "audio.m4a"
@@ -687,18 +633,18 @@ async def test_workers_preserve_retry_policy_for_topic_review(
             ]
         else:
             assert "Audience questions" in "\n".join(job.delivery_chunks)
-        assert len(client.prompts) == (4 if operation == "topics" else 5)
+        assert len(client.prompts) == (2 if operation == "topics" else 3)
     else:
         assert FakeVideoRecord.records == []
         if outcome == "exhausted":
             assert job.status is JobStatus.QUEUED
             assert job.retry_count == 1
             assert job.next_attempt_at > datetime.now(UTC)
-            assert len(client.prompts) == 4
+            assert len(client.prompts) == 2
         else:
             assert job.status is JobStatus.READY_TO_DELIVER
             assert job.retry_count == config.source_retry_limit + 1
-            assert len(client.prompts) == 2
+            assert len(client.prompts) == 1
     notebook_ids = [notebook.id for notebook in client.created]
     assert client.deleted == notebook_ids
     assert len(notebook_ids) == (1 if outcome == "audio_failure" else 2)
@@ -750,12 +696,12 @@ async def test_topic_cache_separates_languages_and_preserves_untagged_legacy_dat
         ("Japanese", "コンサート", "話者はコンサートについて話します。"),
     ]:
         topics_json = json.dumps([{"name": name}])
-        client = FakeNotebookClient(answers=[topics_json, topics_json, detail])
+        client = FakeNotebookClient(answers=[topics_json, detail])
         result = await NotebookLMSummaryService(
             client, config=RuntimeConfig(output_language=language)
         ).summarize(VIDEO_REF)
         assert result == [Topic(name=name, detail=detail)]
-        assert len(client.prompts) == 3
+        assert len(client.prompts) == 2
         for _, prompt in client.prompts:
             assert f"in {language}" in prompt
         records[language] = result
@@ -886,7 +832,7 @@ async def test_current_language_applies_to_generation_but_not_saved_delivery(aut
     )
     await english.save()
     topics = json.dumps([{"name": "コンサート"}])
-    client = FakeNotebookClient(answers=[topics, topics, "日本語の詳細"])
+    client = FakeNotebookClient(answers=[topics, "日本語の詳細"])
     target = SimpleNamespace(
         send=AsyncMock(side_effect=RuntimeError("Discord offline"))
     )
@@ -936,7 +882,7 @@ async def test_current_language_applies_to_generation_but_not_saved_delivery(aut
     assert job.status is JobStatus.READY_TO_DELIVER
     assert "日本語の詳細" in "\n".join(job.delivery_chunks)
     saved_chunks = list(job.delivery_chunks)
-    assert len(client.prompts) == 3
+    assert len(client.prompts) == 2
 
     # A later restart changes the setting again before a delivery retry.
     target.send = AsyncMock()
@@ -949,7 +895,7 @@ async def test_current_language_applies_to_generation_but_not_saved_delivery(aut
         await restarted_worker._process(job)
     assert job.status is JobStatus.COMPLETED
     assert job.delivery_chunks == saved_chunks
-    assert len(client.prompts) == 3
+    assert len(client.prompts) == 2
     assert "日本語の詳細" in "".join(
         call.args[0] for call in target.send.await_args_list
     )
@@ -960,7 +906,6 @@ async def test_current_language_applies_to_generation_but_not_saved_delivery(aut
 async def test_summarization_pipeline_generates_caches_and_reuses_all_topic_details():
     client = FakeNotebookClient(
         answers=[
-            '[{"name": "Introduction"}, {"name": "Conclusion"}]',
             '[{"name": "Introduction"}, {"name": "Audience questions"}, {"name": "Conclusion"}]',
             "The speaker introduces the subject.",
             "The speaker answers questions.",
@@ -984,9 +929,9 @@ async def test_summarization_pipeline_generates_caches_and_reuses_all_topic_deta
         "The speaker answers questions.",
         "The speaker closes the discussion.",
     ]
-    assert len(client.prompts) == 5
+    assert len(client.prompts) == 4
     assert all(notebook_id == "notebook-1" for notebook_id, _ in client.prompts)
-    assert "'Audience questions'" in client.prompts[3][1]
+    assert "'Audience questions'" in client.prompts[2][1]
     assert client.deleted == ["notebook-1"]
 
     second_client = FakeNotebookClient()
@@ -1186,7 +1131,7 @@ async def test_youtube_audio_fallback_uploads_audio_and_keeps_the_youtube_cache(
     operation,
 ):
     config = RuntimeConfig(output_language="Japanese")
-    answers = ['[{"name": "Intro"}]'] * 2
+    answers = ['[{"name": "Intro"}]']
     if operation != "topics":
         answers.append("Details")
     client = FakeNotebookClient(answers=answers, source_error=True)
@@ -1228,7 +1173,7 @@ async def test_youtube_audio_fallback_uploads_audio_and_keeps_the_youtube_cache(
     )
     assert client.added_urls == []
     assert client.deleted == ["notebook-1"]
-    assert len(client.prompts) == (2 if operation == "topics" else 3)
+    assert len(client.prompts) == (1 if operation == "topics" else 2)
     assert all("in Japanese" in prompt for _, prompt in client.prompts)
     assert len(FakeVideoRecord.records) == 1
     assert FakeVideoRecord.records[0].source == "youtube"
@@ -1574,9 +1519,7 @@ async def test_deletecache_reports_database_failure_and_releases_lock(
 async def test_deletecache_waits_for_generation_and_preserves_jobs_and_delivery(
     monkeypatch, fake_cache_collection
 ):
-    client = FakeNotebookClient(
-        answers=['[{"name": "Concert"}]'] * 2 + ["Concert details"]
-    )
+    client = FakeNotebookClient(answers=['[{"name": "Concert"}]', "Concert details"])
     started = asyncio.Event()
     release = asyncio.Event()
     ask = client.chat.ask
@@ -1633,16 +1576,16 @@ async def test_deletecache_waits_for_generation_and_preserves_jobs_and_delivery(
     assert job.summary_details == [Topic(name="Concert", detail="Concert details")]
     assert queued_job.model_dump() == queued_before
     assert target.messages == []
-    assert len(client.prompts) == 3
+    assert len(client.prompts) == 2
 
     assert await automatic._deliver_for_job(job)
     assert job.status is JobStatus.COMPLETED
     assert "Concert details" in "".join(target.messages)
-    assert len(client.prompts) == 3
-    fresh_client = FakeNotebookClient(answers=['[{"name": "Fresh concert topic"}]'] * 2)
+    assert len(client.prompts) == 2
+    fresh_client = FakeNotebookClient(answers=['[{"name": "Fresh concert topic"}]'])
     topics = await summarizer_util.get_topic_list(fresh_client, VIDEO_REF)
     assert topics == [Topic(name="Fresh concert topic")]
-    assert len(fresh_client.prompts) == 2
+    assert len(fresh_client.prompts) == 1
 
 
 @pytest.mark.asyncio
@@ -2035,7 +1978,7 @@ async def test_canceljob_reports_unconfirmed_result_after_database_error(
     "answer",
     ["[]", "not JSON", "{}", '[{"name": " "}]', json.dumps([{"name": "x" * 101}])],
 )
-async def test_topic_pipeline_rejects_invalid_drafts_before_review(answer):
+async def test_topic_pipeline_rejects_invalid_extraction(answer):
     client = FakeNotebookClient(answers=[answer])
 
     with pytest.raises(InvalidSummaryResponse):
@@ -2192,7 +2135,6 @@ async def test_manual_detail_waits_for_auto_summary_and_reuses_cached_details(
             super().__init__(
                 answers=[
                     '[{"name": "Introduction"}, {"name": "Conclusion"}]',
-                    '[{"name": "Introduction"}, {"name": "Conclusion"}]',
                     "The speaker introduces the subject.",
                     "The speaker closes the discussion.",
                 ]
@@ -2252,7 +2194,7 @@ async def test_manual_detail_waits_for_auto_summary_and_reuses_cached_details(
         )
     ]
     assert len(client.created) == 1
-    assert len(client.prompts) == 4
+    assert len(client.prompts) == 3
 
 
 @pytest.mark.asyncio
