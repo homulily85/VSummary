@@ -278,9 +278,9 @@ Key points an agent should know before touching `util/summarizer.py`:
   1. Create a temporary notebook with `client.notebooks.create(...)`.
   2. Attach the normalized video URL with
      `client.sources.add_url(notebook_id, url)`.
-  3. Ask `client.chat.ask(...)` for JSON topic names, review coverage in a second
-     request, then generate topic details in the configured output language.
-     Persist only validated, reviewed topics in the matching language cache.
+  3. Ask `client.chat.ask(...)` once for JSON topic names in the configured
+     output language. Validate and save them in the matching language cache
+     before generating topic details.
   4. Persist autosummary topic details in `SummaryJob` before posting them to
      Discord. Respect Discord's 2,000-character message limit when posting.
 - `RPCError` is the library's exception type for API failures (auth

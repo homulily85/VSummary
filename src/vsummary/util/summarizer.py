@@ -482,46 +482,25 @@ def _topic_prompt(
     )
 
 
-def _topic_list_prompt(
-    candidates: Sequence[Topic] | None = None,
-    *,
-    output_language: str = DEFAULT_CONFIG.output_language,
-) -> str:
-    """Build instructions for topic extraction or coverage review.
-
-    Args:
-        candidates: Existing candidate list to select review mode, or ``None`` for
-            extraction. Review refers to the previous answer in the same conversation.
-        output_language: Language requested for topic names. Defaults to English.
-
-    Returns:
-        NotebookLM prompt requiring chronological JSON topic data.
-    """
+def _topic_list_prompt(*, output_language: str = DEFAULT_CONFIG.output_language) -> str:
+    """Build a prompt for chronological topic extraction."""
     output_language = output_language.strip()
-    requirements = (
-        "Include every substantive discussion in chronological order, including "
-        "brief discussions, secondary topics, audience questions, announcements, "
-        "and anecdotes. Separate distinct discussions rather than combining them "
-        "under broad categories. Represent later returns to a topic separately "
-        "when they contain new information, using specific names. Exclude filler "
-        "and incidental mentions. Do not target a fixed topic count. "
+    return (
+        "List the topics of this video in chronological order. Each topic is a "
+        "continuous discussion with one shared focus. Keep directly related "
+        "explanations, examples, causes, consequences, anecdotes, and audience "
+        "questions within that topic. Split only when the focus shifts to an "
+        "independent subject. When the boundary is unclear, keep adjacent material "
+        "together. If a subject returns after an intervening topic, list it again "
+        "at that point (A → B → A). Cover all substantive discussions, including "
+        "brief standalone announcements. Exclude filler and incidental mentions. "
+        "Do not target a fixed topic count. "
         "Use only information supported by the video and do not invent topics. "
         f"Write every topic name in {output_language}, regardless of the language spoken in "
         "the video or used in its transcript. Translate descriptive topic names "
         f"from other languages into {output_language}. Keep each name within 100 characters. "
         'Return a JSON list using this structure: [{"name": "topic name"}]. '
         "Return JSON only, do not include any other text in your response."
-    )
-    if candidates is None:
-        return "Create a comprehensive topic list for this video. " + requirements
-    return (
-        "Compare the complete candidate topic list in your previous answer "
-        "against the entire source from beginning "
-        "to end. Identify omitted discussions, overly broad entries, and incorrectly "
-        "merged recurring discussions. Return the complete corrected list. "
-        "Retain supported discussions from the candidate list and add only "
-        "source-supported omissions. Correct grouping and chronological order "
-        "where needed. " + requirements
     )
 
 
@@ -532,10 +511,10 @@ async def _get_or_create_topic_list(
     use_youtube_audio: bool = False,
     config: RuntimeConfig | None = None,
 ) -> tuple[VideoSummary, "Notebook | None"]:
-    """Load cached topics or generate and save a reviewed list.
+    """Load cached topics or generate and save a validated list.
 
     Look up topics by source, video ID, and trimmed, case-folded language. On a cache
-    miss, extract topics and review coverage in the same conversation before saving.
+    miss, extract topics in one request and validate them before saving.
 
     Args:
         client: Authenticated NotebookLM client.
@@ -549,7 +528,7 @@ async def _get_or_create_topic_list(
 
     Raises:
         InvalidSummaryResponse: If cached or generated topic data is invalid.
-        PermanentSummaryError: If an extraction or review question is rejected as
+        PermanentSummaryError: If the extraction question is rejected as
             invalid.
         UnsupportedVideoSource: If the reference cannot be turned into a source URL.
         notebooklm.NotebookLMError: If a NotebookLM request fails.
@@ -590,20 +569,9 @@ async def _get_or_create_topic_list(
             ref=ref,
             topic_count=0,
         )
-        candidates = _parse_topics(response.answer)
-
-        logger.info(f"Reviewing topic coverage in notebook {notebook.id}...")
-        response = await _ask_notebook(
-            client,
-            notebook.id,
-            _topic_list_prompt(candidates, output_language=output_language),
-            phase="topic_review",
-            ref=ref,
-            topic_count=len(candidates),
-        )
         topics_objects = _parse_topics(response.answer)
 
-        logger.info("Saving reviewed topics to database...")
+        logger.info("Saving validated topics to database...")
         if video:
             video.topics = topics_objects
         else:

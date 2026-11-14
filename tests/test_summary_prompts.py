@@ -37,15 +37,22 @@ def test_detail_prompt_ends_with_instruction_to_omit_follow_up_questions():
     )
 
 
-def test_review_uses_the_complete_previous_answer_without_resending_the_inventory():
-    topics = [Topic(name=f"Segment {i:04}: " + "🎵" * 86) for i in range(1000)]
-    prompt = summarizer._topic_list_prompt(topics, output_language="Japanese")
+def test_topic_prompt_groups_continuous_discussions_in_chronological_order():
+    prompt = summarizer._topic_list_prompt(output_language="Japanese")
 
     assert len(prompt.encode("utf-8")) <= 4000
-    assert "complete candidate topic list in your previous answer" in prompt
-    assert all(topic.name not in prompt for topic in topics)
-    assert "Retain supported discussions" in prompt
+    assert "continuous discussion with one shared focus" in prompt
+    assert (
+        "Keep directly related explanations, examples, causes, consequences" in prompt
+    )
+    assert "Split only when the focus shifts to an independent subject" in prompt
+    assert "When the boundary is unclear, keep adjacent material together" in prompt
+    assert "A → B → A" in prompt
+    assert "brief standalone announcements" in prompt
+    assert "Exclude filler" in prompt
+    assert "chronological order" in prompt
     assert "Do not target a fixed topic count" in prompt
+    assert "in Japanese" in prompt
 
 
 @pytest.mark.asyncio
@@ -63,7 +70,12 @@ async def test_chat_question_budget_accepts_boundary_values(prompt):
 
     assert (
         await summarizer._ask_notebook(
-            client, "notebook", prompt, phase="topic_review", ref=REF, topic_count=10
+            client,
+            "notebook",
+            prompt,
+            phase="topic_extraction",
+            ref=REF,
+            topic_count=10,
         )
         is response
     )
@@ -83,7 +95,12 @@ async def test_chat_question_budget_blocks_oversized_requests_before_dispatch(pr
     )
     with pytest.raises(PermanentSummaryError, match="4000"):
         await summarizer._ask_notebook(
-            client, "notebook", prompt, phase="topic_review", ref=REF, topic_count=10
+            client,
+            "notebook",
+            prompt,
+            phase="topic_extraction",
+            ref=REF,
+            topic_count=10,
         )
     client.chat.ask.assert_not_awaited()
 
@@ -99,13 +116,13 @@ async def test_chat_metrics_record_sizes_and_stage_without_prompt_content(caplog
         chat=SimpleNamespace(ask=AsyncMock()),
     )
     await summarizer._ask_notebook(
-        client, "notebook", prompt, phase="topic_review", ref=REF, topic_count=17
+        client, "notebook", prompt, phase="topic_extraction", ref=REF, topic_count=17
     )
 
     context = next(
         record.context
         for record in caplog.records
-        if getattr(record, "context", {}).get("phase") == "topic_review"
+        if getattr(record, "context", {}).get("phase") == "topic_extraction"
     )
     assert context["prompt_characters"] == len(prompt)
     assert context["prompt_utf8_bytes"] == len(prompt.encode("utf-8"))
@@ -129,7 +146,7 @@ async def test_status_3_is_permanent_without_replaying_the_request():
             client,
             "notebook",
             "Review the previous answer.",
-            phase="topic_review",
+            phase="topic_extraction",
             ref=REF,
             topic_count=17,
         )
