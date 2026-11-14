@@ -2,6 +2,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from importlib import metadata
 from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import AsyncMock, Mock
@@ -19,7 +20,6 @@ import vsummary.util.summarizer as summarizer_util
 from vsummary.bot import Bot
 from vsummary.cogs.autosummary.autosummary import Autosummary
 from vsummary.cogs.manualsummary.manualsummary import ManualSummary
-from vsummary.cogs.misc.ping import Ping
 from vsummary.cogs.summarizer.summarizer import Summarizer
 from vsummary.model.channel import (
     JobStatus,
@@ -2260,7 +2260,7 @@ async def test_bot_setup_loads_all_cogs_and_syncs_commands(monkeypatch):
     await bot.setup_hook()
 
     assert loaded == [
-        "vsummary.cogs.misc.ping",
+        "vsummary.cogs.misc.version",
         "vsummary.cogs.manualsummary.manualsummary",
         "vsummary.cogs.summarizer.summarizer",
         "vsummary.cogs.autosummary.autosummary",
@@ -2270,13 +2270,23 @@ async def test_bot_setup_loads_all_cogs_and_syncs_commands(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ping_command_reports_latency_in_milliseconds():
-    cog = Ping(SimpleNamespace(latency=0.1234))
+async def test_version_command_reports_installed_package_version(monkeypatch):
+    installed_version = Mock(return_value="2.3.4")
+    monkeypatch.setattr(metadata, "version", installed_version)
+    holodex = SimpleNamespace(aclose=AsyncMock())
     interaction = FakeInteraction()
 
-    await Ping.ping.callback(cog, interaction)
+    async with Bot(notebook_client=object(), holodex=holodex) as bot:
+        await bot.load_extension("vsummary.cogs.misc.version")
+        command = bot.tree.get_command("version")
+        assert command is not None
+        assert command.parameters == []
+        assert bot.tree.get_command("ping") is None
 
-    assert interaction.response.sent == "Pong! Latency: 123ms"
+        await command.callback(command.binding, interaction)
+
+    installed_version.assert_called_once_with("vsummary")
+    assert interaction.response.sent == "VSummary v2.3.4"
 
 
 @pytest.mark.asyncio

@@ -84,7 +84,7 @@ class Bot(commands.Bot):
                 sync.
         """
         cogs = [
-            "vsummary.cogs.misc.ping",
+            "vsummary.cogs.misc.version",
             "vsummary.cogs.manualsummary.manualsummary",
             "vsummary.cogs.summarizer.summarizer",
             "vsummary.cogs.autosummary.autosummary",

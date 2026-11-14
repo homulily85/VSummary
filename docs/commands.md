@@ -8,7 +8,7 @@
 | `/detail` | `video_url_or_id` (required), `topic_index` (optional) | Generates detailed content. Omitting `topic_index` generates every topic; providing one generates only that topic. |
 | `/deletecache` | `video_url_or_id` (required) | Deletes one video's cached topics and details across all languages.|
 | `/queue` | None | Lists active auto-summary and manual-summary jobs.|
-| `/ping` | None | Confirms that the bot is responding and displays gateway latency. |
+| `/version` | None | Displays the running bot's version. |
 
 ### Supported video inputs
 
